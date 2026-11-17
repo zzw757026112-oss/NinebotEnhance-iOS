@@ -87,7 +87,7 @@ static void FetchWeather(double lat, double lon) {
     NSURLSessionDataTask *task = [[NSURLSession sharedSession]
         dataTaskWithURL:url completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
         if (err || !data) {
-            os_log(gLog, "[WX] 拉取失败：%{public}@",
+            os_log(gLog, "[WX] 拉取失败：%{public}s",
                    err ? err.localizedDescription.UTF8String : "no data");
             [gDataLock lock]; gWeatherFetching = NO; [gDataLock unlock];
             return;
@@ -104,7 +104,7 @@ static void FetchWeather(double lat, double lon) {
             gWeatherAt = CFAbsoluteTimeGetCurrent();
             gWeatherFetching = NO;
             [gDataLock unlock];
-            os_log(gLog, "[WX] %{public}@", wx.UTF8String);
+            os_log(gLog, "[WX] %{public}s", wx.UTF8String);
         } else {
             [gDataLock lock]; gWeatherFetching = NO; [gDataLock unlock];
         }
@@ -156,7 +156,7 @@ static void RefreshWeatherIfNeeded(void) {
 }
 - (void)locationManager:(CLLocationManager *)manager
        didFailWithError:(NSError *)error {
-    os_log(gLog, "[WX] 定位失败：%{public}@", error.localizedDescription.UTF8String);
+    os_log(gLog, "[WX] 定位失败：%{public}s", error.localizedDescription.UTF8String);
 }
 @end
 
