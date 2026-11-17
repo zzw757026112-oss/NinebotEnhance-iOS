@@ -65,9 +65,18 @@ jobs:
       - name: Build dylib
         run: |
           set -euo pipefail
-          make
+          set -o pipefail
+          make 2>&1 | tee build.log
           echo "--- 产物定位 ---"
           find .theos -name 'NinebotEnhance.dylib' -type f -print
+
+      - name: Show build errors as annotations
+        if: failure()
+        run: |
+          echo "=== error: 行（公开可见，无需登录）==="
+          grep -E 'error:|Error [0-9]+|make: \*\*\*' build.log | head -30 | while IFS= read -r line; do echo "::error::$line"; done
+          echo "=== 日志尾部 ==="
+          tail -60 build.log
 
       - name: Verify dylib (arm64 / install_name / 自包含)
         run: |
