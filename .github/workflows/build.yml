@@ -1,0 +1,100 @@
+name: Build NinebotEnhance iOS dylib
+
+on:
+  push:
+    branches: [ main, master ]
+    paths:
+      - 'Tweak.x'
+      - 'substrate_shim.m'
+      - 'include/**'
+      - 'Makefile'
+      - '.github/workflows/build.yml'
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-dylib:
+    name: Theos (Logos) build
+    runs-on: macos-15
+    env:
+      THEOS: ${{ github.workspace }}/theos
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: |
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-path
+          xcrun --sdk iphoneos --show-sdk-version
+
+      - name: Cache Theos
+        id: theos-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.THEOS }}
+          key: theos-${{ runner.os }}-${{ hashFiles('.github/workflows/build.yml') }}-v1
+
+      - name: Setup Theos
+        run: |
+          set -euo pipefail
+          # 缓存命中也可能因符号链接/子模块损坏而不可用，这里做自愈
+          if [ ! -f "$THEOS/makefiles/common.mk" ] || [ ! -f "$THEOS/bin/logos.pl" ]; then
+            rm -rf "$THEOS"
+            # --recursive 会拉取 vendor/logos 子模块（bin/logos.pl 指向它）
+            git clone --recursive --depth 1 https://github.com/theos/theos.git "$THEOS"
+          fi
+          test -f "$THEOS/makefiles/common.mk"
+          test -f "$THEOS/bin/logos.pl"
+          perl "$THEOS/bin/logos.pl" 2>&1 | head -1 || true
+          echo "Theos ready at $THEOS"
+
+      - name: Install ldid
+        run: |
+          # Theos 用 ldid 给 dylib 做伪签名；runner 默认没有
+          HOMEBREW_NO_AUTO_UPDATE=1 brew install ldid || {
+            echo "brew 失败，改用预编译 ldid"
+            curl -fsSL -o /tmp/ldid \
+              https://github.com/ProcursusTeam/ldid/releases/latest/download/ldid_macosx_arm64
+            chmod +x /tmp/ldid && sudo mv /tmp/ldid /usr/local/bin/ldid
+          }
+          ldid -h 2>&1 | head -2 || true
+
+      - name: Build dylib
+        run: |
+          set -euo pipefail
+          make
+          echo "--- 产物定位 ---"
+          find .theos -name 'NinebotEnhance.dylib' -type f -print
+
+      - name: Verify dylib (arm64 / install_name / 自包含)
+        run: |
+          set -euo pipefail
+          DYLIB=$(find .theos -name 'NinebotEnhance.dylib' -type f | head -1)
+          test -n "$DYLIB" || { echo "::error::未找到 dylib"; exit 1; }
+          echo "dylib=$DYLIB"
+          file "$DYLIB"
+          # 必须是 arm64
+          file "$DYLIB" | grep -q 'arm64' || { echo "::error::不是 arm64"; exit 1; }
+          # install_name 必须是 TrollFools 注入约定的 Frameworks 路径
+          otool -D "$DYLIB" | grep -q '@executable_path/Frameworks/NinebotEnhance.dylib' \
+            || { echo "::error::install_name 不是 @executable_path/Frameworks/NinebotEnhance.dylib"; exit 1; }
+          # 关键：MSHookMessageEx 必须由本 dylib 定义，且未定义符号中不得残留 substrate
+          nm -gU "$DYLIB" | grep -q '_MSHookMessageEx' \
+            || { echo "::error::MSHookMessageEx 未定义（shim 没编进去）"; exit 1; }
+          if nm -u "$DYLIB" | grep -qiE 'MSHookMessageEx'; then
+            echo "::error::仍依赖外部 substrate，注入后会崩"
+            exit 1
+          fi
+          echo "✅ 校验通过：arm64、自包含、无越狱依赖"
+          mkdir -p "$GITHUB_WORKSPACE/out"
+          cp "$DYLIB" "$GITHUB_WORKSPACE/out/NinebotEnhance.dylib"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: NinebotEnhance-iOS-0.1.0-dylib
+          path: out/NinebotEnhance.dylib
+          if-no-files-found: error
