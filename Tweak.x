@@ -1,4 +1,4 @@
-// NinebotEnhance iOS v0.1.3 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
+// NinebotEnhance iOS v0.1.4 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
 //
 // 拦截点：+[NBPixelBufferConverter pixelBufferFromCGImage:]（类方法）
 //         +[NBPixelBufferConverter pixelBufferFromCGImage_Mjpeg:]（MJPEG 备用路径）
@@ -7,6 +7,13 @@
 // 再把 HUD 叠加层（小胶囊：日期时间 / 天气 / 信号 / 音量 / 电量，
 // 有音乐时再加一行歌名；来电提示）画在上面，
 // 合成后交给原实现编码发送。App 自己的 H.264/RTP/RTCP/UDP 链路不动。
+//
+// v0.1.4 改动：
+//  1. HUD设置按钮不再盖住 App 自己的齿轮按钮：我的页右上角的齿轮
+//     约在安全区顶部 +8~+36，按钮原来放 +8 正好盖住它；改成 +56，
+//     落在齿轮下方空白处。
+//  2. HUD设置按钮不再出现在自己的设置页里：NEHUDSettingsVC 的类名
+//     里也有 setting，会被匹配规则命中；现在排除所有 NEHUD* 的页面。
 //
 // v0.1.3 改动：
 //  1. HUD 翻转修复：v0.1.2 的 RenderOverlay 在自己的 bitmap 里做了
@@ -1040,6 +1047,9 @@ static void NECheckSettingsButton(void) {
                  [lower containsString:@"setting"] || [lower containsString:@"me"] ||
                  [lower containsString:@"user"] || [lower containsString:@"account"];
     if (!match) return;
+    // 排除我们自己的设置页：NEHUDSettingsVC 的类名里也有 setting，
+    // 不排除的话按钮会出现在自己的设置页右上角（还挡住第一个开关）。
+    if ([lower containsString:@"nehud"]) return;
     if (objc_getAssociatedObject(vc, &NEHUDButtonKey)) return;
     UIButton *btn = [UIButton buttonWithType:UIButtonTypeSystem];
     // contentEdgeInsets 在 iOS 15 已废弃（-Werror 下会编译失败），改用 UIButtonConfiguration（iOS 15+，本工程最低 16.0）。
@@ -1061,7 +1071,9 @@ static void NECheckSettingsButton(void) {
     UILayoutGuide *guide = vc.view.safeAreaLayoutGuide;
     [NSLayoutConstraint activateConstraints:@[
         [btn.trailingAnchor constraintEqualToAnchor:guide.trailingAnchor constant:-12],
-        [btn.topAnchor constraintEqualToAnchor:guide.topAnchor constant:8]
+        // 我的页右上角有 App 自己的齿轮按钮（约在安全区顶部 +8~+36），
+        // 按钮放 +8 会正好盖住它；下移到 +56，落在齿轮下方空白处。
+        [btn.topAnchor constraintEqualToAnchor:guide.topAnchor constant:56]
     ]];
     objc_setAssociatedObject(vc, &NEHUDButtonKey, btn, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     os_log(gLog, "[HUD] 已在 %{public}s 上加 HUD设置 按钮", name.UTF8String);
@@ -1258,7 +1270,7 @@ static void NECheckSettingsButton(void) {
                hasSel ? "YES" : "NO");
     }
 
-    os_log(gLog, "NinebotEnhance iOS 0.1.3 已加载（小胶囊 HUD：日期/天气/信号/音量/电量/音乐/来电）");
+    os_log(gLog, "NinebotEnhance iOS 0.1.4 已加载（小胶囊 HUD：日期/天气/信号/音量/电量/音乐/来电）");
 
     // 电量监听 + 定位 + 来电观察，全部在主队列 / 后台队列做，不阻塞加载
     dispatch_async(dispatch_get_main_queue(), ^{

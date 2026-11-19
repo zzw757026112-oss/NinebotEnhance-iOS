@@ -1,9 +1,15 @@
-# NinebotEnhance iOS v0.1.3
+# NinebotEnhance iOS v0.1.4
 
 给官方九号出行 App（`cn.ninebot.segway`）的注入插件：钩住投屏画面的
 编码器入口，在 App 自己的导航画面上叠加一层 HUD，再交给 App 原来的
 H.264/RTP/RTCP/UDP 链路发给仪表。思路来自安卓的 NinebotEnhance，
 但代码是全新写的 iOS Theos 插件（安卓代码一行都搬不过来）。
+
+## v0.1.4 改了什么
+
+**1. HUD设置按钮不再盖住 App 自己的齿轮按钮。** 我的页右上角的齿轮约在安全区顶部 +8~+36，按钮原来放 +8 正好盖住它；本版下移到 +56，落在齿轮下方空白处。
+
+**2. HUD设置按钮不再出现在自己的设置页里。** NEHUDSettingsVC 的类名里也有 setting，会被匹配规则命中；本版排除所有 NEHUD* 的页面。
 
 ## v0.1.3 改了什么
 
@@ -53,9 +59,9 @@ defaults write cn.ninebot.segway NEHUDFontSize -int 2       # 0 小 1 中 2 大
 ## 安装（巨魔注入器 TrollFools）
 
 1. 从 GitHub Actions 产物下载 `NinebotEnhance.dylib`
-  （artifact 名 `NinebotEnhance-iOS-0.1.3-dylib`；注意：网站上的 workflow
+  （artifact 名 `NinebotEnhance-iOS-0.1.4-dylib`；注意：网站上的 workflow
   文件目前还是 0.1.1 版，所以实际下载到的 artifact 名字仍是
-  `NinebotEnhance-iOS-0.1.1-dylib`，但里面装的是 0.1.3，以加载日志为准）。
+  `NinebotEnhance-iOS-0.1.1-dylib`，但里面装的是 0.1.4，以加载日志为准）。
 2. 打开巨魔注入器（TrollFools），选择九号出行 App，把
    `NinebotEnhance.dylib` 注入进去（注入器会把它放到 App 的
    `Frameworks/` 目录并加 load 命令；dylib 的 install_name 已按
@@ -75,7 +81,7 @@ log stream --predicate 'subsystem == "com.user.ninebotenhance"'
 打开九号出行后应看到：
 
 ```
-NinebotEnhance iOS 0.1.3 已加载（小胶囊 HUD：日期/天气/信号/音量/电量/音乐/来电）
+NinebotEnhance iOS 0.1.4 已加载（小胶囊 HUD：日期/天气/信号/音量/电量/音乐/来电）
 [HOOK] NBPixelBufferConverter 已找到，pixelBufferFromCGImage: YES
 ```
 
@@ -103,7 +109,7 @@ defaults write cn.ninebot.segway NBProjectionOverride -bool NO
 
 再重开九号出行即恢复原生画面。改回 YES 重新启用。
 
-## v0.1.3 不包含
+## v0.1.4 不包含
 
 - **其他 App 的通知**：从九号出行 App 进程里用公开 API 读不到别的
   App 的通知，那需要一个 SpringBoard 侧的组件，以后版本再做。
