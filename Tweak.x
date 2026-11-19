@@ -1143,7 +1143,7 @@ static void NECheckSettingsButton(void) {
         [btn.topAnchor constraintEqualToAnchor:guide.topAnchor constant:56]
     ]];
     objc_setAssociatedObject(vc, &NEHUDButtonKey, btn, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    os_log(gLog, "[HUD] 已在 %{public}s 上加 HUD设置 按钮", name.UTF8String);
+    os_log(gLog, "[HUD] 已在 %{public}s 上加 HUD设置 按钮", NSStringFromClass([vc class]).UTF8String);
 }
 
 @implementation NEHUDSettingsVC
@@ -1567,7 +1567,7 @@ static BOOL NEProbeAttempt(int attempt) {
             os_log(gLog, "[PROBE] %{public}s 单例拿到（入口 %@）", cn.UTF8String, usedSel);
             id holder = NEProbeFindCommandsHolder(inst, 0, [NSMutableSet set]);
             if (!holder) {
-                os_log(gLog, "[PROBE]   顺着 ivar 没找到含 deviceCommands/commandDict 的对象", cn.UTF8String);
+                os_log(gLog, "[PROBE]   顺着 ivar 没找到含 deviceCommands/commandDict 的对象");
                 continue;
             }
             NSString *holderCls = NSStringFromClass(object_getClass(holder));
@@ -1575,7 +1575,7 @@ static BOOL NEProbeAttempt(int attempt) {
             os_log(gLog, "[PROBE]   指令表持有者：%{public}s", holderCls.UTF8String);
             id ser = NEProbeSer(holder, 0, [NSMutableSet set]);
             if (!ser) {
-                os_log(gLog, "[PROBE]   持有者序列化为空", cn.UTF8String);
+                os_log(gLog, "[PROBE]   持有者序列化为空");
                 continue;
             }
             holders[cn] = ser;
