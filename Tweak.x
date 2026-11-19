@@ -984,11 +984,22 @@ static const char NEHUDButtonKey = 0;
 @end
 
 static UIViewController *NETopViewController(void) {
+    // UIApplication.windows 在 iOS 15 已废弃（-Werror 下会编译失败），改走 connectedScenes → UIWindowScene.windows。
     UIWindow *keyWindow = nil;
-    for (UIWindow *w in [UIApplication sharedApplication].windows) {
-        if (w.isKeyWindow) { keyWindow = w; break; }
+    for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
+        if (![scene isKindOfClass:[UIWindowScene class]]) continue;
+        for (UIWindow *w in ((UIWindowScene *)scene).windows) {
+            if (w.isKeyWindow) { keyWindow = w; break; }
+        }
+        if (keyWindow) break;
     }
-    if (!keyWindow) keyWindow = [UIApplication sharedApplication].windows.firstObject;
+    if (!keyWindow) {
+        for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
+            if (![scene isKindOfClass:[UIWindowScene class]]) continue;
+            keyWindow = ((UIWindowScene *)scene).windows.firstObject;
+            if (keyWindow) break;
+        }
+    }
     UIViewController *vc = keyWindow.rootViewController;
     while (vc) {
         if (vc.presentedViewController) { vc = vc.presentedViewController; continue; }
@@ -1031,11 +1042,18 @@ static void NECheckSettingsButton(void) {
     if (!match) return;
     if (objc_getAssociatedObject(vc, &NEHUDButtonKey)) return;
     UIButton *btn = [UIButton buttonWithType:UIButtonTypeSystem];
-    [btn setTitle:@"HUD设置" forState:UIControlStateNormal];
-    btn.titleLabel.font = [UIFont systemFontOfSize:14 weight:UIFontWeightSemibold];
-    btn.backgroundColor = [[UIColor systemBlueColor] colorWithAlphaComponent:0.12];
-    btn.layer.cornerRadius = 8;
-    btn.contentEdgeInsets = UIEdgeInsetsMake(6, 10, 6, 10);
+    // contentEdgeInsets 在 iOS 15 已废弃（-Werror 下会编译失败），改用 UIButtonConfiguration（iOS 15+，本工程最低 16.0）。
+    UIButtonConfiguration *cfg = [UIButtonConfiguration plainButtonConfiguration];
+    cfg.title = @"HUD设置";
+    cfg.contentInsets = NSDirectionalEdgeInsetsMake(6, 10, 6, 10);
+    cfg.background.backgroundColor = [[UIColor systemBlueColor] colorWithAlphaComponent:0.12];
+    cfg.background.cornerRadius = 8;
+    cfg.titleTextAttributesTransformer = ^NSDictionary<NSAttributedStringKey, id> * _Nonnull(NSDictionary<NSAttributedStringKey, id> * _Nonnull incoming) {
+        NSMutableDictionary *out = [incoming mutableCopy];
+        out[NSFontAttributeName] = [UIFont systemFontOfSize:14 weight:UIFontWeightSemibold];
+        return out;
+    };
+    btn.configuration = cfg;
     [btn addTarget:[NEHUDButtonHandler shared] action:@selector(openSettings:)
         forControlEvents:UIControlEventTouchUpInside];
     btn.translatesAutoresizingMaskIntoConstraints = NO;
