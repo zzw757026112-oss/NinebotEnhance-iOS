@@ -1,9 +1,51 @@
-# NinebotEnhance iOS v0.1.4
+# NinebotEnhance iOS v0.1.5
 
 给官方九号出行 App（`cn.ninebot.segway`）的注入插件：钩住投屏画面的
 编码器入口，在 App 自己的导航画面上叠加一层 HUD，再交给 App 原来的
 H.264/RTP/RTCP/UDP 链路发给仪表。思路来自安卓的 NinebotEnhance，
 但代码是全新写的 iOS Theos 插件（安卓代码一行都搬不过来）。
+
+## v0.1.5 改了什么
+
+**车辆数据探测（Route B Phase 1，只读侦察）并进插件。** 直接走蓝牙读
+M3（九号 M395C MAX）已经试过 9 帧 PRE_COMM，全无回应，此路不通。
+改从九号 App 自己的蓝牙栈里找数据：App 内部有
+`NBDynamicModule.DynamicTool`（相当于安卓的 DynamicDevice），手里有
+每款车的指令表（`commandDict`），App 自己会跟车握手解密。本版只做
+侦察，**不发任何蓝牙指令**：
+
+1. **加载后 5 秒**，把 5 个候选类（`DynamicTool` / `DynamicDebugManager` /
+   `BleCommandDebugManager` / `DebugTool` / `BleCommandDebugVC`）的存在性
+   + 完整方法列表打到 os_log，找含 Response / receive / sendCommand /
+   Command / Frame / handle 的选择器——那就是接收/发送方法；
+2. **之后每 10 秒试一次（最多 12 次，2 分钟）**：按 cmddump 的 10 个单例
+   选择器找实例，顺着 ivar 找到持有 `deviceCommands` / `commandDict` 的
+   对象，序列化写 `Documents/BleCmdDump.json`，并查里面有没有 `rSpeed` /
+   `rPower` / `rVrlaVoltage` / `rBattery` / `rTirePressureRealTimeInfo`；
+   写出非空结果就停。
+
+全部操作都有 nil / respondsToSelector / @try 保护，类不存在或单例拿不到
+只记日志，绝不崩；HUD 和设置按钮不受影响。
+
+**怎么用：** 车通电，打开九号出行（连上车），等 2 分钟；然后用 Filza
+把 `Documents/BleCmdDump.json` 导出来发回，再把 os_log 里 `[PROBE]`
+开头的日志发回（或截图）。如果 12 次都没拿到，日志里会写原因——
+大概率是车没连上，或单例入口不在这 4 个类上。
+
+日志例子：
+
+```
+[PROBE] _TtC15NBDynamicModule11DynamicTool 存在（父类 NSObject），实例方法 12 个，类方法 3 个，可作单例入口的选择器：shared
+[PROBE] ⭐ _TtC15NBDynamicModule11DynamicTool 实例方法里值得注意的（可能含接收/发送）：
+[PROBE]     ⭐ onResponse:
+[PROBE] _TtC15NBDynamicModule11DynamicTool 单例拿到（入口 shared）
+[PROBE]   指令表持有者：_TtC15NBDynamicModule11DynamicTool
+[PROBE] 目标指令 rSpeed：有
+[PROBE] 目标指令 rVrlaVoltage：有
+[PROBE] ✅ 已写入 /var/mobile/Containers/Data/Application/…/Documents/BleCmdDump.json（48213 B，第 2 次尝试）
+```
+
+关掉探测：`defaults write cn.ninebot.segway NEProbeVehicle -bool NO`
 
 ## v0.1.4 改了什么
 

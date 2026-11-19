@@ -1,4 +1,4 @@
-// NinebotEnhance iOS v0.1.4 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
+// NinebotEnhance iOS v0.1.5 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
 //
 // 拦截点：+[NBPixelBufferConverter pixelBufferFromCGImage:]（类方法）
 //         +[NBPixelBufferConverter pixelBufferFromCGImage_Mjpeg:]（MJPEG 备用路径）
@@ -7,6 +7,26 @@
 // 再把 HUD 叠加层（小胶囊：日期时间 / 天气 / 信号 / 音量 / 电量，
 // 有音乐时再加一行歌名；来电提示）画在上面，
 // 合成后交给原实现编码发送。App 自己的 H.264/RTP/RTCP/UDP 链路不动。
+//
+// v0.1.5 改动：车辆数据探测（Route B Phase 1，只读侦察）并进插件。
+//  直接走蓝牙读 M3（九号 M395C MAX）已经试过 9 帧 PRE_COMM，全无回应，
+//  此路不通。改从九号 App 自己的蓝牙栈里找数据：App 内部有
+//  NBDynamicModule.DynamicTool（相当于 Android 的 DynamicDevice），
+//  手里有每款车的指令表（commandDict），App 自己会跟车握手解密。
+//  本版只做侦察，不发任何蓝牙指令：
+//   1. 加载后 5 秒，把 5 个候选类的存在性 + 完整方法列表打到 os_log
+//      （找含 Response / receive / sendCommand / Command / Frame /
+//      handle 的选择器——那就是接收/发送方法）；
+//   2. 之后每 10 秒试一次（最多 12 次，2 分钟）：按 cmddump 的 10 个
+//      单例选择器找 DynamicTool 等类的实例，顺着 ivar 找到持有
+//      deviceCommands / commandDict 的对象，序列化写
+//      Documents/BleCmdDump.json，查里面有没有 rSpeed / rPower /
+//      rVrlaVoltage / rBattery / rTirePressureRealTimeInfo；
+//      写出非空结果就停。
+//  全部操作都有 nil / respondsToSelector / @try 保护，类不存在或
+//  单例拿不到只记日志，绝不崩；HUD 和设置按钮不受影响。
+//  关：defaults write cn.ninebot.segway NEProbeVehicle -bool NO
+//  产出：Documents/BleCmdDump.json + os_log（[PROBE] 前缀）。
 //
 // v0.1.4 改动：
 //  1. HUD设置按钮不再盖住 App 自己的齿轮按钮：我的页右上角的齿轮
@@ -50,7 +70,7 @@
 //   NEHUDPosition（int，默认 0：0 右下 1 左下 2 左上 3 右上）
 //   NEHUDFontSize（int，默认 1：0 小 1 中 2 大）
 // 日志：os_log subsystem "com.user.ninebotenhance"，只打加载、钩点检查、
-// 帧计数（#1 / 每 100 帧）、天气和来电状态变化。
+// 帧计数（#1 / 每 100 帧）、天气和来电状态变化、车辆探测结果（[PROBE]）。
 
 #import <Foundation/Foundation.h>
 #import <CoreGraphics/CoreGraphics.h>
@@ -1204,6 +1224,390 @@ static void NECheckSettingsButton(void) {
 
 @end
 
+// ---------------- 车辆数据探测（v0.1.5，Route B Phase 1：只读侦察）----------------
+//
+// 目标：找出九号 App 里相当于 Android DynamicDevice 的接收/发送路径，
+// 以及 M3（九号 M395C MAX）自己的指令表里有没有需要的指令。
+// 做法照 Xiaolangs tweak-cmddump（单例试探 + ivar 递归 + JSON 写盘）
+// 和 tweak-theos DumpSelectors（class_copyMethodList 打方法列表）。
+//
+// 只读：本节代码永远不发蓝牙指令、不调任何发送方法、不写任何特征值，
+// 只读类/方法信息和 App 内存里已有的指令表。
+// 防御：每一步都有 nil / respondsToSelector / @try 保护；
+// 类不存在、单例拿不到、指令表为空都只记日志，绝不崩。
+// 触发：加载后 5 秒打一次方法列表；之后每 10 秒试取一次指令表，
+// 最多 12 次（2 分钟），写出非空结果就停。车没连上时拿不到是正常的。
+// 开关：defaults write cn.ninebot.segway NEProbeVehicle -bool NO
+// 产出：Documents/BleCmdDump.json + os_log（[PROBE] 前缀）。
+
+static dispatch_source_t gProbeTimer   = nil;
+static dispatch_queue_t  gProbeQueue   = nil;
+static int               gProbeAttempts = 0;
+static BOOL              gProbeDone     = NO;
+static NSMutableDictionary *gProbeClassInfo = nil;
+
+static NSString *NEProbeCN(id o) { return o ? NSStringFromClass(object_getClass(o)) : @""; }
+
+static NSString *NEProbeDocPath(NSString *name) {
+    NSString *dir = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
+    return dir ? [dir stringByAppendingPathComponent:name] : name;
+}
+
+static NSArray<NSString *> *NEProbeTargetCommands(void) {
+    return @[@"rSpeed", @"rPower", @"rVrlaVoltage", @"rBattery",
+             @"rTirePressureRealTimeInfo",
+             @"rVoltage", @"rVoltage2", @"rVoltage3", @"rBool", @"rBmsCycleCount"];
+}
+
+static NSArray<NSString *> *NEProbeCandidateClasses(void) {
+    return @[@"_TtC15NBDynamicModule11DynamicTool",
+             @"_TtC15NBDynamicModule19DynamicDebugManager",
+             @"_TtC7Vehicle22BleCommandDebugManager",
+             @"_TtC17NBBluetoothModule9DebugTool",
+             @"_TtC7Vehicle17BleCommandDebugVC"];
+}
+
+// ---- 读一个 ivar（对象直接取，标量按类型编码读；cmddump 同款）----
+
+static id NEProbeReadIvar(id obj, Ivar iv) {
+    const char *t = ivar_getTypeEncoding(iv);
+    if (!t) return nil;
+    if (t[0] == '@') { @try { return object_getIvar(obj, iv); } @catch (__unused NSException *e) { return nil; } }
+    ptrdiff_t off = ivar_getOffset(iv);
+    char *base = (char *)(__bridge void *)obj;
+    switch (t[0]) {
+        case 'c': return @(*(char *)(base+off));
+        case 'B': return @(*(BOOL *)(base+off));
+        case 's': return @(*(short *)(base+off));
+        case 'i': return @(*(int *)(base+off));
+        case 'l': return @(*(long *)(base+off));
+        case 'q': return @(*(long long *)(base+off));
+        case 'f': return @(*(float *)(base+off));
+        case 'd': return @(*(double *)(base+off));
+        default:  return nil;
+    }
+}
+
+// ---- 递归序列化任意对象（限深 4、防环、数组/字典各限 300 条）----
+
+static id NEProbeSer(id obj, int depth, NSMutableSet *seen) {
+    if (!obj || depth > 4) return nil;
+    if ([obj isKindOfClass:[NSString class]] || [obj isKindOfClass:[NSNumber class]]) return obj;
+    if ([obj isKindOfClass:[NSNull class]]) return [NSNull null];
+    if ([seen containsObject:[NSValue valueWithNonretainedObject:obj]]) return @"(cycle)";
+    [seen addObject:[NSValue valueWithNonretainedObject:obj]];
+
+    if ([obj isKindOfClass:[NSArray class]]) {
+        NSMutableArray *a = [NSMutableArray array];
+        int i = 0;
+        for (id e in (NSArray *)obj) {
+            if (i++ >= 300) { [a addObject:@"…（已截断，只取前 300 条）"]; break; }
+            [a addObject:NEProbeSer(e, depth+1, seen) ?: [NSNull null]];
+        }
+        return a;
+    }
+    if ([obj isKindOfClass:[NSDictionary class]]) {
+        NSMutableDictionary *d = [NSMutableDictionary dictionary];
+        __block int i = 0;
+        [(NSDictionary *)obj enumerateKeysAndObjectsUsingBlock:^(id k, id v, BOOL *stop) {
+            if (i++ >= 300) { d[@"…truncated"] = @"只取前 300 条"; *stop = YES; return; }
+            d[[k description]] = NEProbeSer(v, depth+1, seen) ?: [NSNull null];
+        }];
+        return d;
+    }
+    if ([obj isKindOfClass:[NSData class]]) {
+        return [NSString stringWithFormat:@"<NSData %luB>", (unsigned long)[(NSData *)obj length]];
+    }
+    // 自定义对象：读它的 ivar
+    NSMutableDictionary *d = [NSMutableDictionary dictionary];
+    d[@"_class"] = NEProbeCN(obj);
+    unsigned int n = 0;
+    Ivar *ivs = class_copyIvarList(object_getClass(obj), &n);
+    for (unsigned int i = 0; i < n; i++) {
+        NSString *nm = [NSString stringWithUTF8String:ivar_getName(ivs[i])] ?: @"?";
+        id v = NEProbeReadIvar(obj, ivs[i]);
+        if (!v) continue;
+        id s = NEProbeSer(v, depth+1, seen);
+        if (s) d[nm] = s;
+    }
+    free(ivs);
+    return d;
+}
+
+// ---- 从序列化结果里收集所有字典键 + 字符串值（用来查目标指令在不在）----
+
+static void NEProbeCollectKeys(id obj, int depth, NSMutableSet *seen, NSMutableSet *out) {
+    if (!obj || depth > 4 || out.count > 2000) return;
+    if ([obj isKindOfClass:[NSString class]]) {
+        if (((NSString *)obj).length <= 64) [out addObject:obj];
+        return;
+    }
+    if ([obj isKindOfClass:[NSNumber class]] || [obj isKindOfClass:[NSNull class]]) return;
+    if ([seen containsObject:[NSValue valueWithNonretainedObject:obj]]) return;
+    [seen addObject:[NSValue valueWithNonretainedObject:obj]];
+    if ([obj isKindOfClass:[NSArray class]]) {
+        for (id e in (NSArray *)obj) NEProbeCollectKeys(e, depth+1, seen, out);
+    } else if ([obj isKindOfClass:[NSDictionary class]]) {
+        [(NSDictionary *)obj enumerateKeysAndObjectsUsingBlock:^(id k, id v, __unused BOOL *s) {
+            if ([k isKindOfClass:[NSString class]] && ((NSString *)k).length <= 64) [out addObject:k];
+            NEProbeCollectKeys(v, depth+1, seen, out);
+        }];
+    }
+}
+
+// ---- 单例试探（cmddump 的 10 个入口）----
+
+static NSArray<NSString *> *NEProbeSingletonSelectors(void) {
+    return @[@"shared", @"sharedInstance", @"defaultManager", @"standard", @"instance",
+             @"manager", @"current", @"default", @"sharedManager", @"singleton"];
+}
+
+static id NEProbeTrySingleton(Class cls, NSString **outSel) {
+    if (!cls) return nil;
+    for (NSString *selName in NEProbeSingletonSelectors()) {
+        SEL s = NSSelectorFromString(selName);
+        if (![cls respondsToSelector:s]) continue;
+        @try {
+            id o = ((id (*)(id, SEL))objc_msgSend)(cls, s);
+            if (o) { if (outSel) *outSel = selName; return o; }
+        } @catch (__unused NSException *e) {}
+    }
+    return nil;
+}
+
+// ---- 在对象 ivar 里递归找持有 deviceCommands / commandDict 的对象 ----
+
+static id NEProbeFindCommandsHolder(id obj, int depth, NSMutableSet *seen) {
+    if (!obj || depth > 3) return nil;
+    if ([seen containsObject:[NSValue valueWithNonretainedObject:obj]]) return nil;
+    [seen addObject:[NSValue valueWithNonretainedObject:obj]];
+
+    NSArray *want = @[@"deviceCommands", @"commandDict", @"commands"];
+    unsigned int n = 0;
+    Ivar *ivs = class_copyIvarList(object_getClass(obj), &n);
+    for (unsigned int i = 0; i < n; i++) {
+        NSString *nm = [NSString stringWithUTF8String:ivar_getName(ivs[i])] ?: @"";
+        if ([want containsObject:nm]) {
+            id v = NEProbeReadIvar(obj, ivs[i]);
+            if (v) { free(ivs); return obj; }
+        }
+    }
+    // 再往下钻一层
+    for (unsigned int i = 0; i < n; i++) {
+        const char *t = ivar_getTypeEncoding(ivs[i]);
+        if (!t || t[0] != '@') continue;
+        id v = NEProbeReadIvar(obj, ivs[i]);
+        if (!v) continue;
+        id hit = NEProbeFindCommandsHolder(v, depth+1, seen);
+        if (hit) { free(ivs); return hit; }
+    }
+    free(ivs);
+    return nil;
+}
+
+// ---- 方法列表：只看名字里有没有接收/发送的线索 ----
+
+static BOOL NEProbeIsInteresting(NSString *selName) {
+    static NSArray<NSString *> *kws = nil;
+    static dispatch_once_t once = 0;
+    dispatch_once(&once, ^{
+        kws = @[@"Response", @"receive", @"didReceive", @"sendCommand", @"send",
+                @"Command", @"Frame", @"handle", @"onResponse", @"intercept",
+                @"hasCommand", @"getSn", @"createCommand"];
+    });
+    for (NSString *k in kws) {
+        if ([selName rangeOfString:k options:NSCaseInsensitiveSearch].location != NSNotFound) return YES;
+    }
+    return NO;
+}
+
+static void NEProbeLogMethodList(Method *ms, unsigned int n, const char *kind, const char *clsName) {
+    if (n == 0) return;
+    const unsigned int kMaxLog = 200;
+    NSMutableArray<NSString *> *interesting = [NSMutableArray array];
+    for (unsigned int i = 0; i < n; i++) {
+        const char *s = sel_getName(method_getName(ms[i]));
+        if (!s) continue;
+        NSString *name = [NSString stringWithUTF8String:s];
+        if (name.length && NEProbeIsInteresting(name)) [interesting addObject:name];
+        if (i < kMaxLog)
+            os_log(gLog, "[PROBE]   %{public}s %{public}s -%{public}s", clsName, kind, s);
+    }
+    if (n > kMaxLog)
+        os_log(gLog, "[PROBE]   %{public}s %{public}s方法共 %u 个，只打了前 %u 个", clsName, kind, n, kMaxLog);
+    if (interesting.count) {
+        os_log(gLog, "[PROBE] ⭐ %{public}s %{public}s方法里值得注意的（可能含接收/发送）：", clsName, kind);
+        for (NSString *name in interesting)
+            os_log(gLog, "[PROBE]     ⭐ %{public}s", name.UTF8String);
+    } else {
+        os_log(gLog, "[PROBE]   %{public}s %{public}s方法里没有含 Response/receive/send/Command/Frame/handle 的选择器", clsName, kind);
+    }
+}
+
+static void NEProbeDumpMethods(const char *clsName) {
+    Class c = objc_getClass(clsName);
+    if (!gProbeClassInfo) gProbeClassInfo = [NSMutableDictionary dictionary];
+    NSMutableDictionary *entry = [NSMutableDictionary dictionary];
+    if (!c) {
+        entry[@"exists"] = @NO;
+        gProbeClassInfo[@(clsName)] = entry;
+        os_log(gLog, "[PROBE] %{public}s 不存在（6.10.12 相对 6.10.9 改名了？）", clsName);
+        return;
+    }
+    entry[@"exists"] = @YES;
+    Class superCls = class_getSuperclass(c);
+    if (superCls) entry[@"superclass"] = NSStringFromClass(superCls);
+
+    unsigned int nInst = 0;
+    Method *inst = class_copyMethodList(c, &nInst);
+    entry[@"instanceMethods"] = @(nInst);
+    unsigned int nCls = 0;
+    Method *clsMethods = class_copyMethodList(object_getClass(c), &nCls);
+    entry[@"classMethods"] = @(nCls);
+
+    NSMutableArray *sels = [NSMutableArray array];
+    for (NSString *name in NEProbeSingletonSelectors()) {
+        if ([c respondsToSelector:NSSelectorFromString(name)]) [sels addObject:name];
+    }
+    entry[@"singletonSelectors"] = sels;
+
+    os_log(gLog, "[PROBE] %{public}s 存在（父类 %{public}s），实例方法 %u 个，类方法 %u 个，可作单例入口的选择器：%{public}s",
+           clsName, superCls ? class_getName(superCls) : "(无)", nInst, nCls,
+           sels.count ? [sels componentsJoinedByString:@", "].UTF8String : "(无)");
+    if (nInst == 0 && nCls == 0)
+        os_log(gLog, "[PROBE] ⚠️ %{public}s 没有任何 ObjC 可见方法——可能是 Swift-only 类，ObjC hook 挂不上（研究 §3 gap 7）", clsName);
+
+    NEProbeLogMethodList(inst, nInst, "实例", clsName);
+    NEProbeLogMethodList(clsMethods, nCls, "类", clsName);
+    free(inst);
+    free(clsMethods);
+    gProbeClassInfo[@(clsName)] = entry;
+}
+
+static void NEProbeDumpClassesOnce(void) {
+    os_log(gLog, "[PROBE] ---- 类 + 方法列表（一次）----");
+    for (NSString *cn in NEProbeCandidateClasses()) NEProbeDumpMethods(cn.UTF8String);
+    os_log(gLog, "[PROBE] ---- 类 + 方法列表结束 ----");
+}
+
+// ---- 一次取指令表尝试：单例 → 找持有者 → 序列化 → 查目标指令 → 写 JSON ----
+
+static BOOL NEProbeAttempt(int attempt) {
+    os_log(gLog, "[PROBE] 第 %d 次尝试取指令表（共 12 次）", attempt);
+    NSArray<NSString *> *candClasses = @[@"_TtC15NBDynamicModule11DynamicTool",
+                                         @"_TtC15NBDynamicModule19DynamicDebugManager",
+                                         @"_TtC7Vehicle22BleCommandDebugManager",
+                                         @"_TtC17NBBluetoothModule9DebugTool"];
+    NSMutableDictionary *report = [NSMutableDictionary dictionary];
+    report[@"probe"] = @"NinebotEnhance iOS 0.1.5";
+    report[@"attempt"] = @(attempt);
+    report[@"date"] = [[NSDate date] description];
+    if (gProbeClassInfo) report[@"classes"] = gProbeClassInfo;
+    NSMutableDictionary *singletons = [NSMutableDictionary dictionary];
+    NSMutableDictionary *holders = [NSMutableDictionary dictionary];
+    NSMutableSet *foundKeys = [NSMutableSet set];
+
+    @try {
+        for (NSString *cn in candClasses) {
+            Class c = objc_getClass(cn.UTF8String);
+            if (!c) continue;
+            NSString *usedSel = nil;
+            id inst = NEProbeTrySingleton(c, &usedSel);
+            if (!inst) {
+                os_log(gLog, "[PROBE] %{public}s 单例：10 个入口都拿不到", cn.UTF8String);
+                continue;
+            }
+            os_log(gLog, "[PROBE] %{public}s 单例拿到（入口 %@）", cn.UTF8String, usedSel);
+            id holder = NEProbeFindCommandsHolder(inst, 0, [NSMutableSet set]);
+            if (!holder) {
+                os_log(gLog, "[PROBE]   顺着 ivar 没找到含 deviceCommands/commandDict 的对象", cn.UTF8String);
+                continue;
+            }
+            NSString *holderCls = NSStringFromClass(object_getClass(holder));
+            singletons[cn] = @{@"accessor": usedSel ?: @"?", @"holderClass": holderCls};
+            os_log(gLog, "[PROBE]   指令表持有者：%{public}s", holderCls.UTF8String);
+            id ser = NEProbeSer(holder, 0, [NSMutableSet set]);
+            if (!ser) {
+                os_log(gLog, "[PROBE]   持有者序列化为空", cn.UTF8String);
+                continue;
+            }
+            holders[cn] = ser;
+            NSMutableSet *keys = [NSMutableSet set];
+            NEProbeCollectKeys(ser, 0, [NSMutableSet set], keys);
+            for (NSString *t in NEProbeTargetCommands()) {
+                if ([keys containsObject:t]) [foundKeys addObject:t];
+            }
+        }
+    } @catch (NSException *e) {
+        os_log(gLog, "[PROBE] 尝试过程异常：%{public}s", e.reason.UTF8String ?: "?");
+    }
+
+    if (!holders.count) {
+        os_log(gLog, "[PROBE] 第 %d 次尝试：没拿到指令表", attempt);
+        return NO;
+    }
+
+    report[@"singletons"] = singletons;
+    report[@"holders"] = holders;
+    NSMutableDictionary *targets = [NSMutableDictionary dictionary];
+    for (NSString *t in NEProbeTargetCommands()) targets[t] = @([foundKeys containsObject:t]);
+    report[@"targets"] = targets;
+
+    for (NSString *t in NEProbeTargetCommands())
+        os_log(gLog, "[PROBE] 目标指令 %{public}s：%{public}s", t.UTF8String,
+               [foundKeys containsObject:t] ? "有" : "无");
+
+    NSError *err = nil;
+    NSData *json = [NSJSONSerialization dataWithJSONObject:report
+                    options:NSJSONWritingPrettyPrinted | NSJSONWritingSortedKeys error:&err];
+    if (!json) {
+        os_log(gLog, "[PROBE] ❌ JSON 序列化失败：%{public}s", err.localizedDescription.UTF8String ?: "?");
+        return NO;
+    }
+    NSString *path = NEProbeDocPath(@"BleCmdDump.json");
+    if (![json writeToFile:path atomically:YES]) {
+        os_log(gLog, "[PROBE] ❌ 写文件失败：%{public}s", path.UTF8String);
+        return NO;
+    }
+    os_log(gLog, "[PROBE] ✅ 已写入 %{public}s（%lu B，第 %d 次尝试）", path.UTF8String,
+           (unsigned long)json.length, attempt);
+    return YES;
+}
+
+// ---- 启动：5 秒后打方法列表，之后每 10 秒试取指令表，最多 12 次 ----
+
+static void NEProbeStart(void) {
+    id v = [[NSUserDefaults standardUserDefaults] objectForKey:@"NEProbeVehicle"];
+    if (v && ![v boolValue]) {
+        os_log(gLog, "[PROBE] 已关（NEProbeVehicle=NO）");
+        return;
+    }
+    gProbeQueue = dispatch_queue_create("com.user.ninebotenhance.probe", DISPATCH_QUEUE_SERIAL);
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5 * NSEC_PER_SEC)), gProbeQueue, ^{
+        NEProbeDumpClassesOnce();
+    });
+    gProbeTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, gProbeQueue);
+    dispatch_source_set_timer(gProbeTimer, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(10 * NSEC_PER_SEC)),
+                              10 * NSEC_PER_SEC, NSEC_PER_SEC);
+    dispatch_source_set_event_handler(gProbeTimer, ^{
+        if (gProbeDone) { dispatch_source_cancel(gProbeTimer); return; }
+        gProbeAttempts++;
+        if (gProbeAttempts > 12) {
+            os_log(gLog, "[PROBE] 12 次尝试都没拿到指令表，停止重试（可能车没连上，或单例入口不在这 4 个类上）");
+            gProbeDone = YES;
+            dispatch_source_cancel(gProbeTimer);
+            return;
+        }
+        if (NEProbeAttempt(gProbeAttempts)) {
+            gProbeDone = YES;
+            dispatch_source_cancel(gProbeTimer);
+            os_log(gLog, "[PROBE] 探测完成：BleCmdDump.json 已写好，请把文件发回");
+        }
+    });
+    dispatch_resume(gProbeTimer);
+    os_log(gLog, "[PROBE] 车辆数据探测已启动（只读）：5 秒后打方法列表，之后每 10 秒试取指令表，最多 12 次");
+}
+
 // ---------------- Hooks ----------------
 %hook NBPixelBufferConverter
 
@@ -1270,7 +1674,7 @@ static void NECheckSettingsButton(void) {
                hasSel ? "YES" : "NO");
     }
 
-    os_log(gLog, "NinebotEnhance iOS 0.1.4 已加载（小胶囊 HUD：日期/天气/信号/音量/电量/音乐/来电）");
+    os_log(gLog, "NinebotEnhance iOS 0.1.5 已加载（小胶囊 HUD：日期/天气/信号/音量/电量/音乐/来电 + 车辆数据探测）");
 
     // 电量监听 + 定位 + 来电观察，全部在主队列 / 后台队列做，不阻塞加载
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -1307,4 +1711,7 @@ static void NECheckSettingsButton(void) {
     [gCallObserver setDelegate:gCallDelegate
                          queue:dispatch_queue_create("com.user.ninebotenhance.calls",
                                                      DISPATCH_QUEUE_SERIAL)];
+
+    // 车辆数据探测（只读侦察，见上文 NEProbeStart）
+    NEProbeStart();
 }
