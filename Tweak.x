@@ -1,4 +1,4 @@
-// NinebotEnhance iOS v0.1.1 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
+// NinebotEnhance iOS v0.1.2 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
 //
 // 拦截点：+[NBPixelBufferConverter pixelBufferFromCGImage:]（类方法）
 //         +[NBPixelBufferConverter pixelBufferFromCGImage_Mjpeg:]（MJPEG 备用路径）
@@ -341,7 +341,7 @@ static CGImageRef OverlayForSize(size_t w, size_t h) {
     if (!cache || cw != w || ch != h || ![key isEqualToString:cacheKey]) {
         if (cache) { CGImageRelease(cache); cache = NULL; }
         cache = RenderOverlay(w, h, timeStr, battStr, wxStr, callActive);
-        cacheKey = key;
+        cacheKey = [key copy];
         cw = w; ch = h;
     }
     at = now;
@@ -350,8 +350,10 @@ static CGImageRef OverlayForSize(size_t w, size_t h) {
     return out;
 }
 
-// 原画面 + 叠加层合成一张新图。原图必须原样通过（不加任何变换），
-// 否则整帧在仪表上是颠倒的；只有叠加层在局部翻转里画。
+// 原画面 + 叠加层合成一张新图。原图和叠加层都直接画，不加任何翻转：
+// RenderOverlay 返回的已经是正向图（它内部翻转过一次，文字才能正着画），
+// 再翻一次会把 HUD 翻成倒置、移到画面上方仪表表盘的遮挡区里——v0.1.1
+// 就是这么把 HUD 藏起来的。两边都不翻转，导航正向，HUD 回到右下角。
 static CGImageRef CompositeWithOverlay(CGImageRef original) {
     size_t w = CGImageGetWidth(original), h = CGImageGetHeight(original);
     if (w == 0 || h == 0) return NULL;
@@ -366,13 +368,10 @@ static CGImageRef CompositeWithOverlay(CGImageRef original) {
 
     // 原图直接画，不翻转：行顺序原样通过，钩子对原图透明。
     CGContextDrawImage(ctx, CGRectMake(0, 0, w, h), original);
-    // 叠加层（RenderOverlay 返回的正向图）只在局部翻转里画，
-    // 画完恢复，不影响原图。
-    CGContextSaveGState(ctx);
-    CGContextTranslateCTM(ctx, 0, (CGFloat)h);
-    CGContextScaleCTM(ctx, 1, -1);
+    // 叠加层是 RenderOverlay 返回的正向图，直接画，不翻转。
+    // v0.1.1 的局部翻转是错的：它把正向的叠加层翻成了倒置，
+    // 还把它移到了画面上方、仪表自带表盘的遮挡区里，所以 HUD 全被盖住。
     CGContextDrawImage(ctx, CGRectMake(0, 0, w, h), overlay);
-    CGContextRestoreGState(ctx);
     CGImageRelease(overlay);
 
     CGImageRef out = CGBitmapContextCreateImage(ctx);
@@ -478,7 +477,7 @@ static void NoteFrame(size_t w, size_t h) {
                hasSel ? "YES" : "NO");
     }
 
-    os_log(gLog, "NinebotEnhance iOS 0.1.1 已加载（电量/日期时间/天气/来电叠加）");
+    os_log(gLog, "NinebotEnhance iOS 0.1.2 已加载（电量/日期时间/天气/来电叠加）");
 
     // 电量监听 + 定位 + 来电观察，全部在主队列 / 后台队列做，不阻塞加载
     dispatch_async(dispatch_get_main_queue(), ^{
