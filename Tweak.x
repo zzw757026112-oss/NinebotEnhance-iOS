@@ -1,4 +1,4 @@
-// NinebotEnhance iOS v0.1 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
+// NinebotEnhance iOS v0.1.1 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
 //
 // 拦截点：+[NBPixelBufferConverter pixelBufferFromCGImage:]（类方法）
 //         +[NBPixelBufferConverter pixelBufferFromCGImage_Mjpeg:]（MJPEG 备用路径）
@@ -350,7 +350,8 @@ static CGImageRef OverlayForSize(size_t w, size_t h) {
     return out;
 }
 
-// 原画面 + 叠加层合成一张新图（左上原点上下文，两张图都正着画）。
+// 原画面 + 叠加层合成一张新图。原图必须原样通过（不加任何变换），
+// 否则整帧在仪表上是颠倒的；只有叠加层在局部翻转里画。
 static CGImageRef CompositeWithOverlay(CGImageRef original) {
     size_t w = CGImageGetWidth(original), h = CGImageGetHeight(original);
     if (w == 0 || h == 0) return NULL;
@@ -363,10 +364,15 @@ static CGImageRef CompositeWithOverlay(CGImageRef original) {
     CGColorSpaceRelease(cs);
     if (!ctx) { CGImageRelease(overlay); return NULL; }
 
+    // 原图直接画，不翻转：行顺序原样通过，钩子对原图透明。
+    CGContextDrawImage(ctx, CGRectMake(0, 0, w, h), original);
+    // 叠加层（RenderOverlay 返回的正向图）只在局部翻转里画，
+    // 画完恢复，不影响原图。
+    CGContextSaveGState(ctx);
     CGContextTranslateCTM(ctx, 0, (CGFloat)h);
     CGContextScaleCTM(ctx, 1, -1);
-    CGContextDrawImage(ctx, CGRectMake(0, 0, w, h), original);
     CGContextDrawImage(ctx, CGRectMake(0, 0, w, h), overlay);
+    CGContextRestoreGState(ctx);
     CGImageRelease(overlay);
 
     CGImageRef out = CGBitmapContextCreateImage(ctx);
@@ -472,7 +478,7 @@ static void NoteFrame(size_t w, size_t h) {
                hasSel ? "YES" : "NO");
     }
 
-    os_log(gLog, "NinebotEnhance iOS 0.1.0 已加载（电量/日期时间/天气/来电叠加）");
+    os_log(gLog, "NinebotEnhance iOS 0.1.1 已加载（电量/日期时间/天气/来电叠加）");
 
     // 电量监听 + 定位 + 来电观察，全部在主队列 / 后台队列做，不阻塞加载
     dispatch_async(dispatch_get_main_queue(), ^{

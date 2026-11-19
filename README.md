@@ -1,11 +1,11 @@
-# NinebotEnhance iOS v0.1
+# NinebotEnhance iOS v0.1.1
 
 给官方九号出行 App（`cn.ninebot.segway`）的注入插件：钩住投屏画面的
 编码器入口，在 App 自己的导航画面上叠加一层 HUD，再交给 App 原来的
 H.264/RTP/RTCP/UDP 链路发给仪表。思路来自安卓的 NinebotEnhance，
 但代码是全新写的 iOS Theos 插件（安卓代码一行都搬不过来）。
 
-## v0.1 叠加内容
+## v0.1.1 叠加内容
 
 仪表画面右下角（避开仪表自带表盘的遮挡区）：
 
@@ -22,7 +22,7 @@ H.264/RTP/RTCP/UDP 链路发给仪表。思路来自安卓的 NinebotEnhance，
 ## 安装（巨魔注入器 TrollFools）
 
 1. 从 GitHub Actions 产物下载 `NinebotEnhance.dylib`
-  （artifact 名 `NinebotEnhance-iOS-0.1.0-dylib`）。
+  （artifact 名 `NinebotEnhance-iOS-0.1.1-dylib`）。
 2. 打开巨魔注入器（TrollFools），选择九号出行 App，把
    `NinebotEnhance.dylib` 注入进去（注入器会把它放到 App 的
    `Frameworks/` 目录并加 load 命令；dylib 的 install_name 已按
@@ -42,7 +42,7 @@ log stream --predicate 'subsystem == "com.user.ninebotenhance"'
 打开九号出行后应看到：
 
 ```
-NinebotEnhance iOS 0.1.0 已加载（电量/日期时间/天气/来电叠加）
+NinebotEnhance iOS 0.1.1 已加载（电量/日期时间/天气/来电叠加）
 [HOOK] NBPixelBufferConverter 已找到，pixelBufferFromCGImage: YES
 ```
 
