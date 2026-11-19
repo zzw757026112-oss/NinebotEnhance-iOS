@@ -1,17 +1,47 @@
-// NinebotEnhance iOS v0.1.2 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
+// NinebotEnhance iOS v0.1.3 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
 //
 // 拦截点：+[NBPixelBufferConverter pixelBufferFromCGImage:]（类方法）
 //         +[NBPixelBufferConverter pixelBufferFromCGImage_Mjpeg:]（MJPEG 备用路径）
 //         以及对应的实例方法版本（与参考实现一致，四者都挂）。
 // 做法：不在编码器输入端整帧替换，而是把 App 自己的画面画到底层，
-// 再把 HUD 叠加层（电量 / 日期时间 / 天气 / 来电提示）画在上面，
+// 再把 HUD 叠加层（小胶囊：日期时间 / 天气 / 信号 / 音量 / 电量，
+// 有音乐时再加一行歌名；来电提示）画在上面，
 // 合成后交给原实现编码发送。App 自己的 H.264/RTP/RTCP/UDP 链路不动。
+//
+// v0.1.3 改动：
+//  1. HUD 翻转修复：v0.1.2 的 RenderOverlay 在自己的 bitmap 里做了
+//     Translate+Scale 翻转再画字，出来的叠加图字是倒的（用户 22:18
+//     实测：导航正了，HUD 是反的）。v0.1.1 在合成时再翻一次，字正了
+//     但位置被镜像到上方的仪表表盘遮挡区里，所以看不见。正确做法是
+//     全程不翻转——画字直接用 y 朝上的 bitmap 坐标，基线 =
+//     高 - 离顶距离 - 上伸，和 Ninebot Pro+ 的 HUDOverlay.swift
+//     完全一致（那份代码已在同一块仪表上验证是正的）。
+//     所以本版：RenderOverlay 不再翻转，CompositeWithOverlay 也不翻转，
+//     原图和叠加层都直接画。
+//  2. HUD 改成小胶囊样式（照 Ninebot Pro+ 1.0.8+）：右下角两行胶囊，
+//     黑底 45% + 白边 35% 1pt + 圆角 12；上行时钟图标 + 日期时间；
+//     下行天气图标 + 温度、联网方式（WiFi 图标 / 5G/4G/3G）、
+//     音量、电量图标 + 百分比（低于 20% 变红）；有音乐在放时再加
+//     一行音符 + 歌名。来电还是左下角红色药丸，不变。
+//  3. 新增联网方式（NWPathMonitor + CTTelephonyNetworkInfo）和
+//     音乐/音量（MPNowPlayingInfoCenter + AVAudioSession），
+//     都在本进程内读，帧回调里只读缓存，永不阻塞。
+//  4. 新增 HUD 设置：九号 App 的“我的/个人/设置”页右上角会出现
+//     一个“HUD设置”按钮（运行时按类名匹配，没匹配到就不出现，
+//     设置仍可用 defaults 命令改）；也可以直接用
+//     defaults write cn.ninebot.segway <键> 改，键见下文。
 //
 // HUD 数据全部来自本进程内可公开拿到的东西：UIDevice 电量、
 // 系统时间、CoreLocation 定位 + Open-Meteo 天气（无 key，20 分钟缓存）、
-// CallKit 来电状态。网络和定位一律在后台做，帧回调里只读缓存，永不阻塞。
+// CallKit 来电状态、联网方式、正在播放的音乐、音量。
+// 网络和定位一律在后台做，帧回调里只读缓存，永不阻塞。
 //
 // 开关：NSUserDefaults 写 NBProjectionOverride = NO 立刻恢复原生画面。
+// HUD 设置键（defaults write cn.ninebot.segway <键> <值>）：
+//   NEHUDShowDate / NEHUDShowWeather / NEHUDShowSignal /
+//   NEHUDShowBattery / NEHUDShowMusic / NEHUDShowVolume（bool，默认 YES）
+//   NEHUDPosition（int，默认 0：0 右下 1 左下 2 左上 3 右上）
+//   NEHUDFontSize（int，默认 1：0 小 1 中 2 大）
 // 日志：os_log subsystem "com.user.ninebotenhance"，只打加载、钩点检查、
 // 帧计数（#1 / 每 100 帧）、天气和来电状态变化。
 
@@ -23,6 +53,10 @@
 #import <CoreLocation/CoreLocation.h>
 #import <CallKit/CallKit.h>
 #import <UIKit/UIKit.h>
+#import <Network/Network.h>
+#import <CoreTelephony/CTTelephonyNetworkInfo.h>
+#import <MediaPlayer/MediaPlayer.h>
+#import <AVFoundation/AVFoundation.h>
 #import <os/log.h>
 #import <objc/message.h>
 #import <objc/runtime.h>
@@ -37,9 +71,12 @@
 
 static os_log_t gLog      = NULL;
 static NSLock  *gLock     = nil;   // 叠加层缓存 + 帧计数
-static NSLock  *gDataLock = nil;   // 天气 / 来电状态
+static NSLock  *gDataLock = nil;   // 天气 / 来电 / 联网 / 音乐状态
 static int      gFrames   = 0;
 static int      gDumped   = 0;
+// 定时器必须有强引用留着（局部变量出作用域就释放，定时器会停）
+static dispatch_source_t gMusicTimer  = nil;
+static dispatch_source_t gButtonTimer = nil;
 
 @class NELocationDelegate;
 static CLLocationManager *gLocMgr = nil;
@@ -50,30 +87,58 @@ static BOOL OverlayEnabled(void) {
     return v ? [v boolValue] : YES;          // 置 NO 即恢复原生画面
 }
 
+// ---------------- HUD 设置（NSUserDefaults，改完下次渲染即生效）----------------
+
+static BOOL NEHUDShowDate(void) {
+    id v = [[NSUserDefaults standardUserDefaults] objectForKey:@"NEHUDShowDate"];
+    return v ? [v boolValue] : YES;
+}
+static BOOL NEHUDShowWeather(void) {
+    id v = [[NSUserDefaults standardUserDefaults] objectForKey:@"NEHUDShowWeather"];
+    return v ? [v boolValue] : YES;
+}
+static BOOL NEHUDShowSignal(void) {
+    id v = [[NSUserDefaults standardUserDefaults] objectForKey:@"NEHUDShowSignal"];
+    return v ? [v boolValue] : YES;
+}
+static BOOL NEHUDShowBattery(void) {
+    id v = [[NSUserDefaults standardUserDefaults] objectForKey:@"NEHUDShowBattery"];
+    return v ? [v boolValue] : YES;
+}
+static BOOL NEHUDShowMusic(void) {
+    id v = [[NSUserDefaults standardUserDefaults] objectForKey:@"NEHUDShowMusic"];
+    return v ? [v boolValue] : YES;
+}
+static BOOL NEHUDShowVolume(void) {
+    id v = [[NSUserDefaults standardUserDefaults] objectForKey:@"NEHUDShowVolume"];
+    return v ? [v boolValue] : YES;
+}
+// 0 右下 1 左下 2 左上 3 右上
+static NSInteger NEHUDPosition(void) {
+    id v = [[NSUserDefaults standardUserDefaults] objectForKey:@"NEHUDPosition"];
+    NSInteger p = v ? [v integerValue] : 0;
+    return (p >= 0 && p <= 3) ? p : 0;
+}
+// 0 小(16) 1 中(20) 2 大(24)，848x480 参考字号
+static CGFloat NEHUDFontRefPt(void) {
+    id v = [[NSUserDefaults standardUserDefaults] objectForKey:@"NEHUDFontSize"];
+    NSInteger s = v ? [v integerValue] : 1;
+    if (s == 0) return 16;
+    if (s == 2) return 24;
+    return 20;
+}
+
 // ---------------- 天气（Open-Meteo，免费、无 key）----------------
 // 定位一次 → 后台拉天气 → 缓存 20 分钟。帧回调里只读缓存。
+// 存天气码 + 温度（画图标用），不只存拼好的字符串。
 
-static NSString        *gWeatherString  = nil;   // 例如 @"18° 晴"，nil = 还没拿到
-static CFAbsoluteTime   gWeatherAt      = 0;
+static int              gWeatherCode     = -1;  // Open-Meteo weather_code，-1 = 还没拿到
+static int              gWeatherTemp     = 0;
+static CFAbsoluteTime   gWeatherAt       = 0;
 static BOOL             gWeatherFetching = NO;
-static BOOL             gHaveCoords     = NO;
+static BOOL             gHaveCoords      = NO;
 static double           gLat = 0, gLon = 0;
-static CFAbsoluteTime   gLastLocAttempt = 0;
-
-static NSString *WeatherConditionForCode(int code) {
-    switch (code) {
-        case 0:             return @"晴";
-        case 1: case 2:     return @"多云";
-        case 3:             return @"阴";
-        case 45: case 48:   return @"雾";
-        case 51: case 53: case 55: return @"毛毛雨";
-        case 61: case 63: case 65: return @"雨";
-        case 71: case 73: case 75: return @"雪";
-        case 80: case 81: case 82: return @"阵雨";
-        case 95:            return @"雷雨";
-        default:            return @"多云";
-    }
-}
+static CFAbsoluteTime   gLastLocAttempt  = 0;
 
 static void FetchWeather(double lat, double lon) {
     NSString *urlStr = [NSString stringWithFormat:
@@ -97,14 +162,13 @@ static void FetchWeather(double lat, double lon) {
         NSNumber *temp = cur[@"temperature_2m"];
         NSNumber *code = cur[@"weather_code"];
         if (temp && code) {
-            NSString *wx = [NSString stringWithFormat:@"%.0f° %@",
-                            [temp doubleValue], WeatherConditionForCode([code intValue])];
             [gDataLock lock];
-            gWeatherString = wx;
+            gWeatherCode = [code intValue];
+            gWeatherTemp = (int)lround([temp doubleValue]);
             gWeatherAt = CFAbsoluteTimeGetCurrent();
             gWeatherFetching = NO;
             [gDataLock unlock];
-            os_log(gLog, "[WX] %{public}s", wx.UTF8String);
+            os_log(gLog, "[WX] %d° code=%d", (int)lround([temp doubleValue]), [code intValue]);
         } else {
             [gDataLock lock]; gWeatherFetching = NO; [gDataLock unlock];
         }
@@ -115,7 +179,7 @@ static void FetchWeather(double lat, double lon) {
 // 满足条件就触发一次后台拉取（不阻塞调用方）。20 分钟内有缓存不拉。
 static void RefreshWeatherIfNeeded(void) {
     [gDataLock lock];
-    BOOL haveData = (gWeatherString != nil);
+    BOOL haveData = (gWeatherCode >= 0);
     CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
     BOOL fresh = haveData && (now - gWeatherAt) < 20 * 60;
     BOOL fetching = gWeatherFetching;
@@ -160,6 +224,81 @@ static void RefreshWeatherIfNeeded(void) {
 }
 @end
 
+// ---------------- 联网方式（NWPathMonitor + 蜂窝制式）----------------
+// 0 不显示（没网/未知） 1 WiFi 2 蜂窝（netLabel 是 5G/4G/3G/2G/蜂窝）
+
+static int       gNetKind  = 0;
+static NSString *gNetLabel = nil;
+static nw_path_monitor_t gPathMonitor = nil;
+static CTTelephonyNetworkInfo *gTelephonyInfo = nil;
+
+static NSString *NERadioTechLabel(void) {
+    if (!gTelephonyInfo) gTelephonyInfo = [CTTelephonyNetworkInfo new];
+    NSDictionary *techs = gTelephonyInfo.serviceCurrentRadioAccessTechnology;
+    NSString *tech = techs.allValues.firstObject;
+    if (!tech) return @"蜂窝";
+    if ([tech isEqualToString:CTRadioAccessTechnologyNR] ||
+        [tech isEqualToString:CTRadioAccessTechnologyNRNSA]) return @"5G";
+    if ([tech isEqualToString:CTRadioAccessTechnologyLTE]) return @"4G";
+    if ([tech isEqualToString:CTRadioAccessTechnologyWCDMA] ||
+        [tech isEqualToString:CTRadioAccessTechnologyHSDPA] ||
+        [tech isEqualToString:CTRadioAccessTechnologyHSUPA] ||
+        [tech isEqualToString:CTRadioAccessTechnologyeHRPD] ||
+        [tech isEqualToString:CTRadioAccessTechnologyCDMAEVDORev0] ||
+        [tech isEqualToString:CTRadioAccessTechnologyCDMAEVDORevA] ||
+        [tech isEqualToString:CTRadioAccessTechnologyCDMAEVDORevB] ||
+        [tech isEqualToString:CTRadioAccessTechnologyCDMA1x]) return @"3G";
+    if ([tech isEqualToString:CTRadioAccessTechnologyGPRS] ||
+        [tech isEqualToString:CTRadioAccessTechnologyEdge]) return @"2G";
+    return @"蜂窝";
+}
+
+static void NEStartNetworkMonitor(void) {
+    gPathMonitor = nw_path_monitor_create();
+    if (!gPathMonitor) return;
+    nw_path_monitor_set_queue(gPathMonitor,
+        dispatch_queue_create("com.user.ninebotenhance.net", DISPATCH_QUEUE_SERIAL));
+    nw_path_monitor_set_update_handler(gPathMonitor, ^(nw_path_t path) {
+        int kind = 0;
+        NSString *label = nil;
+        if (nw_path_get_status(path) == nw_path_status_satisfied) {
+            if (nw_path_uses_interface_type(path, nw_interface_type_wifi)) {
+                kind = 1;
+            } else if (nw_path_uses_interface_type(path, nw_interface_type_cellular)) {
+                kind = 2;
+                label = NERadioTechLabel();
+            }
+        }
+        [gDataLock lock];
+        gNetKind = kind;
+        gNetLabel = label;
+        [gDataLock unlock];
+    });
+    nw_path_monitor_start(gPathMonitor);
+}
+
+// ---------------- 音乐 + 音量（系统正在播放，1 秒一刷）----------------
+
+static NSString *gMusicString = nil; // "歌名 - 歌手"，nil = 没在放
+static float     gVolume      = -1;  // 0...1，-1 = 未知
+
+static void NERefreshMusicVolume(void) {
+    // 主线程调用（MPNowPlayingInfoCenter 在主线程读最稳）。
+    NSDictionary *info = [MPNowPlayingInfoCenter defaultCenter].nowPlayingInfo;
+    NSString *title = info[MPMediaItemPropertyTitle];
+    NSString *artist = info[MPMediaItemPropertyArtist];
+    NSString *music = nil;
+    if (title.length > 0) {
+        music = (artist.length > 0) ? [NSString stringWithFormat:@"%@ - %@", title, artist] : title;
+        if (music.length > 24) music = [[music substringToIndex:24] stringByAppendingString:@"…"];
+    }
+    float vol = [AVAudioSession sharedInstance].outputVolume;
+    [gDataLock lock];
+    gMusicString = music;
+    gVolume = vol;
+    [gDataLock unlock];
+}
+
 // ---------------- 来电（CallKit，公开 API）----------------
 // 只记“有没有未结束的通话”，不读号码（CallKit 不向第三方 App 暴露号码）。
 
@@ -192,70 +331,304 @@ static NSString *HUDTimeString(void) {
     return [fmt stringFromDate:[NSDate date]];
 }
 
-static NSString *HUDBatteryString(BOOL *chargingOut) {
-    UIDevice *dev = [UIDevice currentDevice];
-    float level = dev.batteryLevel;   // -1 表示未知
-    if (level < 0) return nil;
-    BOOL charging = (dev.batteryState == UIDeviceBatteryStateCharging ||
-                     dev.batteryState == UIDeviceBatteryStateFull);
-    if (chargingOut) *chargingOut = charging;
-    // 充电时加闪电符号（系统字体回退渲染）
-    return charging ? [NSString stringWithFormat:@"电量 %.0f%% ⚡", level * 100]
-                    : [NSString stringWithFormat:@"电量 %.0f%%", level * 100];
-}
+// ---------------- 叠加层绘制（小胶囊，照 Ninebot Pro+ 1.0.8+）----------------
+//
+// 坐标系：bitmap context 默认 y 朝上（y=0 在底边），全程不做任何
+// Translate/Scale 翻转。文字基线按“离顶距离”换算：
+//   baseline = 高 - 离顶距离 - 上伸
+// 胶囊锚在底边（pillY = 离底边的距离），行从胶囊顶往下排。
+// 这和 Ninebot Pro+ 的 HUDOverlay.swift 是同一套画法，那份代码
+// 已在同一块仪表上验证是正的。
+//
+// v0.1.2 的教训：RenderOverlay 在自己的 bitmap 里先翻转
+// （Translate+Scale）再画字，出来的叠加图字是倒的；v0.1.1 在
+// 合成时再翻一次，字正了但位置被镜像到上方的仪表表盘遮挡区
+// (640,44)-(842,254) 里，所以看不见。本版两边都不翻转。
+//
+// 参考坐标 848x480。胶囊默认右下角（右边距 12、下边距 12），
+// 避开仪表自带表盘遮挡区。帧尺寸随仪表型号变，所以全部用相对坐标。
 
-// ---------------- 叠加层绘制 ----------------
-// 参考坐标 848x480（右列 x 648–838，避开仪表自带表盘遮挡区 (640,44)–(842,254)）。
-// 实际按输入帧尺寸换算：右列 x∈[0.76w, 0.99w]，三行文字在 y∈[0.58h, 0.80h]，
-// 来电药丸在左下角。帧尺寸随仪表型号变（240x320 / 848x480），所以全部用相对坐标。
-
-static CTFontRef HUDFont(CGFloat size, BOOL bold) {
-    CTFontRef f = CTFontCreateWithName(
-        CFSTR("PingFangSC-Semibold"), size, NULL);
-    if (!f) f = CTFontCreateWithName(
-        bold ? CFSTR("Helvetica-Bold") : CFSTR("Helvetica"), size, NULL);
+static CTFontRef HUDFont(CGFloat size) {
+    CTFontRef f = CTFontCreateWithName(CFSTR("PingFangSC-Semibold"), size, NULL);
+    if (!f) f = CTFontCreateWithName(CFSTR("Helvetica-Bold"), size, NULL);
     return f;
 }
 
-static CGFloat DrawRightLine(CGContextRef ctx, NSString *text, CGFloat yTop,
-                             CGFloat fontSize, CGFloat xRight, CGFloat scale) {
-    if (!text || text.length == 0) return 0;
-    CTFontRef font = HUDFont(fontSize, YES);
-    CGColorRef white = CGColorCreateGenericRGB(1, 1, 1, 1);
+static CTLineRef NETextLine(NSString *text, CTFontRef font, CGColorRef color) {
     const void *keys[] = { kCTFontAttributeName, kCTForegroundColorAttributeName };
-    const void *vals[] = { font, white };
+    const void *vals[] = { font, color };
     CFDictionaryRef attrs = CFDictionaryCreate(NULL, keys, vals, 2,
         &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
     CFAttributedStringRef astr = CFAttributedStringCreate(NULL,
         (__bridge CFStringRef)text, attrs);
     CTLineRef line = CTLineCreateWithAttributedString(astr);
-    double ascent, descent, leading;
-    double width = CTLineGetTypographicBounds(line, &ascent, &descent, &leading);
-
-    CGFloat pad = 8 * scale;
-    CGFloat bgX = xRight - (CGFloat)width - pad * 2;
-    CGFloat bgY = yTop - pad * 0.5;
-    CGFloat bgW = (CGFloat)width + pad * 2;
-    CGFloat bgH = fontSize + pad;
-    CGPathRef bg = CGPathCreateWithRoundedRect(
-        CGRectMake(bgX, bgY, bgW, bgH), 6 * scale, 6 * scale, NULL);
-    CGContextSetRGBFillColor(ctx, 0, 0, 0, 0.55);
-    CGContextAddPath(ctx, bg);
-    CGContextFillPath(ctx);
-    CGPathRelease(bg);
-
-    CGContextSetTextMatrix(ctx, CGAffineTransformIdentity);
-    CGContextSetTextPosition(ctx, xRight - (CGFloat)width, yTop + fontSize);
-    CTLineDraw(line, ctx);
-
-    CFRelease(line); CFRelease(astr); CFRelease(attrs);
-    CGColorRelease(white); CFRelease(font);
-    return (CGFloat)width;
+    CFRelease(astr); CFRelease(attrs);
+    return line;
 }
 
+static CGFloat NETextWidth(CTLineRef line) {
+    CGFloat ascent = 0, descent = 0, leading = 0;
+    return (CGFloat)CTLineGetTypographicBounds(line, &ascent, &descent, &leading);
+}
+
+// ---------- 图标（CoreGraphics 手画，白色，y 朝上坐标，直接照抄 HUDOverlay.swift）----------
+
+static void NEDrawClock(CGContextRef ctx, CGRect rect) {
+    CGPoint c = CGPointMake(CGRectGetMidX(rect), CGRectGetMidY(rect));
+    CGFloat r = rect.size.width * 0.38;
+    CGContextAddArc(ctx, c.x, c.y, r, 0, 2 * M_PI, 0);
+    CGContextStrokePath(ctx);
+    CGContextBeginPath(ctx);
+    CGContextMoveToPoint(ctx, c.x, c.y);
+    CGContextAddLineToPoint(ctx, c.x, c.y + r * 0.72);
+    CGContextMoveToPoint(ctx, c.x, c.y);
+    CGContextAddLineToPoint(ctx, c.x + r * 0.55, c.y - r * 0.35);
+    CGContextStrokePath(ctx);
+}
+
+static void NEDrawWifi(CGContextRef ctx, CGRect rect) {
+    CGPoint c = CGPointMake(CGRectGetMidX(rect), rect.origin.y + rect.size.height * 0.12);
+    CGFloat f[3] = { 0.30, 0.52, 0.74 };
+    for (int i = 0; i < 3; i++) {
+        CGContextAddArc(ctx, c.x, c.y, rect.size.width * f[i],
+                        M_PI * 0.25, M_PI * 0.75, 0);
+        CGContextStrokePath(ctx);
+    }
+    CGContextAddArc(ctx, c.x, c.y, rect.size.width * 0.06, 0, 2 * M_PI, 0);
+    CGContextFillPath(ctx);
+}
+
+static void NEDrawSun(CGContextRef ctx, CGRect rect) {
+    CGPoint c = CGPointMake(CGRectGetMidX(rect), CGRectGetMidY(rect));
+    CGFloat r = rect.size.width * 0.20;
+    CGContextAddArc(ctx, c.x, c.y, r, 0, 2 * M_PI, 0);
+    CGContextFillPath(ctx);
+    for (int i = 0; i < 8; i++) {
+        CGFloat a = (CGFloat)i * M_PI / 4;
+        CGPoint p1 = CGPointMake(c.x + cos(a) * r * 1.45, c.y + sin(a) * r * 1.45);
+        CGPoint p2 = CGPointMake(c.x + cos(a) * r * 2.05, c.y + sin(a) * r * 2.05);
+        CGContextBeginPath(ctx);
+        CGContextMoveToPoint(ctx, p1.x, p1.y);
+        CGContextAddLineToPoint(ctx, p2.x, p2.y);
+        CGContextStrokePath(ctx);
+    }
+}
+
+static void NEDrawCloud(CGContextRef ctx, CGRect rect) {
+    CGFloat s = rect.size.width;
+    CGRect base = CGRectMake(rect.origin.x + s * 0.12, rect.origin.y + s * 0.18,
+                             s * 0.76, s * 0.34);
+    CGContextFillRect(ctx, base);
+    CGFloat cx[3] = { 0.30, 0.55, 0.78 };
+    CGFloat cy[3] = { 0.48, 0.60, 0.48 };
+    CGFloat cr[3] = { 0.20, 0.24, 0.18 };
+    for (int i = 0; i < 3; i++) {
+        CGPoint c = CGPointMake(rect.origin.x + s * cx[i], rect.origin.y + s * cy[i]);
+        CGContextAddArc(ctx, c.x, c.y, s * cr[i], 0, 2 * M_PI, 0);
+        CGContextFillPath(ctx);
+    }
+}
+
+static void NEDrawBolt(CGContextRef ctx, CGRect rect) {
+    CGFloat s = rect.size.width;
+    CGPoint pts[6] = {
+        CGPointMake(rect.origin.x + s * 0.56, rect.origin.y + s * 0.20),
+        CGPointMake(rect.origin.x + s * 0.42, rect.origin.y + s * 0.02),
+        CGPointMake(rect.origin.x + s * 0.52, rect.origin.y + s * 0.02),
+        CGPointMake(rect.origin.x + s * 0.44, rect.origin.y - s * 0.12),
+        CGPointMake(rect.origin.x + s * 0.62, rect.origin.y + s * 0.04),
+        CGPointMake(rect.origin.x + s * 0.52, rect.origin.y + s * 0.04)
+    };
+    CGContextBeginPath(ctx);
+    CGContextMoveToPoint(ctx, pts[0].x, pts[0].y);
+    for (int i = 1; i < 6; i++) CGContextAddLineToPoint(ctx, pts[i].x, pts[i].y);
+    CGContextClosePath(ctx);
+    CGContextFillPath(ctx);
+}
+
+static void NEDrawWeather(CGContextRef ctx, int code, CGRect rect) {
+    CGFloat s = rect.size.width;
+    if (code == 0) { NEDrawSun(ctx, rect); return; }
+    if (code == 1 || code == 2) {
+        CGRect sunRect = CGRectMake(rect.origin.x, rect.origin.y + s * 0.45,
+                                    s * 0.55, s * 0.55);
+        NEDrawSun(ctx, sunRect);
+        CGRect cloudRect = CGRectMake(rect.origin.x + s * 0.30, rect.origin.y,
+                                      s * 0.70, s * 0.70);
+        NEDrawCloud(ctx, cloudRect);
+        return;
+    }
+    NEDrawCloud(ctx, rect);
+    if (code == 45 || code == 48) {
+        CGFloat fy[2] = { 0.12, 0.03 };
+        for (int i = 0; i < 2; i++) {
+            CGContextBeginPath(ctx);
+            CGContextMoveToPoint(ctx, rect.origin.x + s * 0.22, rect.origin.y + s * fy[i]);
+            CGContextAddLineToPoint(ctx, rect.origin.x + s * 0.80, rect.origin.y + s * fy[i]);
+            CGContextStrokePath(ctx);
+        }
+    } else if (code == 51 || code == 53 || code == 55 || code == 61 || code == 63 ||
+               code == 65 || code == 80 || code == 81 || code == 82) {
+        CGFloat fx[3] = { 0.30, 0.52, 0.74 };
+        for (int i = 0; i < 3; i++) {
+            CGFloat x = rect.origin.x + s * fx[i];
+            CGContextBeginPath(ctx);
+            CGContextMoveToPoint(ctx, x + s * 0.04, rect.origin.y + s * 0.16);
+            CGContextAddLineToPoint(ctx, x - s * 0.04, rect.origin.y + s * 0.02);
+            CGContextStrokePath(ctx);
+        }
+    } else if (code == 71 || code == 73 || code == 75) {
+        CGFloat fx[3] = { 0.32, 0.52, 0.72 };
+        CGFloat fy[3] = { 0.10, 0.04, 0.10 };
+        for (int i = 0; i < 3; i++) {
+            CGPoint c = CGPointMake(rect.origin.x + s * fx[i], rect.origin.y + s * fy[i]);
+            CGContextAddArc(ctx, c.x, c.y, s * 0.045, 0, 2 * M_PI, 0);
+            CGContextFillPath(ctx);
+        }
+    } else if (code == 95) {
+        NEDrawBolt(ctx, rect);
+    }
+}
+
+static void NEDrawMusic(CGContextRef ctx, CGRect rect) {
+    CGFloat headW = rect.size.width * 0.34;
+    CGFloat headH = rect.size.height * 0.26;
+    CGRect head = CGRectMake(rect.origin.x + rect.size.width * 0.18,
+                             rect.origin.y + rect.size.height * 0.08,
+                             headW, headH);
+    CGContextAddEllipseInRect(ctx, head);
+    CGContextFillPath(ctx);
+    CGFloat stemX = CGRectGetMaxX(head) - headW * 0.15;
+    CGFloat topY = rect.origin.y + rect.size.height; // rect.maxY（y 朝上）
+    CGContextBeginPath(ctx);
+    CGContextMoveToPoint(ctx, stemX, CGRectGetMidY(head));
+    CGContextAddLineToPoint(ctx, stemX, topY - rect.size.height * 0.08);
+    CGContextStrokePath(ctx);
+    // 注意：ObjC 的 AddQuadCurveToPoint 是（控制点 x,y, 终点 x,y），
+    // 和 Swift 的 addQuadCurve(to:control:) 参数顺序相反。
+    CGContextBeginPath(ctx);
+    CGContextMoveToPoint(ctx, stemX, topY - rect.size.height * 0.08);
+    CGContextAddQuadCurveToPoint(ctx,
+        stemX + rect.size.width * 0.30, topY - rect.size.height * 0.06,
+        stemX + rect.size.width * 0.34, topY - rect.size.height * 0.32);
+    CGContextAddLineToPoint(ctx, stemX + rect.size.width * 0.34, topY - rect.size.height * 0.52);
+    CGContextAddQuadCurveToPoint(ctx,
+        stemX + rect.size.width * 0.30, topY - rect.size.height * 0.28,
+        stemX, topY - rect.size.height * 0.30);
+    CGContextClosePath(ctx);
+    CGContextFillPath(ctx);
+}
+
+static void NEDrawSpeaker(CGContextRef ctx, CGRect rect) {
+    CGFloat bx = rect.origin.x + rect.size.width * 0.08;
+    CGFloat bw = rect.size.width * 0.20;
+    CGFloat bh = rect.size.height * 0.36;
+    CGContextFillRect(ctx, CGRectMake(bx, CGRectGetMidY(rect) - bh / 2, bw, bh));
+    CGContextBeginPath(ctx);
+    CGContextMoveToPoint(ctx, bx + bw, CGRectGetMidY(rect) - bh / 2);
+    CGContextAddLineToPoint(ctx, bx + bw + rect.size.width * 0.34, rect.origin.y + rect.size.height * 0.10);
+    CGContextAddLineToPoint(ctx, bx + bw + rect.size.width * 0.34, rect.origin.y + rect.size.height * 0.90);
+    CGContextAddLineToPoint(ctx, bx + bw, CGRectGetMidY(rect) + bh / 2);
+    CGContextClosePath(ctx);
+    CGContextFillPath(ctx);
+    CGPoint c = CGPointMake(bx + bw + rect.size.width * 0.34, CGRectGetMidY(rect));
+    CGContextAddArc(ctx, c.x, c.y, rect.size.width * 0.12, -M_PI / 3, M_PI / 3, 0);
+    CGContextStrokePath(ctx);
+    CGContextAddArc(ctx, c.x, c.y, rect.size.width * 0.24, -M_PI / 3, M_PI / 3, 0);
+    CGContextStrokePath(ctx);
+}
+
+// 电池图标：圆角外框 + 按电量填充 + 右边小凸起；充电中填充变绿
+// 并在里面画一道深色闪电；低电量（<20%）轮廓和填充变红。
+static void NEDrawBattery(CGContextRef ctx, float level, BOOL charging, BOOL low, CGRect rect) {
+    CGColorRef tint = low ? CGColorCreateGenericRGB(1, 0.25, 0.25, 1)
+                          : CGColorCreateGenericRGB(1, 1, 1, 1);
+    CGContextSetStrokeColorWithColor(ctx, tint);
+    CGContextSetFillColorWithColor(ctx, tint);
+    CGFloat s = rect.size.width;
+    CGFloat bodyW = s * 0.78, bodyH = s * 0.52;
+    CGFloat bodyX = rect.origin.x + s * 0.02;
+    CGFloat bodyY = CGRectGetMidY(rect) - bodyH / 2;
+    CGRect body = CGRectMake(bodyX, bodyY, bodyW, bodyH);
+    CGFloat lw = MAX(1, s * 0.06);
+    CGContextSetLineWidth(ctx, lw);
+    CGPathRef path = CGPathCreateWithRoundedRect(body, s * 0.08, s * 0.08, NULL);
+    CGContextAddPath(ctx, path);
+    CGContextStrokePath(ctx);
+    CGPathRelease(path);
+    CGRect nub = CGRectMake(bodyX + bodyW, CGRectGetMidY(rect) - bodyH * 0.22,
+                            s * 0.07, bodyH * 0.44);
+    CGContextFillRect(ctx, nub);
+    float clamped = level < 0 ? 0 : (level > 1 ? 1 : level);
+    if (clamped > 0) {
+        CGFloat inset = lw + s * 0.03;
+        CGFloat fillW = (bodyW - inset * 2) * (CGFloat)clamped;
+        CGRect fillRect = CGRectMake(bodyX + inset, bodyY + inset, fillW, bodyH - inset * 2);
+        if (charging) {
+            CGContextSetRGBFillColor(ctx, 0.25, 0.85, 0.35, 1);
+        } else if (low) {
+            CGContextSetRGBFillColor(ctx, 1, 0.25, 0.25, 1);
+        } else {
+            CGContextSetRGBFillColor(ctx, 1, 1, 1, 1);
+        }
+        CGContextFillRect(ctx, fillRect);
+        if (charging) {
+            CGContextSetRGBFillColor(ctx, 0, 0, 0, 0.75);
+            CGFloat cx = bodyX + bodyW * 0.5, cy = CGRectGetMidY(rect);
+            CGFloat bw2 = bodyW * 0.16, bh2 = bodyH * 0.38;
+            CGPoint pts[6] = {
+                CGPointMake(cx + bw2 * 0.4, cy + bh2),
+                CGPointMake(cx - bw2 * 0.6, cy - bh2 * 0.1),
+                CGPointMake(cx - bw2 * 0.05, cy - bh2 * 0.1),
+                CGPointMake(cx - bw2 * 0.4, cy - bh2),
+                CGPointMake(cx + bw2 * 0.6, cy + bh2 * 0.1),
+                CGPointMake(cx + bw2 * 0.05, cy + bh2 * 0.1)
+            };
+            CGContextBeginPath(ctx);
+            CGContextMoveToPoint(ctx, pts[0].x, pts[0].y);
+            for (int i = 1; i < 6; i++) CGContextAddLineToPoint(ctx, pts[i].x, pts[i].y);
+            CGContextClosePath(ctx);
+            CGContextFillPath(ctx);
+        }
+    }
+    CGColorRelease(tint);
+}
+
+// ---------- 胶囊行段 ----------
+// kind: 0 文字 1 图标 2 电池；icon: 0 时钟 1 WiFi 2 天气 3 音符 4 喇叭
+#define NE_MAX_ROWS 3
+#define NE_MAX_SEGS 8
+
+typedef struct {
+    int kind;
+    int icon;
+    int wxCode;
+    NSString * __unsafe_unretained text;
+    CGColorRef color; // 不持有；调用方保证在绘制期间有效
+    float battLevel;
+    BOOL battCharging, battLow;
+    CTLineRef line; // kind==0 时量宽度建的，用完释放
+    CGFloat w;
+} NESeg;
+
+static BOOL NEIsIconSeg(NESeg *s) { return s->kind != 0; }
+
+// ---------- 叠加层（全尺寸透明层，只画胶囊 + 来电条）----------
+
+typedef struct {
+    BOOL showDate, showWeather, showSignal, showBattery, showMusic, showVolume;
+    NSInteger position; // 0 右下 1 左下 2 左上 3 右上
+    CGFloat fontRefPt;  // 16/20/24
+} NEHUDSettings;
+
 static CGImageRef RenderOverlay(size_t w, size_t h,
-                                NSString *timeStr, NSString *battStr,
-                                NSString *wxStr, BOOL callActive) {
+                                NSString *timeStr,
+                                float battLevel, BOOL battCharging,
+                                int wxCode, int wxTemp,
+                                int netKind, NSString * __unsafe_unretained netLabel,
+                                NSString * __unsafe_unretained musicStr, float volume,
+                                BOOL callActive,
+                                NEHUDSettings st) {
     if (w == 0 || h == 0) return NULL;
     CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
     CGContextRef ctx = CGBitmapContextCreate(NULL, w, h, 8, 0, cs,
@@ -263,57 +636,220 @@ static CGImageRef RenderOverlay(size_t w, size_t h,
     CGColorSpaceRelease(cs);
     if (!ctx) return NULL;
 
-    // 左上原点（文字才能正着画），与参考实现一致
-    CGContextTranslateCTM(ctx, 0, (CGFloat)h);
-    CGContextScaleCTM(ctx, 1, -1);
+    // 注意：这里故意不翻转 context。bitmap 默认 y 朝上，文字基线
+    // 按“离顶距离”换算（baseline = 高 - 离顶距离 - 上伸），画出来
+    // 在仪表上就是正的——和 Ninebot Pro+ HUDOverlay.swift 同一套画法。
+    // v0.1.2 在这里翻转过一次，结果字是倒的；不要再加翻转。
 
-    CGFloat scale = (CGFloat)h / 480.0;              // 相对 848x480 的缩放
-    CGFloat fontSize = MAX(14.0, h * 0.055);
-    CGFloat xRight = w * 0.985;
+    CGFloat sx = (CGFloat)w / 848.0;
+    CGFloat sy = (CGFloat)h / 480.0;
+    CGFloat H = (CGFloat)h;
 
-    // 三行信息：时间 / 电量 / 天气，右对齐，y 在遮挡区下方
-    DrawRightLine(ctx, timeStr, h * 0.585, fontSize, xRight, scale);
-    DrawRightLine(ctx, battStr, h * 0.670, fontSize, xRight, scale);
-    if (wxStr) DrawRightLine(ctx, wxStr, h * 0.755, fontSize, xRight, scale);
+    CGFloat fontSize = MAX(12, st.fontRefPt * sy);
+    CTFontRef font = HUDFont(fontSize);
+    CGColorRef white = CGColorCreateGenericRGB(1, 1, 1, 1);
+    CGColorRef red = CGColorCreateGenericRGB(1, 0.25, 0.25, 1);
+    CGFloat iconSize = fontSize;
+    CGFloat iconTextGap = 4 * sx;
+    CGFloat groupGap = 14 * sx;
+    CGFloat rowGap = 8 * sy;
+    CGFloat padX = 12 * sx;
+    CGFloat padY = 10 * sy;
+    CGFloat ascent = (CGFloat)CTFontGetAscent(font);
+    CGFloat descent = (CGFloat)CTFontGetDescent(font);
+    CGFloat rowHeight = ascent + descent;
 
-    // 来电：左下角红色药丸，白字“来电”
-    if (callActive) {
-        CGFloat pillW = w * 0.28, pillH = h * 0.10;
-        CGFloat pillX = w * 0.02, pillY = h * 0.86;
-        CGPathRef pill = CGPathCreateWithRoundedRect(
-            CGRectMake(pillX, pillY, pillW, pillH), pillH / 2, pillH / 2, NULL);
-        CGContextSetRGBFillColor(ctx, 0.85, 0.15, 0.15, 0.92);
-        CGContextAddPath(ctx, pill);
-        CGContextFillPath(ctx);
-        CGPathRelease(pill);
+    BOOL lowBatt = battLevel >= 0 && battLevel < 0.2;
 
-        CTFontRef font = HUDFont(fontSize, YES);
-        CGColorRef white = CGColorCreateGenericRGB(1, 1, 1, 1);
-        const void *keys[] = { kCTFontAttributeName, kCTForegroundColorAttributeName };
-        const void *vals[] = { font, white };
-        CFDictionaryRef attrs = CFDictionaryCreate(NULL, keys, vals, 2,
-            &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
-        CFAttributedStringRef astr = CFAttributedStringCreate(NULL, CFSTR("来电"), attrs);
-        CTLineRef line = CTLineCreateWithAttributedString(astr);
-        double ascent, descent, leading;
-        double tw = CTLineGetTypographicBounds(line, &ascent, &descent, &leading);
-        CGContextSetTextMatrix(ctx, CGAffineTransformIdentity);
-        CGContextSetTextPosition(ctx,
-            pillX + (pillW - (CGFloat)tw) / 2,
-            pillY + (pillH + fontSize) / 2 - fontSize * 0.15);
-        CTLineDraw(line, ctx);
-        CFRelease(line); CFRelease(astr); CFRelease(attrs);
-        CGColorRelease(white); CFRelease(font);
+    // ---- 组行 ----
+    NESeg rows[NE_MAX_ROWS][NE_MAX_SEGS];
+    int rowCounts[NE_MAX_ROWS] = { 0, 0, 0 };
+    memset(rows, 0, sizeof(rows));
+
+    // 上行：时钟图标 + 日期时间
+    if (st.showDate && timeStr.length > 0) {
+        NESeg *s = &rows[0][rowCounts[0]++];
+        s->kind = 1; s->icon = 0;
+        s = &rows[0][rowCounts[0]++];
+        s->kind = 0; s->text = timeStr; s->color = white;
+    }
+    // 下行：天气图标 + 温度、联网方式、音量、电池图标 + 百分比
+    if (st.showWeather && wxCode >= 0) {
+        NESeg *s = &rows[1][rowCounts[1]++];
+        s->kind = 1; s->icon = 2; s->wxCode = wxCode;
+        s = &rows[1][rowCounts[1]++];
+        s->kind = 0; s->text = [NSString stringWithFormat:@"%d°", wxTemp]; s->color = white;
+    }
+    if (st.showSignal && netKind == 1) {
+        NESeg *s = &rows[1][rowCounts[1]++];
+        s->kind = 1; s->icon = 1;
+    } else if (st.showSignal && netKind == 2 && netLabel.length > 0) {
+        NESeg *s = &rows[1][rowCounts[1]++];
+        s->kind = 0; s->text = netLabel; s->color = white;
+    }
+    if (st.showVolume && volume >= 0) {
+        NESeg *s = &rows[1][rowCounts[1]++];
+        s->kind = 1; s->icon = 4;
+        s = &rows[1][rowCounts[1]++];
+        s->kind = 0; s->text = [NSString stringWithFormat:@"%d%%", (int)(volume * 100)]; s->color = white;
+    }
+    if (st.showBattery) {
+        NESeg *s = &rows[1][rowCounts[1]++];
+        s->kind = 2; s->battLevel = battLevel; s->battCharging = battCharging; s->battLow = lowBatt;
+        s = &rows[1][rowCounts[1]++];
+        s->kind = 0;
+        s->text = battLevel < 0 ? @"--%" : [NSString stringWithFormat:@"%d%%", (int)(battLevel * 100)];
+        s->color = lowBatt ? red : white;
+    }
+    // 第三行：正在放的歌（没放就不画，胶囊还是两行）
+    if (st.showMusic && musicStr.length > 0) {
+        NESeg *s = &rows[2][rowCounts[2]++];
+        s->kind = 1; s->icon = 3;
+        s = &rows[2][rowCounts[2]++];
+        s->kind = 0; s->text = musicStr; s->color = white;
     }
 
-    CGImageRef img = CGBitmapContextCreateImage(ctx);
+    // ---- 量每行宽度 ----
+    CGFloat rowWidths[NE_MAX_ROWS] = { 0, 0, 0 };
+    int nonEmptyRows = 0;
+    int rowOrder[NE_MAX_ROWS];
+    for (int r = 0; r < NE_MAX_ROWS; r++) {
+        CGFloat total = 0;
+        for (int i = 0; i < rowCounts[r]; i++) {
+            NESeg *s = &rows[r][i];
+            if (i > 0) {
+                total += (NEIsIconSeg(&rows[r][i - 1]) && !NEIsIconSeg(s)) ? iconTextGap : groupGap;
+            }
+            if (s->kind == 0) {
+                s->line = NETextLine(s->text, font, s->color);
+                s->w = NETextWidth(s->line);
+            } else {
+                s->w = iconSize;
+            }
+            total += s->w;
+        }
+        rowWidths[r] = total;
+        if (rowCounts[r] > 0) rowOrder[nonEmptyRows++] = r;
+    }
+
+    CGImageRef out = NULL;
+    if (nonEmptyRows > 0 || callActive) {
+        CGFloat contentW = 0;
+        for (int i = 0; i < nonEmptyRows; i++)
+            if (rowWidths[rowOrder[i]] > contentW) contentW = rowWidths[rowOrder[i]];
+        CGFloat pillW = contentW + padX * 2;
+        CGFloat pillH = padY * 2 + rowHeight * nonEmptyRows + rowGap * MAX(0, nonEmptyRows - 1);
+
+        // 胶囊锚点（y 朝上坐标，pillY 是底边离底的距离）
+        CGFloat pillX = 0, pillY = 0;
+        switch (st.position) {
+            case 1: // 左下
+                pillX = 12 * sx; pillY = 12 * sy; break;
+            case 2: // 左上
+                pillX = 12 * sx; pillY = H - 12 * sy - pillH; break;
+            case 3: // 右上
+                pillX = (848 - 12) * sx - pillW; pillY = H - 12 * sy - pillH; break;
+            default: // 右下
+                pillX = (848 - 12) * sx - pillW; pillY = 12 * sy; break;
+        }
+
+        if (nonEmptyRows > 0) {
+            // 胶囊底板：黑 45% + 白 35% 边，圆角 12
+            CGPathRef panel = CGPathCreateWithRoundedRect(
+                CGRectMake(pillX, pillY, pillW, pillH), 12 * sx, 12 * sy, NULL);
+            CGContextSetRGBFillColor(ctx, 0, 0, 0, 0.45);
+            CGContextSetRGBStrokeColor(ctx, 1, 1, 1, 0.35);
+            CGContextSetLineWidth(ctx, MAX(1, 1 * sx));
+            CGContextAddPath(ctx, panel);
+            CGContextDrawPath(ctx, kCGPathFillStroke);
+            CGPathRelease(panel);
+
+            CGContextSaveGState(ctx);
+            CGColorRef shadow = CGColorCreateGenericRGB(0, 0, 0, 0.85);
+            CGContextSetShadowWithColor(ctx, CGSizeMake(0, -2), 3, shadow);
+            CGColorRelease(shadow);
+
+            // 画各行（左对齐，图标与文字垂直居中对齐）
+            CGFloat pillTopFromTop = H - (pillY + pillH);
+            for (int ri = 0; ri < nonEmptyRows; ri++) {
+                int r = rowOrder[ri];
+                CGFloat rowTop = pillTopFromTop + padY + ri * (rowHeight + rowGap);
+                CGFloat baseline = H - rowTop - ascent;
+                CGFloat textCenterY = baseline + (ascent - descent) / 2;
+                CGFloat x = pillX + padX;
+                for (int i = 0; i < rowCounts[r]; i++) {
+                    NESeg *s = &rows[r][i];
+                    if (s->kind == 0) {
+                        CGContextSetTextMatrix(ctx, CGAffineTransformIdentity);
+                        CGContextSetTextPosition(ctx, x, baseline);
+                        CTLineDraw(s->line, ctx);
+                    } else if (s->kind == 1) {
+                        CGRect rect = CGRectMake(x, textCenterY - iconSize / 2,
+                                                 iconSize, iconSize);
+                        CGContextSetFillColorWithColor(ctx, white);
+                        CGContextSetStrokeColorWithColor(ctx, white);
+                        CGContextSetLineWidth(ctx, MAX(1, iconSize * 0.07));
+                        CGContextSetLineCap(ctx, kCGLineCapRound);
+                        switch (s->icon) {
+                            case 0: NEDrawClock(ctx, rect); break;
+                            case 1: NEDrawWifi(ctx, rect); break;
+                            case 2: NEDrawWeather(ctx, s->wxCode, rect); break;
+                            case 3: NEDrawMusic(ctx, rect); break;
+                            case 4: NEDrawSpeaker(ctx, rect); break;
+                            default: break;
+                        }
+                    } else if (s->kind == 2) {
+                        CGRect rect = CGRectMake(x, textCenterY - iconSize / 2,
+                                                 iconSize, iconSize);
+                        NEDrawBattery(ctx, s->battLevel, s->battCharging, s->battLow, rect);
+                    }
+                    x += s->w;
+                    if (i + 1 < rowCounts[r]) {
+                        x += (NEIsIconSeg(s) && !NEIsIconSeg(&rows[r][i + 1])) ? iconTextGap : groupGap;
+                    }
+                }
+            }
+            CGContextRestoreGState(ctx); // 关掉文字阴影，来电条不用
+        }
+
+        // 来电：左下角红色圆角条（不动）
+        if (callActive) {
+            CTFontRef cfont = font;
+            CTLineRef line = NETextLine(@"来电", cfont, white);
+            CGFloat tw = NETextWidth(line);
+            CGFloat pillW2 = tw + 24 * sx;
+            CGFloat pillH2 = 34 * sy;
+            CGRect pillRect = CGRectMake(16 * sx, 16 * sy, pillW2, pillH2);
+            CGPathRef pill = CGPathCreateWithRoundedRect(pillRect, 8 * sx, 8 * sy, NULL);
+            CGContextSetRGBFillColor(ctx, 0.9, 0.1, 0.1, 0.55);
+            CGContextSetRGBStrokeColor(ctx, 1, 1, 1, 0.35);
+            CGContextSetLineWidth(ctx, MAX(1, 1 * sx));
+            CGContextAddPath(ctx, pill);
+            CGContextDrawPath(ctx, kCGPathFillStroke);
+            CGPathRelease(pill);
+            CGFloat callBaseline = pillRect.origin.y + (pillH2 - ascent - descent) / 2 + descent;
+            CGContextSetTextMatrix(ctx, CGAffineTransformIdentity);
+            CGContextSetTextPosition(ctx, pillRect.origin.x + 12 * sx, callBaseline);
+            CTLineDraw(line, ctx);
+            CFRelease(line);
+        }
+    }
+
+    // 释放本行建的 CTLine
+    for (int r = 0; r < NE_MAX_ROWS; r++)
+        for (int i = 0; i < rowCounts[r]; i++)
+            if (rows[r][i].line) CFRelease(rows[r][i].line);
+
+    out = CGBitmapContextCreateImage(ctx);
     CGContextRelease(ctx);
-    return img;
+    CFRelease(font);
+    CGColorRelease(white);
+    CGColorRelease(red);
+    return out;
 }
 
-// 叠加层缓存：数据没变且 250ms 内，直接复用（与参考实现的帧缓存同款逻辑）。
+// 叠加层缓存：数据没变且 250ms 内，直接复用。
 // 注意：缓存的是叠加层，不是整帧——App 自己的画面每帧都在变，必须每帧重新合成。
-// 快路径先看 250ms：没过期直接返回，避免每帧都建 NSDateFormatter。
 static CGImageRef OverlayForSize(size_t w, size_t h) {
     [gLock lock];
     static CGImageRef cache = NULL;
@@ -329,18 +865,36 @@ static CGImageRef OverlayForSize(size_t w, size_t h) {
     }
 
     NSString *timeStr = HUDTimeString();
-    BOOL charging = NO;
-    NSString *battStr = HUDBatteryString(&charging);
+    UIDevice *dev = [UIDevice currentDevice];
+    float battLevel = dev.batteryLevel;
+    BOOL battCharging = (dev.batteryState == UIDeviceBatteryStateCharging ||
+                         dev.batteryState == UIDeviceBatteryStateFull);
     [gDataLock lock];
-    NSString *wxStr = gWeatherString;
+    int wxCode = gWeatherCode, wxTemp = gWeatherTemp;
+    int netKind = gNetKind;
+    NSString *netLabel = gNetLabel;
+    NSString *musicStr = gMusicString;
+    float volume = gVolume;
     BOOL callActive = gCallActive;
     [gDataLock unlock];
 
-    NSString *key = [NSString stringWithFormat:@"%@|%@|%@|%d",
-                     timeStr, battStr ?: @"", wxStr ?: @"", callActive];
+    NEHUDSettings st;
+    st.showDate = NEHUDShowDate(); st.showWeather = NEHUDShowWeather();
+    st.showSignal = NEHUDShowSignal(); st.showBattery = NEHUDShowBattery();
+    st.showMusic = NEHUDShowMusic(); st.showVolume = NEHUDShowVolume();
+    st.position = NEHUDPosition(); st.fontRefPt = NEHUDFontRefPt();
+
+    NSString *key = [NSString stringWithFormat:@"%@|%.2f|%d|%d|%d|%d|%@|%@|%.2f|%d|%d%d%d%d%d%d|%ld|%.0f",
+                     timeStr, battLevel, battCharging, wxCode, wxTemp, netKind,
+                     netLabel ?: @"", musicStr ?: @"", volume, callActive,
+                     st.showDate, st.showWeather, st.showSignal,
+                     st.showBattery, st.showMusic, st.showVolume,
+                     (long)st.position, st.fontRefPt];
     if (!cache || cw != w || ch != h || ![key isEqualToString:cacheKey]) {
         if (cache) { CGImageRelease(cache); cache = NULL; }
-        cache = RenderOverlay(w, h, timeStr, battStr, wxStr, callActive);
+        cache = RenderOverlay(w, h, timeStr, battLevel, battCharging,
+                              wxCode, wxTemp, netKind, netLabel,
+                              musicStr, volume, callActive, st);
         cacheKey = [key copy];
         cw = w; ch = h;
     }
@@ -350,10 +904,13 @@ static CGImageRef OverlayForSize(size_t w, size_t h) {
     return out;
 }
 
-// 原画面 + 叠加层合成一张新图。原图和叠加层都直接画，不加任何翻转：
-// RenderOverlay 返回的已经是正向图（它内部翻转过一次，文字才能正着画），
-// 再翻一次会把 HUD 翻成倒置、移到画面上方仪表表盘的遮挡区里——v0.1.1
-// 就是这么把 HUD 藏起来的。两边都不翻转，导航正向，HUD 回到右下角。
+// 原画面 + 叠加层合成一张新图。全程不翻转：
+// 原图直接画（v0.1.1/0.1.2 已证明这样导航是正的），叠加层也是
+// 直接画——RenderOverlay 本版已不再翻转，出来的就是正向图。
+// v0.1.0 在这里全局翻转，结果导航是反的；v0.1.1 只翻叠加层，
+// 结果 HUD 被镜像到上方的仪表表盘遮挡区里看不见；v0.1.2 两边
+// 都不翻但 RenderOverlay 内部翻了，结果 HUD 字是倒的。
+// 本版：两边都不翻，RenderOverlay 内部也不翻，导航和 HUD 都正。
 static CGImageRef CompositeWithOverlay(CGImageRef original) {
     size_t w = CGImageGetWidth(original), h = CGImageGetHeight(original);
     if (w == 0 || h == 0) return NULL;
@@ -368,9 +925,7 @@ static CGImageRef CompositeWithOverlay(CGImageRef original) {
 
     // 原图直接画，不翻转：行顺序原样通过，钩子对原图透明。
     CGContextDrawImage(ctx, CGRectMake(0, 0, w, h), original);
-    // 叠加层是 RenderOverlay 返回的正向图，直接画，不翻转。
-    // v0.1.1 的局部翻转是错的：它把正向的叠加层翻成了倒置，
-    // 还把它移到了画面上方、仪表自带表盘的遮挡区里，所以 HUD 全被盖住。
+    // 叠加层直接画，不翻转：RenderOverlay 本版已是正向图。
     CGContextDrawImage(ctx, CGRectMake(0, 0, w, h), overlay);
     CGImageRelease(overlay);
 
@@ -410,6 +965,214 @@ static void NoteFrame(size_t w, size_t h) {
     // 天气过期了就触发一次后台刷新（不阻塞）
     RefreshWeatherIfNeeded();
 }
+
+// ---------------- HUD 设置界面 ----------------
+// 九号 App 的“我的/个人/设置”页右上角会出现一个“HUD设置”按钮。
+// 找页面的办法：每 3 秒看一次最上层 ViewController，类名里带
+// Mine/Profile/Setting/Me/User/Account 的就加按钮（运行时匹配，
+// 没匹配到就不出现，设置仍可用 defaults 命令改）。不硬编任何
+// App 的类名，所以 6.10.12 改了类名也不会崩，只是不出按钮。
+
+static const char NEHUDButtonKey = 0;
+
+@interface NEHUDSettingsVC : UIViewController
+@end
+
+@interface NEHUDButtonHandler : NSObject
++ (instancetype)shared;
+- (void)openSettings:(UIButton *)sender;
+@end
+
+static UIViewController *NETopViewController(void) {
+    UIWindow *keyWindow = nil;
+    for (UIWindow *w in [UIApplication sharedApplication].windows) {
+        if (w.isKeyWindow) { keyWindow = w; break; }
+    }
+    if (!keyWindow) keyWindow = [UIApplication sharedApplication].windows.firstObject;
+    UIViewController *vc = keyWindow.rootViewController;
+    while (vc) {
+        if (vc.presentedViewController) { vc = vc.presentedViewController; continue; }
+        if ([vc isKindOfClass:[UITabBarController class]]) {
+            vc = ((UITabBarController *)vc).selectedViewController; continue;
+        }
+        if ([vc isKindOfClass:[UINavigationController class]]) {
+            vc = ((UINavigationController *)vc).topViewController; continue;
+        }
+        break;
+    }
+    return vc;
+}
+
+@implementation NEHUDButtonHandler
++ (instancetype)shared {
+    static NEHUDButtonHandler *s = nil;
+    static dispatch_once_t t;
+    dispatch_once(&t, ^{ s = [NEHUDButtonHandler new]; });
+    return s;
+}
+- (void)openSettings:(UIButton *)sender {
+    UIViewController *top = NETopViewController();
+    if (!top) return;
+    NEHUDSettingsVC *vc = [NEHUDSettingsVC new];
+    UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:vc];
+    [top presentViewController:nav animated:YES completion:nil];
+}
+@end
+
+static void NECheckSettingsButton(void) {
+    // 只在主线程调（定时器就是主队列）。
+    UIViewController *vc = NETopViewController();
+    if (!vc || !vc.view) return;
+    NSString *name = NSStringFromClass([vc class]);
+    NSString *lower = [name lowercaseString];
+    BOOL match = [lower containsString:@"mine"] || [lower containsString:@"profile"] ||
+                 [lower containsString:@"setting"] || [lower containsString:@"me"] ||
+                 [lower containsString:@"user"] || [lower containsString:@"account"];
+    if (!match) return;
+    if (objc_getAssociatedObject(vc, &NEHUDButtonKey)) return;
+    UIButton *btn = [UIButton buttonWithType:UIButtonTypeSystem];
+    [btn setTitle:@"HUD设置" forState:UIControlStateNormal];
+    btn.titleLabel.font = [UIFont systemFontOfSize:14 weight:UIFontWeightSemibold];
+    btn.backgroundColor = [[UIColor systemBlueColor] colorWithAlphaComponent:0.12];
+    btn.layer.cornerRadius = 8;
+    btn.contentEdgeInsets = UIEdgeInsetsMake(6, 10, 6, 10);
+    [btn addTarget:[NEHUDButtonHandler shared] action:@selector(openSettings:)
+        forControlEvents:UIControlEventTouchUpInside];
+    btn.translatesAutoresizingMaskIntoConstraints = NO;
+    [vc.view addSubview:btn];
+    UILayoutGuide *guide = vc.view.safeAreaLayoutGuide;
+    [NSLayoutConstraint activateConstraints:@[
+        [btn.trailingAnchor constraintEqualToAnchor:guide.trailingAnchor constant:-12],
+        [btn.topAnchor constraintEqualToAnchor:guide.topAnchor constant:8]
+    ]];
+    objc_setAssociatedObject(vc, &NEHUDButtonKey, btn, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    os_log(gLog, "[HUD] 已在 %{public}s 上加 HUD设置 按钮", name.UTF8String);
+}
+
+@implementation NEHUDSettingsVC
+
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.view.backgroundColor = [UIColor systemBackgroundColor];
+    self.title = @"HUD 设置";
+    self.navigationItem.rightBarButtonItem =
+        [[UIBarButtonItem alloc] initWithTitle:@"关闭" style:UIBarButtonItemStyleDone
+                                         target:self action:@selector(closeTapped)];
+
+    UIScrollView *scroll = [UIScrollView new];
+    scroll.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.view addSubview:scroll];
+    UILayoutGuide *guide = self.view.safeAreaLayoutGuide;
+    [NSLayoutConstraint activateConstraints:@[
+        [scroll.topAnchor constraintEqualToAnchor:guide.topAnchor],
+        [scroll.bottomAnchor constraintEqualToAnchor:guide.bottomAnchor],
+        [scroll.leadingAnchor constraintEqualToAnchor:guide.leadingAnchor constant:16],
+        [scroll.trailingAnchor constraintEqualToAnchor:guide.trailingAnchor constant:-16]
+    ]];
+
+    UIStackView *stack = [UIStackView new];
+    stack.axis = UILayoutConstraintAxisVertical;
+    stack.spacing = 18;
+    stack.translatesAutoresizingMaskIntoConstraints = NO;
+    [scroll addSubview:stack];
+    [NSLayoutConstraint activateConstraints:@[
+        [stack.topAnchor constraintEqualToAnchor:scroll.topAnchor constant:12],
+        [stack.bottomAnchor constraintEqualToAnchor:scroll.bottomAnchor constant:-12],
+        [stack.leadingAnchor constraintEqualToAnchor:scroll.leadingAnchor],
+        [stack.trailingAnchor constraintEqualToAnchor:scroll.trailingAnchor],
+        [stack.widthAnchor constraintEqualToAnchor:scroll.widthAnchor]
+    ]];
+
+    UILabel *hint = [UILabel new];
+    hint.text = @"改完立即生效，下次投屏帧就用新设置。";
+    hint.font = [UIFont systemFontOfSize:13];
+    hint.textColor = [UIColor secondaryLabelColor];
+    hint.numberOfLines = 0;
+    [stack addArrangedSubview:hint];
+
+    [stack addArrangedSubview:[self switchRow:@"日期时间" key:@"NEHUDShowDate" on:NEHUDShowDate()]];
+    [stack addArrangedSubview:[self switchRow:@"天气温度" key:@"NEHUDShowWeather" on:NEHUDShowWeather()]];
+    [stack addArrangedSubview:[self switchRow:@"信号（WiFi/5G）" key:@"NEHUDShowSignal" on:NEHUDShowSignal()]];
+    [stack addArrangedSubview:[self switchRow:@"电量" key:@"NEHUDShowBattery" on:NEHUDShowBattery()]];
+    [stack addArrangedSubview:[self switchRow:@"音乐" key:@"NEHUDShowMusic" on:NEHUDShowMusic()]];
+    [stack addArrangedSubview:[self switchRow:@"音量" key:@"NEHUDShowVolume" on:NEHUDShowVolume()]];
+
+    [stack addArrangedSubview:[self sectionLabel:@"位置"]];
+    UISegmentedControl *pos = [[UISegmentedControl alloc]
+        initWithItems:@[ @"右下", @"左下", @"左上", @"右上" ]];
+    pos.selectedSegmentIndex = NEHUDPosition();
+    [pos addTarget:self action:@selector(positionChanged:)
+        forControlEvents:UIControlEventValueChanged];
+    [stack addArrangedSubview:pos];
+
+    [stack addArrangedSubview:[self sectionLabel:@"字号"]];
+    UISegmentedControl *fs = [[UISegmentedControl alloc]
+        initWithItems:@[ @"小", @"中", @"大" ]];
+    CGFloat refPt = NEHUDFontRefPt();
+    fs.selectedSegmentIndex = (refPt == 16) ? 0 : ((refPt == 24) ? 2 : 1);
+    [fs addTarget:self action:@selector(fontChanged:)
+        forControlEvents:UIControlEventValueChanged];
+    [stack addArrangedSubview:fs];
+
+    UILabel *note = [UILabel new];
+    note.text = @"提示：仪表右上角是车子自己的表盘区，HUD 放右上会被盖住一部分，一般用右下。";
+    note.font = [UIFont systemFontOfSize:13];
+    note.textColor = [UIColor secondaryLabelColor];
+    note.numberOfLines = 0;
+    [stack addArrangedSubview:note];
+}
+
+- (UILabel *)sectionLabel:(NSString *)text {
+    UILabel *l = [UILabel new];
+    l.text = text;
+    l.font = [UIFont boldSystemFontOfSize:15];
+    return l;
+}
+
+- (UIView *)switchRow:(NSString *)title key:(NSString *)key on:(BOOL)on {
+    UIView *row = [UIView new];
+    UILabel *label = [UILabel new];
+    label.text = title;
+    label.font = [UIFont systemFontOfSize:16];
+    label.translatesAutoresizingMaskIntoConstraints = NO;
+    UISwitch *sw = [UISwitch new];
+    sw.on = on;
+    sw.translatesAutoresizingMaskIntoConstraints = NO;
+    // 把 key 存在 switch 的 accessibilityIdentifier 里，回调时读出来
+    sw.accessibilityIdentifier = key;
+    [sw addTarget:self action:@selector(switchChanged:)
+        forControlEvents:UIControlEventValueChanged];
+    [row addSubview:label];
+    [row addSubview:sw];
+    [NSLayoutConstraint activateConstraints:@[
+        [label.leadingAnchor constraintEqualToAnchor:row.leadingAnchor],
+        [label.centerYAnchor constraintEqualToAnchor:row.centerYAnchor],
+        [sw.trailingAnchor constraintEqualToAnchor:row.trailingAnchor],
+        [sw.centerYAnchor constraintEqualToAnchor:row.centerYAnchor],
+        [row.heightAnchor constraintEqualToConstant:32]
+    ]];
+    return row;
+}
+
+- (void)switchChanged:(UISwitch *)sw {
+    NSString *key = sw.accessibilityIdentifier;
+    if (key.length > 0)
+        [[NSUserDefaults standardUserDefaults] setBool:sw.isOn forKey:key];
+}
+
+- (void)positionChanged:(UISegmentedControl *)seg {
+    [[NSUserDefaults standardUserDefaults] setInteger:seg.selectedSegmentIndex forKey:@"NEHUDPosition"];
+}
+
+- (void)fontChanged:(UISegmentedControl *)seg {
+    [[NSUserDefaults standardUserDefaults] setInteger:seg.selectedSegmentIndex forKey:@"NEHUDFontSize"];
+}
+
+- (void)closeTapped {
+    [self dismissViewControllerAnimated:YES completion:nil];
+}
+
+@end
 
 // ---------------- Hooks ----------------
 %hook NBPixelBufferConverter
@@ -477,7 +1240,7 @@ static void NoteFrame(size_t w, size_t h) {
                hasSel ? "YES" : "NO");
     }
 
-    os_log(gLog, "NinebotEnhance iOS 0.1.2 已加载（电量/日期时间/天气/来电叠加）");
+    os_log(gLog, "NinebotEnhance iOS 0.1.3 已加载（小胶囊 HUD：日期/天气/信号/音量/电量/音乐/来电）");
 
     // 电量监听 + 定位 + 来电观察，全部在主队列 / 后台队列做，不阻塞加载
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -487,7 +1250,27 @@ static void NoteFrame(size_t w, size_t h) {
         gLocMgr.delegate = gLocDelegate;
         gLocMgr.desiredAccuracy = kCLLocationAccuracyThreeKilometers;
         [gLocMgr requestLocation];
+
+        // 音乐 + 音量：每秒一刷（主线程）
+        NERefreshMusicVolume();
+        gMusicTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0,
+                                             dispatch_get_main_queue());
+        dispatch_source_set_timer(gMusicTimer, dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC),
+                                  NSEC_PER_SEC, NSEC_PER_SEC / 2);
+        dispatch_source_set_event_handler(gMusicTimer, ^{ NERefreshMusicVolume(); });
+        dispatch_resume(gMusicTimer);
+
+        // HUD 设置按钮：每 3 秒看一次最上层页面，匹配到“我的/设置”页就加按钮
+        gButtonTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0,
+                                              dispatch_get_main_queue());
+        dispatch_source_set_timer(gButtonTimer, dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC),
+                                  3 * NSEC_PER_SEC, NSEC_PER_SEC);
+        dispatch_source_set_event_handler(gButtonTimer, ^{ NECheckSettingsButton(); });
+        dispatch_resume(gButtonTimer);
     });
+
+    // 联网方式监听（后台队列）
+    NEStartNetworkMonitor();
 
     gCallDelegate = [NECallDelegate new];
     gCallObserver = [CXCallObserver new];
