@@ -1,4 +1,14 @@
-// NinebotEnhance iOS v0.1.6 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
+// NinebotEnhance iOS v0.1.7 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
+//
+// v0.1.7 改动：探测失败也写文件。
+//  v0.1.6 的问题：只有拿到指令表持有者才写 Documents/BleCmdDump.json；
+//  12 次尝试都失败就不写文件。用户实测（车通电连上、打开九号出行等满
+//  2 分钟、确认注入 0.1.6）Filza 里找不到文件——不是找错地方，是文件
+//  根本没生成。本版改成每次尝试都写一份 JSON（成功/失败都写，
+//  用户中途退出 App 文件也已经在）；第 12 次仍失败时写一份最终文件，
+//  额外加 status:"failed" 和 reason（中文，说明可能原因），然后停表。
+//  成功时行为不变（targets 照常判有/无，成功后停表）。
+//  其他一律不动：HUD 胶囊、设置按钮只在“我的”页根页面、kill switch。
 //
 // v0.1.6 改动：HUD 设置按钮只在“我的”页显示。
 //  之前按类名匹配（Mine/Profile/Setting/Me/User/Account），
@@ -1283,7 +1293,9 @@ static void NECheckSettingsButton(void) {
 // 防御：每一步都有 nil / respondsToSelector / @try 保护；
 // 类不存在、单例拿不到、指令表为空都只记日志，绝不崩。
 // 触发：加载后 5 秒打一次方法列表；之后每 10 秒试取一次指令表，
-// 最多 12 次（2 分钟），写出非空结果就停。车没连上时拿不到是正常的。
+// 最多 12 次（2 分钟）。每次尝试都写一份 Documents/BleCmdDump.json
+//（成功/失败都写，第 12 次失败写最终文件，带 status:failed + reason）；
+// 写出非空结果就停。车没连上时拿不到是正常的。
 // 开关：defaults write cn.ninebot.segway NEProbeVehicle -bool NO
 // 产出：Documents/BleCmdDump.json + os_log（[PROBE] 前缀）。
 
@@ -1546,7 +1558,7 @@ static BOOL NEProbeAttempt(int attempt) {
                                          @"_TtC7Vehicle22BleCommandDebugManager",
                                          @"_TtC17NBBluetoothModule9DebugTool"];
     NSMutableDictionary *report = [NSMutableDictionary dictionary];
-    report[@"probe"] = @"NinebotEnhance iOS 0.1.6";
+    report[@"probe"] = @"NinebotEnhance iOS 0.1.7";
     report[@"attempt"] = @(attempt);
     report[@"date"] = [[NSDate date] description];
     if (gProbeClassInfo) report[@"classes"] = gProbeClassInfo;
@@ -1589,20 +1601,27 @@ static BOOL NEProbeAttempt(int attempt) {
         os_log(gLog, "[PROBE] 尝试过程异常：%{public}s", e.reason.UTF8String ?: "?");
     }
 
-    if (!holders.count) {
-        os_log(gLog, "[PROBE] 第 %d 次尝试：没拿到指令表", attempt);
-        return NO;
-    }
-
+    // v0.1.7：无论拿到没拿到，都写一份 JSON（每次尝试都写，用户
+    // 中途退出 App 文件也已经在）。成功时 targets 照常判有/无；
+    // 失败时 singletons/holders/targets 为空、status 为 failed；
+    // 第 12 次仍失败时再加 reason，说明可能原因。
     report[@"singletons"] = singletons;
     report[@"holders"] = holders;
     NSMutableDictionary *targets = [NSMutableDictionary dictionary];
     for (NSString *t in NEProbeTargetCommands()) targets[t] = @([foundKeys containsObject:t]);
     report[@"targets"] = targets;
-
-    for (NSString *t in NEProbeTargetCommands())
-        os_log(gLog, "[PROBE] 目标指令 %{public}s：%{public}s", t.UTF8String,
-               [foundKeys containsObject:t] ? "有" : "无");
+    BOOL ok = (holders.count > 0);
+    report[@"status"] = ok ? @"success" : @"failed";
+    if (!ok) {
+        os_log(gLog, "[PROBE] 第 %d 次尝试：没拿到指令表", attempt);
+        if (attempt >= 12) {
+            report[@"reason"] = @"12 次尝试都没拿到指令表，可能原因：车没连上，或单例入口不在这 4 个候选类上，或顺着 ivar 没找到含 deviceCommands/commandDict 的对象。";
+        }
+    } else {
+        for (NSString *t in NEProbeTargetCommands())
+            os_log(gLog, "[PROBE] 目标指令 %{public}s：%{public}s", t.UTF8String,
+                   [foundKeys containsObject:t] ? "有" : "无");
+    }
 
     NSError *err = nil;
     NSData *json = [NSJSONSerialization dataWithJSONObject:report
@@ -1618,7 +1637,7 @@ static BOOL NEProbeAttempt(int attempt) {
     }
     os_log(gLog, "[PROBE] ✅ 已写入 %{public}s（%lu B，第 %d 次尝试）", path.UTF8String,
            (unsigned long)json.length, attempt);
-    return YES;
+    return ok;
 }
 
 // ---- 启动：5 秒后打方法列表，之后每 10 秒试取指令表，最多 12 次 ----
@@ -1640,7 +1659,7 @@ static void NEProbeStart(void) {
         if (gProbeDone) { dispatch_source_cancel(gProbeTimer); return; }
         gProbeAttempts++;
         if (gProbeAttempts > 12) {
-            os_log(gLog, "[PROBE] 12 次尝试都没拿到指令表，停止重试（可能车没连上，或单例入口不在这 4 个类上）");
+            os_log(gLog, "[PROBE] 12 次尝试都没拿到指令表，停止重试（可能车没连上，或单例入口不在这 4 个类上）；最终结果已写入 BleCmdDump.json，请把文件发回");
             gProbeDone = YES;
             dispatch_source_cancel(gProbeTimer);
             return;
@@ -1649,6 +1668,12 @@ static void NEProbeStart(void) {
             gProbeDone = YES;
             dispatch_source_cancel(gProbeTimer);
             os_log(gLog, "[PROBE] 探测完成：BleCmdDump.json 已写好，请把文件发回");
+        } else if (gProbeAttempts >= 12) {
+            // 第 12 次已写过一份带 status:failed + reason 的最终文件，
+            // 不用再等第 13 次 tick，直接停表。
+            gProbeDone = YES;
+            dispatch_source_cancel(gProbeTimer);
+            os_log(gLog, "[PROBE] 12 次尝试都没拿到指令表，停止重试（可能车没连上，或单例入口不在这 4 个类上）；最终结果已写入 BleCmdDump.json，请把文件发回");
         }
     });
     dispatch_resume(gProbeTimer);
@@ -1721,7 +1746,7 @@ static void NEProbeStart(void) {
                hasSel ? "YES" : "NO");
     }
 
-    os_log(gLog, "NinebotEnhance iOS 0.1.6 已加载（小胶囊 HUD：日期/天气/信号/音量/电量/音乐/来电 + 车辆数据探测）");
+    os_log(gLog, "NinebotEnhance iOS 0.1.7 已加载（小胶囊 HUD：日期/天气/信号/音量/电量/音乐/来电 + 车辆数据探测）");
 
     // 电量监听 + 定位 + 来电观察，全部在主队列 / 后台队列做，不阻塞加载
     dispatch_async(dispatch_get_main_queue(), ^{
