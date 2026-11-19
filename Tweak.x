@@ -1,4 +1,14 @@
-// NinebotEnhance iOS v0.1.5 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
+// NinebotEnhance iOS v0.1.6 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
+//
+// v0.1.6 改动：HUD 设置按钮只在“我的”页显示。
+//  之前按类名匹配（Mine/Profile/Setting/Me/User/Account），
+//  按钮会出现在设置页、个人资料页等各种页面上。改成看 tab：
+//  当前选中的 tab 必须是“我的”tab（标题是“我的”，或是最后一个
+//  tab），而且当前页得是该 tab 的根页面（不是从“我的”点进去的
+//  子页面，如 MineSettingVC 这类）。没有 tab bar 时退回类名
+//  含 mine 才算。类名含 mine 但不在“我的”tab 上时记一次日志
+//  （方便排错）；自己的设置页（NEHUD*）照旧排除。
+//  车辆数据探测（v0.1.5）原样保留。
 //
 // 拦截点：+[NBPixelBufferConverter pixelBufferFromCGImage:]（类方法）
 //         +[NBPixelBufferConverter pixelBufferFromCGImage_Mjpeg:]（MJPEG 备用路径）
@@ -994,11 +1004,12 @@ static void NoteFrame(size_t w, size_t h) {
 }
 
 // ---------------- HUD 设置界面 ----------------
-// 九号 App 的“我的/个人/设置”页右上角会出现一个“HUD设置”按钮。
-// 找页面的办法：每 3 秒看一次最上层 ViewController，类名里带
-// Mine/Profile/Setting/Me/User/Account 的就加按钮（运行时匹配，
-// 没匹配到就不出现，设置仍可用 defaults 命令改）。不硬编任何
-// App 的类名，所以 6.10.12 改了类名也不会崩，只是不出按钮。
+// 九号 App 的“我的”页右上角会出现一个“HUD设置”按钮。
+// 找页面的办法：每 3 秒看一次最上层 ViewController，只在“我的”页
+// 显示（NEIsMineRootPage：当前 tab 是“我的”且是根页面；没有 tab
+// bar 时退回类名含 mine）。没匹配到就不出现，设置仍可用 defaults
+// 命令改。不硬编任何 App 的类名，所以 6.10.12 改了类名也不会崩，
+// 只是不出按钮。
 
 static const char NEHUDButtonKey = 0;
 
@@ -1010,8 +1021,8 @@ static const char NEHUDButtonKey = 0;
 - (void)openSettings:(UIButton *)sender;
 @end
 
-static UIViewController *NETopViewController(void) {
-    // UIApplication.windows 在 iOS 15 已废弃（-Werror 下会编译失败），改走 connectedScenes → UIWindowScene.windows。
+// 取 key window。UIApplication.windows 在 iOS 15 已废弃（-Werror 下会编译失败），改走 connectedScenes → UIWindowScene.windows。
+static UIWindow *NEKeyWindow(void) {
     UIWindow *keyWindow = nil;
     for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
         if (![scene isKindOfClass:[UIWindowScene class]]) continue;
@@ -1027,6 +1038,11 @@ static UIViewController *NETopViewController(void) {
             if (keyWindow) break;
         }
     }
+    return keyWindow;
+}
+
+static UIViewController *NETopViewController(void) {
+    UIWindow *keyWindow = NEKeyWindow();
     UIViewController *vc = keyWindow.rootViewController;
     while (vc) {
         if (vc.presentedViewController) { vc = vc.presentedViewController; continue; }
@@ -1057,19 +1073,50 @@ static UIViewController *NETopViewController(void) {
 }
 @end
 
+// 是不是“我的”页的根页面：当前选中的 tab 是“我的”tab，且当前页是该 tab 的根页面。
+// “我的”tab 的判定：tab 标题是“我的”，或是最后一个 tab（中文 App 里“我的”通常在最后）。
+// 根页面的判定：tab 里是导航栈时，当前页得是栈底；不是导航栈时，当前页得是 tab 本身。
+// 没有 tab bar 时退回类名判断（类名含 mine 才算）。
+static BOOL NEIsMineRootPage(UIViewController *topVC) {
+    UIWindow *keyWindow = NEKeyWindow();
+    UIViewController *root = keyWindow.rootViewController;
+    while (root.presentedViewController) root = root.presentedViewController;
+    if (![root isKindOfClass:[UITabBarController class]]) {
+        return [[NSStringFromClass([topVC class]) lowercaseString] containsString:@"mine"];
+    }
+    UITabBarController *tab = (UITabBarController *)root;
+    UIViewController *sel = tab.selectedViewController;
+    BOOL isMineTab = [sel.tabBarItem.title isEqualToString:@"我的"] ||
+                     tab.selectedIndex == tab.viewControllers.count - 1;
+    if (!isMineTab) {
+        // 诊断：类名含 mine 但不在“我的”tab 上（旧规则会放行）——只在类名变时记一次，
+        // 万一按钮不出来了，拿这条日志就知道 tab 结构长什么样。
+        static NSString *sLastDiag = nil;
+        NSString *cls = NSStringFromClass([topVC class]);
+        if ([[cls lowercaseString] containsString:@"mine"] && ![cls isEqualToString:sLastDiag]) {
+            sLastDiag = cls;
+            os_log(gLog, "[HUD] 类名含 mine 但不在我的 tab（tab %ld/%ld，标题 %{public}@，当前页 %{public}@），不放按钮",
+                   (long)tab.selectedIndex, (long)tab.viewControllers.count,
+                   sel.tabBarItem.title ?: @"(无)", cls);
+        }
+        return NO;
+    }
+    if ([sel isKindOfClass:[UINavigationController class]]) {
+        return topVC == ((UINavigationController *)sel).viewControllers.firstObject;
+    }
+    return topVC == sel;
+}
+
 static void NECheckSettingsButton(void) {
     // 只在主线程调（定时器就是主队列）。
     UIViewController *vc = NETopViewController();
     if (!vc || !vc.view) return;
-    NSString *name = NSStringFromClass([vc class]);
-    NSString *lower = [name lowercaseString];
-    BOOL match = [lower containsString:@"mine"] || [lower containsString:@"profile"] ||
-                 [lower containsString:@"setting"] || [lower containsString:@"me"] ||
-                 [lower containsString:@"user"] || [lower containsString:@"account"];
-    if (!match) return;
+    NSString *lower = [NSStringFromClass([vc class]) lowercaseString];
     // 排除我们自己的设置页：NEHUDSettingsVC 的类名里也有 setting，
     // 不排除的话按钮会出现在自己的设置页右上角（还挡住第一个开关）。
     if ([lower containsString:@"nehud"]) return;
+    // 只在“我的”页显示（根页面，不是从“我的”点进去的子页面）。
+    if (!NEIsMineRootPage(vc)) return;
     if (objc_getAssociatedObject(vc, &NEHUDButtonKey)) return;
     UIButton *btn = [UIButton buttonWithType:UIButtonTypeSystem];
     // contentEdgeInsets 在 iOS 15 已废弃（-Werror 下会编译失败），改用 UIButtonConfiguration（iOS 15+，本工程最低 16.0）。
@@ -1499,7 +1546,7 @@ static BOOL NEProbeAttempt(int attempt) {
                                          @"_TtC7Vehicle22BleCommandDebugManager",
                                          @"_TtC17NBBluetoothModule9DebugTool"];
     NSMutableDictionary *report = [NSMutableDictionary dictionary];
-    report[@"probe"] = @"NinebotEnhance iOS 0.1.5";
+    report[@"probe"] = @"NinebotEnhance iOS 0.1.6";
     report[@"attempt"] = @(attempt);
     report[@"date"] = [[NSDate date] description];
     if (gProbeClassInfo) report[@"classes"] = gProbeClassInfo;
@@ -1674,7 +1721,7 @@ static void NEProbeStart(void) {
                hasSel ? "YES" : "NO");
     }
 
-    os_log(gLog, "NinebotEnhance iOS 0.1.5 已加载（小胶囊 HUD：日期/天气/信号/音量/电量/音乐/来电 + 车辆数据探测）");
+    os_log(gLog, "NinebotEnhance iOS 0.1.6 已加载（小胶囊 HUD：日期/天气/信号/音量/电量/音乐/来电 + 车辆数据探测）");
 
     // 电量监听 + 定位 + 来电观察，全部在主队列 / 后台队列做，不阻塞加载
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -1694,7 +1741,7 @@ static void NEProbeStart(void) {
         dispatch_source_set_event_handler(gMusicTimer, ^{ NERefreshMusicVolume(); });
         dispatch_resume(gMusicTimer);
 
-        // HUD 设置按钮：每 3 秒看一次最上层页面，匹配到“我的/设置”页就加按钮
+        // HUD 设置按钮：每 3 秒看一次最上层页面，只在“我的”页加按钮
         gButtonTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0,
                                               dispatch_get_main_queue());
         dispatch_source_set_timer(gButtonTimer, dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC),

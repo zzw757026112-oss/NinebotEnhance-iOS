@@ -1,9 +1,18 @@
-# NinebotEnhance iOS v0.1.5
+# NinebotEnhance iOS v0.1.6
 
 给官方九号出行 App（`cn.ninebot.segway`）的注入插件：钩住投屏画面的
 编码器入口，在 App 自己的导航画面上叠加一层 HUD，再交给 App 原来的
 H.264/RTP/RTCP/UDP 链路发给仪表。思路来自安卓的 NinebotEnhance，
 但代码是全新写的 iOS Theos 插件（安卓代码一行都搬不过来）。
+
+## v0.1.6 改了什么
+
+**HUD 设置按钮只在"我的"页显示。** 之前按类名匹配
+（Mine/Profile/Setting/Me/User/Account），按钮会出现在设置页、个人
+资料页等各种页面上。改成看 tab：当前选中的 tab 必须是"我的"tab
+（标题是"我的"，或是最后一个 tab），而且当前页得是该 tab 的根页面
+（不是从"我的"点进去的子页面）。没有 tab bar 时退回类名含 mine 才算。
+自己的设置页（NEHUD*）照旧排除。**车辆数据探测（v0.1.5）原样保留。**
 
 ## v0.1.5 改了什么
 
