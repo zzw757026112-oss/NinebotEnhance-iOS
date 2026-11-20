@@ -1,3 +1,4 @@
+// 触发重建：RiderImage.h 已换成抠净腿左边白区的修复版（head 575249ab），workflow 只监听 Tweak.x 等文件，头文件单独推不触发构建。
 // NinebotEnhance iOS v0.2.0 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
 //
 // v0.2.0 改动：HUD 加骑行小人，AI 重画的插画分层动画版。
