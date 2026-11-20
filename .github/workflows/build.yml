@@ -6,6 +6,8 @@ on:
     paths:
       - 'Tweak.x'
       - 'substrate_shim.m'
+      - 'RiderImage.h'
+      - 'RiderMotion.h'
       - 'include/**'
       - 'Makefile'
       - '.github/workflows/build.yml'
