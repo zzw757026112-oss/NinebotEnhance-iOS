@@ -1,17 +1,16 @@
 // NinebotEnhance iOS v0.2.0 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
 //
-// v0.2.0 改动：HUD 加 Q 版手绘风卡通骑行小人。
+// v0.2.0 改动：HUD 加骑行小人，直接用用户发的参考图贴图。
 //  表盘区下面紧挨着一个带边框的小框（背景跟 HUD 胶囊一样：黑 45% +
-//  白 35% 边框、圆角 12），里面是 Q 版小人骑浅蓝踏板小绵羊，固定在框中间。
-//  框宽默认取帧宽 0.62（当作表盘宽度估计值，等用户实测照片再校准），
-//  水平居中，顶边在帧高 0.30；框高 = 精灵画高 + 内边距，不去碰底下
-//  日期天气那几行。车子行驶时小人跟着骑（3 帧循环：轮子辐条转、螺旋桨转、
-//  尾气泡变大、车身轻晃，骑得越快帧切换越快），车子停下来小人也停在静止帧；
-//  速度用插件已有的 GPS 速度驱动（>2 km/h 开始骑，<1 km/h 停下，中间迟滞
-//  防抖）。设置页加“骑行小人”开关（默认开）。
-//  造型是 Core Graphics 光滑画法（NEDrawRider），按用户定稿的参考图画：
-//  大黄头盔白条 + 竹蜻蜓螺旋桨、圆脸腮红微笑、白上衣灰裤子、浅蓝小绵羊。
-//  超速提醒、探针一律不动。
+//  白 35% 边框、圆角 12），里面就是用户那张图：大黄头盔竹蜻蜓、圆脸腮红、
+//  白上衣灰裤子骑浅蓝小绵羊，一模一样，固定在框中间。
+//  框顶边在帧高 0.30，框高按日期天气胶囊之上的可用空间定，框宽 = 框高 ×
+//  299/320，水平居中，不去碰底下日期天气那几行。车子行驶时小人跟着骑
+//  （3 帧循环：整图轻晃 + 螺旋桨转，骑得越快帧切换越快），车子停下来小人
+//  也停在静止帧；速度用插件已有的 GPS 速度驱动（>2 km/h 开始骑，<1 km/h
+//  停下，中间迟滞防抖）。设置页加“骑行小人”开关（默认开）。
+//  画法是贴图（NEDrawRider）：RiderImage.h 里两张 PNG 的 base64，运行时
+//  解码一次缓存；先画整图，再绕 hub 旋转画螺旋桨。超速提醒、探针一律不动。
 //
 // v0.1.9 改动：音乐拿掉 + 超速提醒标题去重。
 //  音乐整个删了（九号 App 自己就显示音乐，插件不再重复画）：
@@ -135,6 +134,7 @@
 #import <objc/message.h>
 #import <objc/runtime.h>
 #import <substrate.h>
+#include "RiderImage.h" // 用户原图贴图素材（base64，见 RiderImage.h）
 
 @interface NBPixelBufferConverter : NSObject
 + (CVPixelBufferRef)pixelBufferFromCGImage:(CGImageRef)image;
@@ -710,34 +710,46 @@ static BOOL NEIsIconSeg(NESeg *s) { return s->kind != 0; }
 
 typedef struct {
     BOOL showDate, showWeather, showSignal, showBattery, showVolume;
-    BOOL showRider;  // 像素骑行小人开关（v0.2.0）
+    BOOL showRider;  // 骑行小人开关（v0.2.0）
     BOOL speedAlert; // 超速提醒开关（v0.1.8）
     NSInteger position; // 0 右下 1 左下 2 左上 3 右上
     CGFloat fontRefPt;  // 16/20/24
 } NEHUDSettings;
 
-// ---------- 像素骑行小人（v0.2.0）----------
-// 边框 + 动画 + GPS 驱动 + 开关都在这里；造型是 Q 版手绘风（Core Graphics
-// 光滑画法，不再用像素网格）：大黄头盔白条 + 竹蜻蜓螺旋桨、圆脸腮红微笑、
-// 白上衣灰裤子，骑浅蓝踏板小绵羊。预览见 rider-designs/rider-3-chibi-ref.gif，
-// 坐标与颜色的真源是 /tmp/rider_ref.py（已按 560x200 精灵空间逐项核对）。
-// 位置/尺寸全部是常量，方便按用户实测照片微调：
-//  表盘宽度是估计值——用户说边框和车子表盘一样宽，这里先按帧宽
-//  0.62 估，等用户发骑行实测照片后再校准；y 是边框顶边离画面顶的距离。
-// 框高 = 精灵画高 + 内边距，不去碰底下日期天气那几行。
-// 精灵空间 560x200（y 朝下，与预览脚本一致），画时再等比缩进框里。
-#define NE_RIDER_SPRITE_W 560.0
-#define NE_RIDER_SPRITE_H 200.0
-static const CGFloat NE_RIDER_BOX_W_FRAC   = 0.62; // 边框宽 = 帧宽 × 0.62（表盘宽度估计值，待实测校准）
+// ---------- 骑行小人（v0.2.0）：直接用用户原图贴图 ----------
+// 用户明确要求：不要 Muse 自己画的风格，直接用用户发的参考图，一模一样。
+// 上一版手绘 Q 版 Core Graphics 代码（commit cf290af0）已删掉。
+// 素材在 RiderImage.h：kRiderMainB64（299x320，用户原图去白底，螺旋桨已抠掉）、
+// kRiderPropB64（49x24，单独的螺旋桨叶片）。运行时 base64 解码一次并缓存。
+// 动画：frame 0 停车静止；frame 1 上移 2px + 轻转 -1°、螺旋桨 +40°；
+// frame 2 回原位 + 轻转 +1°、螺旋桨 +80°。螺旋桨绕 hub (136.7, 17.5) 旋转。
+// 边框：顶边在帧高 0.30；高度按日期天气胶囊之上的可用空间定（RenderOverlay
+// 把胶囊顶边位置写进 gNERiderLimitBottomFromTop），宽度 = 高度 × 299/320，
+// 水平居中；样式跟 HUD 胶囊一样（黑 45% + 白 35% 边、圆角 12）。
+// 框高 = 图片高 + 内边距，不去碰底下日期天气那几行。
+// 位置/尺寸全部是常量，方便按用户实测照片微调。
+#define NE_RIDER_IMG_W 299.0
+#define NE_RIDER_IMG_H 320.0
+#define NE_RIDER_PROP_W 49.0
+#define NE_RIDER_PROP_H 24.0
+#define NE_RIDER_PROP_OFF_X 110.7 // 螺旋桨素材在 main 图里的左上角偏移
+#define NE_RIDER_PROP_OFF_Y 5.8
+#define NE_RIDER_HUB_X 136.7      // 螺旋桨中心（main 图坐标）
+#define NE_RIDER_HUB_Y 17.5
 static const CGFloat NE_RIDER_BOX_TOP_FRAC = 0.30; // 边框顶边离顶 = 帧高 × 0.30（表盘区下方，待实测校准）
 static const CGFloat NE_RIDER_PAD          = 8;    // 边框内边距（848x480 参考 px）
 static const double  NE_RIDER_SPEED_START  = 2.0;  // >2 km/h 开始骑
 static const double  NE_RIDER_SPEED_STOP   = 1.0;  // <1 km/h 停下（迟滞，防抖）
 
+// RenderOverlay 每次重画时把日期天气胶囊的顶边（离顶距离）写到这里，
+// 供 NEDrawRider 定边框高度：边框底边必须在胶囊上面，留 12*sy 空隙。
+// 胶囊在顶部时（position 左上/右上）或没有胶囊时，值 = 帧高 - 12*sy。
+static CGFloat gNERiderLimitBottomFromTop = 0;
+
 // 当前该画第几帧（0/1/2）。速度用 GPS 速度（km/h），speedFresh 为 NO
 // （5 秒内没新定位）就当停车。>2 开始骑，<1 停下，中间保持上次状态
 // （迟滞，避免在 1–2 之间抖）。骑得越快帧切换越快（0.45s→0.12s 下限）。
-// 叠加层最多 250ms 重画一次，所以实际动画帧率 ≤4fps，像素风够用。
+// 叠加层最多 250ms 重画一次，所以实际动画帧率 ≤4fps，贴图够用。
 static int NERiderFrameIndex(double speedKmh, BOOL speedFresh, CFAbsoluteTime now) {
     static BOOL moving = NO;
     double speed = speedFresh ? speedKmh : 0;
@@ -751,116 +763,55 @@ static int NERiderFrameIndex(double speedKmh, BOOL speedFresh, CFAbsoluteTime no
     return (int)(ticks % 3);
 }
 
-// ---- Q 版手绘风小帮手（都在精灵坐标里画，y 朝下）----
-// 配色与预览脚本 /tmp/rider_ref.py 一致（RGB 0-255）。
-#define NE_OUT_R 150.0
-#define NE_OUT_G  60.0
-#define NE_OUT_B  30.0
-
-static void NESetFill(CGContextRef ctx, CGFloat r, CGFloat g, CGFloat b) {
-    CGContextSetRGBFillColor(ctx, r / 255.0, g / 255.0, b / 255.0, 1.0);
-}
-static void NESetStroke(CGContextRef ctx, CGFloat r, CGFloat g, CGFloat b) {
-    CGContextSetRGBStrokeColor(ctx, r / 255.0, g / 255.0, b / 255.0, 1.0);
-}
-
-// 填色 + 棕描边椭圆
-static void NEFillStrokeEllipse(CGContextRef ctx, CGRect rect,
-                                CGFloat fr, CGFloat fg, CGFloat fb, CGFloat lw) {
-    NESetFill(ctx, fr, fg, fb);
-    NESetStroke(ctx, NE_OUT_R, NE_OUT_G, NE_OUT_B);
-    CGContextSetLineWidth(ctx, lw);
-    CGContextAddEllipseInRect(ctx, rect);
-    CGContextDrawPath(ctx, kCGPathFillStroke);
+// base64 解码成 CGImage（只解码一次，缓存）。都是 iOS 7/4 时代的老 API。
+static CGImageRef NERiderImageFromB64(const char *b64) {
+    if (!b64) return NULL;
+    NSString *s = [NSString stringWithUTF8String:b64];
+    if (!s) return NULL;
+    NSData *data = [[NSData alloc] initWithBase64EncodedString:s
+                                                        options:NSDataBase64DecodingIgnoreUnknownCharacters];
+    if (!data) return NULL;
+    CGImageSourceRef src = CGImageSourceCreateWithData((__bridge CFDataRef)data, NULL);
+    if (!src) return NULL;
+    CGImageRef img = CGImageSourceCreateImageAtIndex(src, 0, NULL);
+    CFRelease(src);
+    return img;
 }
 
-// 只描边椭圆
-static void NEStrokeEllipse(CGContextRef ctx, CGRect rect,
-                            CGFloat sr, CGFloat sg, CGFloat sb, CGFloat lw) {
-    NESetStroke(ctx, sr, sg, sb);
-    CGContextSetLineWidth(ctx, lw);
-    CGContextAddEllipseInRect(ctx, rect);
-    CGContextStrokePath(ctx);
+static CGImageRef NERiderMainImage(void) {
+    static CGImageRef img = NULL;
+    static dispatch_once_t once = 0;
+    dispatch_once(&once, ^{ img = NERiderImageFromB64(kRiderMainB64); });
+    return img;
 }
 
-// 填色 + 棕描边圆角矩形
-static void NEFillStrokeRoundRect(CGContextRef ctx, CGRect rect, CGFloat radius,
-                                  CGFloat fr, CGFloat fg, CGFloat fb, CGFloat lw) {
-    CGPathRef p = CGPathCreateWithRoundedRect(rect, radius, radius, NULL);
-    NESetFill(ctx, fr, fg, fb);
-    NESetStroke(ctx, NE_OUT_R, NE_OUT_G, NE_OUT_B);
-    CGContextSetLineWidth(ctx, lw);
-    CGContextAddPath(ctx, p);
-    CGContextDrawPath(ctx, kCGPathFillStroke);
-    CGPathRelease(p);
-}
-
-// 粗线条的描边做法：先画棕色粗线（宽+7），再画同色细线盖在上面。端点圆头。
-static void NEOutlinedLine(CGContextRef ctx,
-                           CGFloat x0, CGFloat y0, CGFloat x1, CGFloat y1,
-                           CGFloat width, CGFloat r, CGFloat g, CGFloat b) {
-    CGContextSetLineCap(ctx, kCGLineCapRound);
-    NESetStroke(ctx, NE_OUT_R, NE_OUT_G, NE_OUT_B);
-    CGContextSetLineWidth(ctx, width + 7);
-    CGContextBeginPath(ctx);
-    CGContextMoveToPoint(ctx, x0, y0);
-    CGContextAddLineToPoint(ctx, x1, y1);
-    CGContextStrokePath(ctx);
-    NESetStroke(ctx, r, g, b);
-    CGContextSetLineWidth(ctx, width);
-    CGContextBeginPath(ctx);
-    CGContextMoveToPoint(ctx, x0, y0);
-    CGContextAddLineToPoint(ctx, x1, y1);
-    CGContextStrokePath(ctx);
-}
-
-// 普通单色线（圆头）
-static void NELine(CGContextRef ctx,
-                   CGFloat x0, CGFloat y0, CGFloat x1, CGFloat y1,
-                   CGFloat width, CGFloat r, CGFloat g, CGFloat b) {
-    CGContextSetLineCap(ctx, kCGLineCapRound);
-    NESetStroke(ctx, r, g, b);
-    CGContextSetLineWidth(ctx, width);
-    CGContextBeginPath(ctx);
-    CGContextMoveToPoint(ctx, x0, y0);
-    CGContextAddLineToPoint(ctx, x1, y1);
-    CGContextStrokePath(ctx);
-}
-
-// 圆弧描边。角度用 PIL 约定：0°=3 点方向，角度顺时针增大（y 朝下坐标里）。
-// 用折线逼近，避免在 y 翻转的 CTM 下 CGContextAddArc 的方向歧义。
-static void NEArcStroke(CGContextRef ctx, CGFloat cx, CGFloat cy,
-                        CGFloat rx, CGFloat ry,
-                        CGFloat a0deg, CGFloat a1deg, CGFloat width) {
-    const int n = 32;
-    CGContextSetLineCap(ctx, kCGLineCapRound);
-    CGContextSetLineWidth(ctx, width);
-    CGContextBeginPath(ctx);
-    for (int i = 0; i <= n; i++) {
-        CGFloat a = (a0deg + (a1deg - a0deg) * i / n) * M_PI / 180.0;
-        CGFloat x = cx + rx * cos(a);
-        CGFloat y = cy + ry * sin(a);
-        if (i == 0) CGContextMoveToPoint(ctx, x, y);
-        else CGContextAddLineToPoint(ctx, x, y);
-    }
-    CGContextStrokePath(ctx);
+static CGImageRef NERiderPropImage(void) {
+    static CGImageRef img = NULL;
+    static dispatch_once_t once = 0;
+    dispatch_once(&once, ^{ img = NERiderImageFromB64(kRiderPropB64); });
+    return img;
 }
 
 // 画小人框：黑 45% + 白 35% 边、圆角 12（跟 HUD 胶囊一样的底板），
-// 人物固定在框中间。ctx 是 y 朝上的 bitmap（跟 RenderOverlay 同一套坐标）。
-// 精灵在 560x200 空间里画（y 朝下），用 CTM 翻转后等比缩进框里。
+// 用户原图贴图固定在框中间。ctx 是 y 朝上的 bitmap（跟 RenderOverlay 同一套坐标）。
+// 图片按等比缩放进框里（不拉伸），螺旋桨绕 hub 旋转。
 static void NEDrawRider(CGContextRef ctx, CGFloat w, CGFloat h, int frame) {
     if (frame < 0 || frame > 2) frame = 0;
+    CGImageRef mainImg = NERiderMainImage();
+    CGImageRef propImg = NERiderPropImage();
+    if (!mainImg || !propImg) return;
+
     CGFloat sx = w / 848.0;
     CGFloat sy = h / 480.0;
-    CGFloat boxW = NE_RIDER_BOX_W_FRAC * w;
-    CGFloat padX = NE_RIDER_PAD * sx;
-    CGFloat padY = NE_RIDER_PAD * sy;
-    CGFloat s = (boxW - 2 * padX) / NE_RIDER_SPRITE_W;
-    CGFloat spriteH = NE_RIDER_SPRITE_H * s;
-    CGFloat boxH = spriteH + 2 * padY;
-    CGFloat boxX = (w - boxW) / 2;
+
+    // 边框：顶边 0.30，底边在胶囊上面（留空隙）；宽 = 高 × 299/320，水平居中
     CGFloat boxTopFromTop = NE_RIDER_BOX_TOP_FRAC * h;
+    CGFloat limitBottomFromTop = (gNERiderLimitBottomFromTop > 0)
+        ? gNERiderLimitBottomFromTop : (h - 12 * sy);
+    CGFloat boxH = limitBottomFromTop - boxTopFromTop;
+    if (boxH < 80 * sy) boxH = 80 * sy; // 兜底：可用空间太小也别画崩
+    CGFloat boxW = boxH * (NE_RIDER_IMG_W / NE_RIDER_IMG_H);
+    CGFloat boxX = (w - boxW) / 2;
     CGFloat boxY = h - boxTopFromTop - boxH; // y 朝上坐标：底边离底的距离
 
     // 底板：跟 HUD 胶囊一样
@@ -873,152 +824,48 @@ static void NEDrawRider(CGContextRef ctx, CGFloat w, CGFloat h, int frame) {
     CGContextDrawPath(ctx, kCGPathFillStroke);
     CGPathRelease(panel);
 
-    // 精灵坐标（y 朝下，与预览脚本一致）；frame 1 整体上移 2px（轻晃）
+    // 图片等比放进框内（留内边距），居中
+    CGFloat padX = NE_RIDER_PAD * sx;
+    CGFloat padY = NE_RIDER_PAD * sy;
+    CGFloat contentW = boxW - 2 * padX;
+    CGFloat contentH = boxH - 2 * padY;
+    CGFloat s = MIN(contentW / NE_RIDER_IMG_W, contentH / NE_RIDER_IMG_H);
+    CGFloat imgW = NE_RIDER_IMG_W * s;
+    CGFloat imgH = NE_RIDER_IMG_H * s;
+    CGFloat imgX = boxX + padX + (contentW - imgW) / 2;
+    CGFloat imgY = boxY + padY + (contentH - imgH) / 2; // y 朝上：图片底边
+
+    // 动画：frame 1 上移 2px + 轻转 -1°；frame 2 回原位 + 轻转 +1°（绕图中心）
+    CGFloat tiltDeg = (frame == 1) ? -1.0 : (frame == 2) ? 1.0 : 0.0;
+    CGFloat dyUp = (frame == 1) ? 2.0 * s : 0.0; // 上移 2px（图片坐标，按比例换算）
+    CGFloat cx = imgX + imgW / 2;
+    CGFloat cy = imgY + imgH / 2;
+
     CGContextSaveGState(ctx);
-    CGFloat dy = (frame == 1) ? -2.0 : 0.0;
-    CGContextTranslateCTM(ctx, boxX + padX, boxY + padY + spriteH + dy * s);
-    CGContextScaleCTM(ctx, s, -s);
-    CGContextSetLineCap(ctx, kCGLineCapRound);
-    CGContextSetLineJoin(ctx, kCGLineJoinRound);
-    BOOL moving = (frame > 0);
+    CGContextTranslateCTM(ctx, cx, cy + dyUp);
+    CGContextRotateCTM(ctx, tiltDeg * M_PI / 180.0);
+    CGContextTranslateCTM(ctx, -imgW / 2, -imgH / 2);
+    // y 朝上的 context 里画图要先翻转，否则图片上下颠倒
+    CGContextTranslateCTM(ctx, 0, imgH);
+    CGContextScaleCTM(ctx, 1, -1);
+    CGContextDrawImage(ctx, CGRectMake(0, 0, imgW, imgH), mainImg);
 
-    // 1. 速度线（仅行驶帧）
-    if (moving) {
-        NELine(ctx, 8, 90, 46, 90, 4, NE_OUT_R, NE_OUT_G, NE_OUT_B);
-        NELine(ctx, 15, 115, 55, 115, 4, NE_OUT_R, NE_OUT_G, NE_OUT_B);
-        NELine(ctx, 5, 140, 41, 140, 4, NE_OUT_R, NE_OUT_G, NE_OUT_B);
-    }
-
-    // 2. 尾气泡（后轮左侧，逐帧变大）
-    static const CGFloat puffs[3][3][3] = {
-        {{52,152,7},{40,160,5},{0,0,0}},
-        {{45,150,9},{30,160,6},{58,162,5}},
-        {{38,148,11},{20,160,7},{56,164,6}},
-    };
-    for (int i = 0; i < 3; i++) {
-        CGFloat px = puffs[frame][i][0], py = puffs[frame][i][1], pr = puffs[frame][i][2];
-        if (pr <= 0) continue;
-        NEFillStrokeEllipse(ctx, CGRectMake(px - pr, py - pr, 2 * pr, 2 * pr),
-                            255, 255, 255, 3);
-    }
-
-    // 3. 轮子（后轮 (95,160)，前轮 (420,160)，r=34）
-    CGFloat spokeDeg = frame * 40.0;
-    CGFloat wheelCx[2] = {95, 420};
-    for (int wi = 0; wi < 2; wi++) {
-        CGFloat cx = wheelCx[wi], cy = 160;
-        NEStrokeEllipse(ctx, CGRectMake(cx - 34, cy - 34, 68, 68), 90, 85, 90, 10);
-        NEStrokeEllipse(ctx, CGRectMake(cx - 34, cy - 34, 68, 68),
-                        NE_OUT_R, NE_OUT_G, NE_OUT_B, 3);
-        for (int k = 0; k < 3; k++) {
-            CGFloat a = (spokeDeg + k * 60.0) * M_PI / 180.0;
-            CGFloat x1 = cx + 24 * cos(a), y1 = cy + 24 * sin(a);
-            CGFloat x2 = cx - 24 * cos(a), y2 = cy - 24 * sin(a);
-            NELine(ctx, x1, y1, x2, y2, 6, 225, 225, 230);
-        }
-        NEFillStrokeEllipse(ctx, CGRectMake(cx - 8, cy - 8, 16, 16), 200, 200, 200, 2);
-    }
-
-    // 4. 后车罩（圆润椭圆）+ 出风口 + 尾灯 + 消声器
-    NEFillStrokeEllipse(ctx, CGRectMake(140 - 58, 135 - 30, 116, 60), 150, 215, 235, 4);
-    NELine(ctx, 110, 128, 155, 128, 3, NE_OUT_R, NE_OUT_G, NE_OUT_B);
-    NELine(ctx, 110, 138, 155, 138, 3, NE_OUT_R, NE_OUT_G, NE_OUT_B);
-    NELine(ctx, 110, 148, 155, 148, 3, NE_OUT_R, NE_OUT_G, NE_OUT_B);
-    NEFillStrokeEllipse(ctx, CGRectMake(88 - 7, 128 - 7, 14, 14), 255, 220, 80, 2);
-    NEFillStrokeRoundRect(ctx, CGRectMake(80, 166, 55, 10), 5, 120, 120, 125, 3);
-
-    // 5. 座椅
-    NEFillStrokeRoundRect(ctx, CGRectMake(165, 118, 95, 12), 6, 45, 45, 50, 3);
-
-    // 6. 脚踏板
-    NEFillStrokeRoundRect(ctx, CGRectMake(185, 158, 175, 10), 5, 70, 70, 78, 3);
-
-    // 7. 前挡泥板：前轮顶部圆弧，先棕宽 13 再浅蓝宽 9
-    NESetStroke(ctx, NE_OUT_R, NE_OUT_G, NE_OUT_B);
-    NEArcStroke(ctx, 420, 160, 34, 34, 200, 340, 13);
-    NESetStroke(ctx, 150, 215, 235);
-    NEArcStroke(ctx, 420, 160, 34, 34, 200, 340, 9);
-
-    // 8. 前挡风板 + 小风挡 + 大灯
-    NEFillStrokeRoundRect(ctx, CGRectMake(350, 68, 58, 82), 25, 150, 215, 235, 4);
-    CGContextBeginPath(ctx);
-    CGContextMoveToPoint(ctx, 354, 72);
-    CGContextAddLineToPoint(ctx, 382, 66);
-    CGContextAddLineToPoint(ctx, 386, 78);
-    CGContextAddLineToPoint(ctx, 358, 80);
-    CGContextClosePath(ctx);
-    NESetFill(ctx, 60, 60, 65);
-    CGContextFillPath(ctx);
-    NEFillStrokeRoundRect(ctx, CGRectMake(362, 84, 36, 10), 4, 245, 245, 230, 2);
-
-    // 9. 车把 + 后视镜
-    NELine(ctx, 365, 70, 340, 78, 8, 45, 45, 50);
-    NELine(ctx, 313, 80, 340, 78, 8, 45, 45, 50);
-    NELine(ctx, 365, 70, 355, 50, 4, NE_OUT_R, NE_OUT_G, NE_OUT_B);
-    NEFillStrokeEllipse(ctx, CGRectMake(343, 40, 18, 16), 45, 45, 50, 2);
-
-    // 10. 后腿（深灰）+ 白鞋
-    NEOutlinedLine(ctx, 220, 132, 240, 150, 11, 105, 105, 115);
-    NEOutlinedLine(ctx, 240, 150, 254, 158, 10, 105, 105, 115);
-    NEFillStrokeRoundRect(ctx, CGRectMake(248, 152, 24, 12), 5, 255, 255, 255, 3);
-
-    // 11. 前腿（裤灰）+ 白鞋
-    NEOutlinedLine(ctx, 226, 132, 246, 150, 12, 130, 130, 140);
-    NEOutlinedLine(ctx, 246, 150, 262, 158, 11, 130, 130, 140);
-    NEFillStrokeRoundRect(ctx, CGRectMake(256, 152, 26, 12), 5, 255, 255, 255, 3);
-
-    // 12. 躯干（白上衣）
-    NEFillStrokeRoundRect(ctx, CGRectMake(188, 100, 64, 36), 16, 255, 255, 255, 4);
-
-    // 13. 手臂（白色，弯折）+ 手
-    NEOutlinedLine(ctx, 244, 114, 280, 100, 13, 255, 255, 255);
-    NEOutlinedLine(ctx, 280, 100, 313, 82, 12, 255, 255, 255);
-    NEFillStrokeEllipse(ctx, CGRectMake(315 - 8, 80 - 8, 16, 16), 255, 218, 188, 3);
-
-    // 14. 头盔（画在脸后面）：黄圆 + 白竖带 + 再描一次外圈
-    NEFillStrokeEllipse(ctx, CGRectMake(210 - 36, 42 - 36, 72, 72), 255, 205, 80, 5);
-    NESetFill(ctx, 255, 255, 255);
-    CGContextFillRect(ctx, CGRectMake(199, 8, 22, 70));
-    NEStrokeEllipse(ctx, CGRectMake(210 - 36, 42 - 36, 72, 72),
-                    NE_OUT_R, NE_OUT_G, NE_OUT_B, 5);
-
-    // 15. 脸（画在头盔前面）
-    NEFillStrokeEllipse(ctx, CGRectMake(216 - 30, 88 - 30, 60, 60), 255, 218, 188, 4);
-    NESetStroke(ctx, NE_OUT_R, NE_OUT_G, NE_OUT_B);
-    NEArcStroke(ctx, 210, 42, 36, 36, 20, 160, 4); // 头盔帽檐
-    CGFloat hairX[3] = {200, 216, 232}; // 刘海
-    for (int i = 0; i < 3; i++) {
-        NESetFill(ctx, 90, 55, 30);
-        CGContextAddEllipseInRect(ctx, CGRectMake(hairX[i] - 6, 70, 12, 12));
-        CGContextFillPath(ctx);
-    }
-    NESetFill(ctx, NE_OUT_R, NE_OUT_G, NE_OUT_B); // 眼睛
-    CGContextAddEllipseInRect(ctx, CGRectMake(204 - 3, 92 - 3, 6, 6));
-    CGContextFillPath(ctx);
-    CGContextAddEllipseInRect(ctx, CGRectMake(228 - 3, 92 - 3, 6, 6));
-    CGContextFillPath(ctx);
-    NESetFill(ctx, 255, 170, 170); // 腮红
-    CGContextAddEllipseInRect(ctx, CGRectMake(192 - 5, 100 - 5, 10, 10));
-    CGContextFillPath(ctx);
-    CGContextAddEllipseInRect(ctx, CGRectMake(240 - 5, 100 - 5, 10, 10));
-    CGContextFillPath(ctx);
-    NESetStroke(ctx, NE_OUT_R, NE_OUT_G, NE_OUT_B);
-    NEArcStroke(ctx, 217, 103, 7, 7, 0, 180, 3); // 微笑
-
-    // 16. 螺旋桨（头顶 (210,4)，逐帧旋转；CTM 已 y 翻转，取负角才与预览一致）
+    // 螺旋桨：绕 hub 旋转。hub 在图片坐标里是 (136.7, 17.5)（y 朝下），
+    // 此时 CTM 已翻转（y 朝下），hub 的图内坐标 = (136.7*s, 17.5*s)。
+    // 预览里螺旋桨是逆时针转；y 翻转的 CTM 下取负角才与预览一致（跟上一版一样）。
+    CGFloat propAngleDeg = frame * 40.0; // frame 0: 0°，frame 1: +40°，frame 2: +80°
+    CGFloat hubX = NE_RIDER_HUB_X * s;
+    CGFloat hubY = NE_RIDER_HUB_Y * s;
+    CGFloat propW = NE_RIDER_PROP_W * s;
+    CGFloat propH = NE_RIDER_PROP_H * s;
+    CGFloat propX = NE_RIDER_PROP_OFF_X * s;
+    CGFloat propY = NE_RIDER_PROP_OFF_Y * s;
     CGContextSaveGState(ctx);
-    CGContextTranslateCTM(ctx, 210, 4);
-    CGContextRotateCTM(ctx, -frame * 40.0 * M_PI / 180.0);
-    NEFillStrokeEllipse(ctx, CGRectMake(-36, -5, 30, 10), 255, 205, 80, 2);
-    NEFillStrokeEllipse(ctx, CGRectMake(6, -5, 30, 10), 255, 205, 80, 2);
-    NEFillStrokeEllipse(ctx, CGRectMake(-5, -5, 10, 10), 255, 205, 80, 2);
+    CGContextTranslateCTM(ctx, hubX, hubY);
+    CGContextRotateCTM(ctx, -propAngleDeg * M_PI / 180.0);
+    CGContextTranslateCTM(ctx, -hubX, -hubY);
+    CGContextDrawImage(ctx, CGRectMake(propX, propY, propW, propH), propImg);
     CGContextRestoreGState(ctx);
-
-    // 17. 螺旋桨旁的速度小线（仅行驶帧）
-    if (moving) {
-        NELine(ctx, 252, 8, 252, 20, 3, NE_OUT_R, NE_OUT_G, NE_OUT_B);
-        NELine(ctx, 262, 5, 262, 17, 3, NE_OUT_R, NE_OUT_G, NE_OUT_B);
-    }
 
     CGContextRestoreGState(ctx);
 }
@@ -1047,6 +894,9 @@ static CGImageRef RenderOverlay(size_t w, size_t h,
     CGFloat sx = (CGFloat)w / 848.0;
     CGFloat sy = (CGFloat)h / 480.0;
     CGFloat H = (CGFloat)h;
+
+    // 骑行小人框的底边上限：默认到帧底；有底部胶囊时改成胶囊顶边之上（留空隙）
+    gNERiderLimitBottomFromTop = H - 12 * sy;
 
     CGFloat fontSize = MAX(12, st.fontRefPt * sy);
     CTFontRef font = HUDFont(fontSize);
@@ -1174,6 +1024,7 @@ static CGImageRef RenderOverlay(size_t w, size_t h,
 
             // 画各行（左对齐，图标与文字垂直居中对齐）
             CGFloat pillTopFromTop = H - (pillY + pillH);
+            if (pillY < H / 2) gNERiderLimitBottomFromTop = pillTopFromTop - 12 * sy; // 胶囊在底部时，小人框底边在它上面
             for (int ri = 0; ri < nonEmptyRows; ri++) {
                 int r = rowOrder[ri];
                 CGFloat rowTop = pillTopFromTop + padY + ri * (rowHeight + rowGap);
@@ -1242,7 +1093,7 @@ static CGImageRef RenderOverlay(size_t w, size_t h,
         for (int i = 0; i < rowCounts[r]; i++)
             if (rows[r][i].line) CFRelease(rows[r][i].line);
 
-    // 像素骑行小人（v0.2.0）：跟 HUD 一起出现/消失；就算胶囊各行全关也照画
+    // 骑行小人（v0.2.0）：跟 HUD 一起出现/消失；就算胶囊各行全关也照画
     if (st.showRider) {
         NEDrawRider(ctx, (CGFloat)w, (CGFloat)h, riderFrame);
     }
