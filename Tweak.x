@@ -237,6 +237,18 @@ static BOOL             gHaveCoords      = NO;
 static double           gLat = 0, gLon = 0;
 static CFAbsoluteTime   gLastLocAttempt  = 0;
 
+// 天气请求专用的 session：10 秒超时，别让一次挂起的请求长时间占着 gWeatherFetching 挡住重试。
+static NSURLSession *NEWeatherSession(void) {
+    static NSURLSession *s = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        NSURLSessionConfiguration *cfg = [NSURLSessionConfiguration defaultSessionConfiguration];
+        cfg.timeoutIntervalForRequest = 10;
+        s = [NSURLSession sessionWithConfiguration:cfg];
+    });
+    return s;
+}
+
 static void FetchWeather(double lat, double lon) {
     NSString *urlStr = [NSString stringWithFormat:
         @"https://api.open-meteo.com/v1/forecast?latitude=%.4f&longitude=%.4f"
@@ -246,8 +258,8 @@ static void FetchWeather(double lat, double lon) {
         [gDataLock lock]; gWeatherFetching = NO; [gDataLock unlock];
         return;
     }
-    NSURLSessionDataTask *task = [[NSURLSession sharedSession]
-        dataTaskWithURL:url completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
+    NSURLSessionDataTask *task = [NEWeatherSession() dataTaskWithURL:url
+        completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
         if (err || !data) {
             os_log(gLog, "[WX] 拉取失败：%{public}s",
                    err ? err.localizedDescription.UTF8String : "no data");
@@ -259,13 +271,21 @@ static void FetchWeather(double lat, double lon) {
         NSNumber *temp = cur[@"temperature_2m"];
         NSNumber *code = cur[@"weather_code"];
         if (temp && code) {
+            int newCode = [code intValue];
+            int newTemp = (int)lround([temp doubleValue]);
+            CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
             [gDataLock lock];
-            gWeatherCode = [code intValue];
-            gWeatherTemp = (int)lround([temp doubleValue]);
-            gWeatherAt = CFAbsoluteTimeGetCurrent();
+            gWeatherCode = newCode;
+            gWeatherTemp = newTemp;
+            gWeatherAt = now;
             gWeatherFetching = NO;
             [gDataLock unlock];
-            os_log(gLog, "[WX] %d° code=%d", (int)lround([temp doubleValue]), [code intValue]);
+            // 存一份，下次冷启动 2 小时内直接用，不用等定位+拉取
+            NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
+            [d setInteger:newCode forKey:@"NEWeatherCode"];
+            [d setInteger:newTemp forKey:@"NEWeatherTemp"];
+            [d setDouble:now forKey:@"NEWeatherAt"];
+            os_log(gLog, "[WX] %d° code=%d", newTemp, newCode);
         } else {
             [gDataLock lock]; gWeatherFetching = NO; [gDataLock unlock];
         }
@@ -826,12 +846,16 @@ static void NEDrawRider(CGContextRef ctx, CGFloat w, CGFloat h, int frame) {
     CGFloat sx = w / 848.0;
     CGFloat sy = h / 480.0;
 
-    // 边框：顶边 0.30，底边在胶囊上面（留空隙）；宽 = 高 × 314/320，水平居中
+    // 边框：可用高度 = 胶囊顶边 − 0.30×帧高；框高取可用的 0.60 倍，
+    // 在可用空间里垂直居中（上下各留 0.20×可用高度）；宽 = 高 × 314/320，水平居中
     CGFloat boxTopFromTop = NE_RIDER_BOX_TOP_FRAC * h;
     CGFloat limitBottomFromTop = (gNERiderLimitBottomFromTop > 0)
         ? gNERiderLimitBottomFromTop : (h - 12 * sy);
-    CGFloat boxH = limitBottomFromTop - boxTopFromTop;
+    CGFloat availH = limitBottomFromTop - boxTopFromTop;
+    CGFloat boxH = availH * 0.60;
     if (boxH < 80 * sy) boxH = 80 * sy; // 兜底：可用空间太小也别画崩
+    CGFloat centerOff = (availH - boxH) / 2;
+    if (centerOff > 0) boxTopFromTop += centerOff; // 垂直居中
     CGFloat boxW = boxH * (NE_RIDER_IMG_W / NE_RIDER_IMG_H);
     CGFloat boxX = (w - boxW) / 2;
     CGFloat boxY = h - boxTopFromTop - boxH; // y 朝上坐标：底边离底的距离
@@ -857,19 +881,19 @@ static void NEDrawRider(CGContextRef ctx, CGFloat w, CGFloat h, int frame) {
     CGFloat imgX = boxX + padX + (contentW - imgW) / 2;
     CGFloat imgY = boxY + padY + (contentH - imgH) / 2; // y 朝上：图片底边
 
-    // 翻转成图坐标（y 朝下，原点在图片左上角），跟预览脚本一致。
-    // 下面所有坐标都是“图坐标 × s”。
-    CGContextSaveGState(ctx);
-    CGContextTranslateCTM(ctx, imgX, imgY + imgH);
-    CGContextScaleCTM(ctx, 1, -1);
+    // 不翻转：这条管线全程不翻转才是正的（文字、原图都不翻转；
+    // v0.1.2 翻转过一次字是倒的）。下面所有坐标都是 bitmap 原生
+    // y 朝上设备坐标，跟文字、图标同一套。
+    // 图坐标 (wx, wy)（y 朝下，0=顶）→ 设备坐标：
+    //   x = imgX + wx*s，y = imgY + imgH - wy*s。
 
     // (1) 手绘轮子（画在 main 图底下）。轮子位置/半径按 rider-gen-geo.json。
     // 画法跟预览脚本的 draw_wheel 一致：胎、盘、12 根放射线、毂。
-    // 放射线角度 = frame×40° + k×30°，用 cos/sin 直接算端点（y 朝下坐标，
-    // 跟 PIL 一样），不用 CTM 旋转。
+    // 放射线角度 = frame×40° + k×30°，端点先在图坐标里用 cos/sin 算，
+    // 再换算成设备坐标（y 用 imgY+imgH-…），不用 CTM 旋转。
     CGFloat spokeDeg = frame * 40.0; // frame 0: 0°，frame 1: +40°，frame 2: +80°
-    CGFloat wheelCX[2] = { NE_RIDER_WHEEL_FX * s, NE_RIDER_WHEEL_RX * s };
-    CGFloat wheelCY[2] = { NE_RIDER_WHEEL_FY * s, NE_RIDER_WHEEL_RY * s };
+    CGFloat wheelCX[2] = { imgX + NE_RIDER_WHEEL_FX * s, imgX + NE_RIDER_WHEEL_RX * s };
+    CGFloat wheelCY[2] = { imgY + imgH - NE_RIDER_WHEEL_FY * s, imgY + imgH - NE_RIDER_WHEEL_RY * s };
     CGFloat wheelR = NE_RIDER_WHEEL_R * s;
     for (int wi = 0; wi < 2; wi++) {
         CGFloat cx = wheelCX[wi], cy = wheelCY[wi];
@@ -890,9 +914,9 @@ static void NEDrawRider(CGContextRef ctx, CGFloat w, CGFloat h, int frame) {
         for (int k = 0; k < 12; k++) {
             double a = (spokeDeg + k * 30.0) * M_PI / 180.0;
             CGFloat x1 = cx + wheelR * 0.45 * cos(a);
-            CGFloat y1 = cy + wheelR * 0.45 * sin(a);
+            CGFloat y1 = cy - wheelR * 0.45 * sin(a);
             CGFloat x2 = cx + wheelR * 0.68 * cos(a);
-            CGFloat y2 = cy + wheelR * 0.68 * sin(a);
+            CGFloat y2 = cy - wheelR * 0.68 * sin(a);
             CGContextMoveToPoint(ctx, x1, y1);
             CGContextAddLineToPoint(ctx, x2, y2);
         }
@@ -906,27 +930,25 @@ static void NEDrawRider(CGContextRef ctx, CGFloat w, CGFloat h, int frame) {
         CGContextStrokeEllipseInRect(ctx, CGRectMake(cx - hubR, cy - hubR, hubR * 2, hubR * 2));
     }
 
-    // (2) main 图
-    CGContextDrawImage(ctx, CGRectMake(0, 0, imgW, imgH), mainImg);
+    // (2) main 图：直接画，不翻转
+    CGContextDrawImage(ctx, CGRectMake(imgX, imgY, imgW, imgH), mainImg);
 
-    // (3) 螺旋桨：绕中心 (143.5, 22.5) 旋转。prop 层是全画布图，绕 hub
+    // (3) 螺旋桨：绕设备坐标下的 hub 中心旋转。prop 层是全画布图，绕 hub
     // 旋转整张图（跟预览脚本的 prop.rotate(frame*40, center=hub) 一致）。
-    // 预览里螺旋桨是逆时针转；y 翻转的 CTM 下取负角才与预览一致（跟上一版一样）。
-    CGFloat hubX = NE_RIDER_HUB_X * s;
-    CGFloat hubY = NE_RIDER_HUB_Y * s;
+    // 预览里螺旋桨逆时针转；y 朝上坐标里逆时针是正角，取 +spokeDeg。
+    CGFloat hubX = imgX + NE_RIDER_HUB_X * s;
+    CGFloat hubY = imgY + imgH - NE_RIDER_HUB_Y * s;
     CGContextSaveGState(ctx);
     CGContextTranslateCTM(ctx, hubX, hubY);
-    CGContextRotateCTM(ctx, -spokeDeg * M_PI / 180.0);
+    CGContextRotateCTM(ctx, spokeDeg * M_PI / 180.0);
     CGContextTranslateCTM(ctx, -hubX, -hubY);
-    CGContextDrawImage(ctx, CGRectMake(0, 0, imgW, imgH), propImg);
+    CGContextDrawImage(ctx, CGRectMake(imgX, imgY, imgW, imgH), propImg);
     CGContextRestoreGState(ctx);
 
     // (4) motion 层（速度线 + 尾气）：只在行驶帧画在最上面
     if (frame > 0) {
-        CGContextDrawImage(ctx, CGRectMake(0, 0, imgW, imgH), motionImg);
+        CGContextDrawImage(ctx, CGRectMake(imgX, imgY, imgW, imgH), motionImg);
     }
-
-    CGContextRestoreGState(ctx);
 }
 
 static CGImageRef RenderOverlay(size_t w, size_t h,
@@ -2066,6 +2088,24 @@ static void NEProbeStart(void) {
     gLog      = os_log_create("com.user.ninebotenhance", "general");
     gLock     = [NSLock new];
     gDataLock = [NSLock new];
+
+    // 天气：恢复上次拉到的结果（2 小时内直接用，冷启动不用等定位+拉取；
+    // 超过 20 分钟的照常在后台刷新，见 RefreshWeatherIfNeeded）
+    {
+        NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
+        double savedAt = [d doubleForKey:@"NEWeatherAt"];
+        int savedCode = (int)[d integerForKey:@"NEWeatherCode"];
+        if (savedCode >= 0 && savedAt > 0 &&
+            (CFAbsoluteTimeGetCurrent() - savedAt) < 2 * 3600) {
+            int savedTemp = (int)[d integerForKey:@"NEWeatherTemp"];
+            [gDataLock lock];
+            gWeatherCode = savedCode;
+            gWeatherTemp = savedTemp;
+            gWeatherAt = savedAt;
+            [gDataLock unlock];
+            os_log(gLog, "[WX] 恢复缓存天气：%d° code=%d", savedTemp, savedCode);
+        }
+    }
 
     // 钩点存在性检查：6.10.12 相对 6.10.9 可能改名，改了就静默失效，这里先记下来
     Class conv = objc_getClass("NBPixelBufferConverter");
