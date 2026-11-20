@@ -1,4 +1,12 @@
-// NinebotEnhance iOS v0.1.7 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
+// NinebotEnhance iOS v0.1.8 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
+//
+// v0.1.8 改动：HUD 加超速提醒。
+//  设置页新增“超速提醒”段：开关（默认开）+ 限速步进器（默认 60 km/h，
+//  30–120，每 5 一档，改完立即生效）。超过限速时手机震动 + 系统提示音
+//  （只在刚超速那一刻触发一次），HUD 胶囊里多一行红色“超速 N km/h”；
+//  速度回落到限速内就清除，下次再超再触发。速度取自定位（连续定位只
+//  在提醒开着时才开，关了就恢复原来的单次定位）。只在九号 App 开着时
+//  有效，App 退后台/被杀就停。其他一律不动。
 //
 // v0.1.7 改动：探测失败也写文件。
 //  v0.1.6 的问题：只有拿到指令表持有者才写 Documents/BleCmdDump.json；
@@ -104,6 +112,7 @@
 #import <CoreTelephony/CTTelephonyNetworkInfo.h>
 #import <MediaPlayer/MediaPlayer.h>
 #import <AVFoundation/AVFoundation.h>
+#import <AudioToolbox/AudioServices.h>
 #import <os/log.h>
 #import <objc/message.h>
 #import <objc/runtime.h>
@@ -128,6 +137,11 @@ static dispatch_source_t gButtonTimer = nil;
 @class NELocationDelegate;
 static CLLocationManager *gLocMgr = nil;
 static NELocationDelegate *gLocDelegate = nil;
+
+// 超速提醒：最新 GPS 速度（km/h）+ 采样时间；gWasOverspeed 是越界沿状态
+static double         gSpeedKmh     = 0;
+static CFAbsoluteTime gSpeedAt      = 0;
+static BOOL           gWasOverspeed = NO;
 
 static BOOL OverlayEnabled(void) {
     id v = [[NSUserDefaults standardUserDefaults] objectForKey:@"NBProjectionOverride"];
@@ -159,6 +173,18 @@ static BOOL NEHUDShowMusic(void) {
 static BOOL NEHUDShowVolume(void) {
     id v = [[NSUserDefaults standardUserDefaults] objectForKey:@"NEHUDShowVolume"];
     return v ? [v boolValue] : YES;
+}
+static BOOL NEHUDSpeedAlert(void) {
+    id v = [[NSUserDefaults standardUserDefaults] objectForKey:@"NEHUDSpeedAlert"];
+    return v ? [v boolValue] : YES;
+}
+// 限速 km/h：默认 60，读出来 clamp 到 30–120
+static NSInteger NEHUDSpeedLimit(void) {
+    id v = [[NSUserDefaults standardUserDefaults] objectForKey:@"NEHUDSpeedLimit"];
+    NSInteger s = v ? [v integerValue] : 60;
+    if (s < 30) return 30;
+    if (s > 120) return 120;
+    return s;
 }
 // 0 右下 1 左下 2 左上 3 右上
 static NSInteger NEHUDPosition(void) {
@@ -264,12 +290,51 @@ static void RefreshWeatherIfNeeded(void) {
     [gDataLock unlock];
     os_log(gLog, "[WX] 定位已拿到，开始拉天气");
     RefreshWeatherIfNeeded();
+    // 超速提醒：过滤后算 km/h，越界沿触发一次震动+提示音。
+    // RefreshWeatherIfNeeded 内部有 20 分钟缓存 + fetching 节流，
+    // 连续定位每秒调它也不会多拉天气。
+    if (NEHUDSpeedAlert()) {
+        NSTimeInterval age = -[loc.timestamp timeIntervalSinceNow];
+        if (loc.speed >= 0 && loc.horizontalAccuracy <= 65 && age <= 10) {
+            double kmh = loc.speed * 3.6;
+            [gDataLock lock];
+            gSpeedKmh = kmh;
+            gSpeedAt = CFAbsoluteTimeGetCurrent();
+            [gDataLock unlock];
+            NSInteger limit = NEHUDSpeedLimit();
+            if (kmh > limit) {
+                if (!gWasOverspeed) {
+                    gWasOverspeed = YES;
+                    UINotificationFeedbackGenerator *gen = [UINotificationFeedbackGenerator new];
+                    [gen notificationOccurred:UINotificationFeedbackTypeWarning];
+                    AudioServicesPlaySystemSound(1005);
+                    os_log(gLog, "[SPD] 超速 %d km/h（限速 %d）", (int)kmh, (int)limit);
+                }
+            } else {
+                gWasOverspeed = NO;
+            }
+        }
+    }
 }
 - (void)locationManager:(CLLocationManager *)manager
        didFailWithError:(NSError *)error {
     os_log(gLog, "[WX] 定位失败：%{public}s", error.localizedDescription.UTF8String);
 }
 @end
+
+// 超速提醒开 → 连续定位（best 精度）；关 → 恢复单次定位（3km 精度，只够天气用）。
+// 主线程调（gLocMgr 在主队列创建，回调也在主队列）。
+static void NEApplySpeedLocationMode(void) {
+    if (!gLocMgr) return;
+    if (NEHUDSpeedAlert()) {
+        gLocMgr.desiredAccuracy = kCLLocationAccuracyBest;
+        [gLocMgr startUpdatingLocation];
+    } else {
+        [gLocMgr stopUpdatingLocation];
+        gLocMgr.desiredAccuracy = kCLLocationAccuracyThreeKilometers;
+        [gLocMgr requestLocation];
+    }
+}
 
 // ---------------- 联网方式（NWPathMonitor + 蜂窝制式）----------------
 // 0 不显示（没网/未知） 1 WiFi 2 蜂窝（netLabel 是 5G/4G/3G/2G/蜂窝）
@@ -643,7 +708,7 @@ static void NEDrawBattery(CGContextRef ctx, float level, BOOL charging, BOOL low
 
 // ---------- 胶囊行段 ----------
 // kind: 0 文字 1 图标 2 电池；icon: 0 时钟 1 WiFi 2 天气 3 音符 4 喇叭
-#define NE_MAX_ROWS 3
+#define NE_MAX_ROWS 4
 #define NE_MAX_SEGS 8
 
 typedef struct {
@@ -664,6 +729,7 @@ static BOOL NEIsIconSeg(NESeg *s) { return s->kind != 0; }
 
 typedef struct {
     BOOL showDate, showWeather, showSignal, showBattery, showMusic, showVolume;
+    BOOL speedAlert; // 超速提醒开关（v0.1.8）
     NSInteger position; // 0 右下 1 左下 2 左上 3 右上
     CGFloat fontRefPt;  // 16/20/24
 } NEHUDSettings;
@@ -675,6 +741,7 @@ static CGImageRef RenderOverlay(size_t w, size_t h,
                                 int netKind, NSString * __unsafe_unretained netLabel,
                                 NSString * __unsafe_unretained musicStr, float volume,
                                 BOOL callActive,
+                                int speedKmh, BOOL overspeed,
                                 NEHUDSettings st) {
     if (w == 0 || h == 0) return NULL;
     CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
@@ -710,7 +777,7 @@ static CGImageRef RenderOverlay(size_t w, size_t h,
 
     // ---- 组行 ----
     NESeg rows[NE_MAX_ROWS][NE_MAX_SEGS];
-    int rowCounts[NE_MAX_ROWS] = { 0, 0, 0 };
+    int rowCounts[NE_MAX_ROWS] = { 0, 0, 0, 0 };
     memset(rows, 0, sizeof(rows));
 
     // 上行：时钟图标 + 日期时间
@@ -755,9 +822,16 @@ static CGImageRef RenderOverlay(size_t w, size_t h,
         s = &rows[2][rowCounts[2]++];
         s->kind = 0; s->text = musicStr; s->color = white;
     }
+    // 第四行：超速（只在超速时画，红色文字，不用图标）
+    if (st.speedAlert && overspeed) {
+        NESeg *s = &rows[3][rowCounts[3]++];
+        s->kind = 0;
+        s->text = [NSString stringWithFormat:@"超速 %d km/h", speedKmh];
+        s->color = red;
+    }
 
     // ---- 量每行宽度 ----
-    CGFloat rowWidths[NE_MAX_ROWS] = { 0, 0, 0 };
+    CGFloat rowWidths[NE_MAX_ROWS] = { 0, 0, 0, 0 };
     int nonEmptyRows = 0;
     int rowOrder[NE_MAX_ROWS];
     for (int r = 0; r < NE_MAX_ROWS; r++) {
@@ -923,25 +997,34 @@ static CGImageRef OverlayForSize(size_t w, size_t h) {
     NSString *musicStr = gMusicString;
     float volume = gVolume;
     BOOL callActive = gCallActive;
+    double speedKmhD = gSpeedKmh;
+    CFAbsoluteTime speedAt = gSpeedAt;
     [gDataLock unlock];
+
+    // 超速行：5 秒内的速度才算新鲜；开关关着或速度没超限速就不画
+    BOOL speedFresh = (now - speedAt) <= 5.0;
+    BOOL overspeed = speedFresh && NEHUDSpeedAlert() && speedKmhD > NEHUDSpeedLimit();
+    int speedKmh = (int)speedKmhD;
 
     NEHUDSettings st;
     st.showDate = NEHUDShowDate(); st.showWeather = NEHUDShowWeather();
     st.showSignal = NEHUDShowSignal(); st.showBattery = NEHUDShowBattery();
     st.showMusic = NEHUDShowMusic(); st.showVolume = NEHUDShowVolume();
+    st.speedAlert = NEHUDSpeedAlert();
     st.position = NEHUDPosition(); st.fontRefPt = NEHUDFontRefPt();
 
-    NSString *key = [NSString stringWithFormat:@"%@|%.2f|%d|%d|%d|%d|%@|%@|%.2f|%d|%d%d%d%d%d%d|%ld|%.0f",
+    NSString *key = [NSString stringWithFormat:@"%@|%.2f|%d|%d|%d|%d|%@|%@|%.2f|%d|%d%d%d%d%d%d|%ld|%.0f|%d|%d",
                      timeStr, battLevel, battCharging, wxCode, wxTemp, netKind,
                      netLabel ?: @"", musicStr ?: @"", volume, callActive,
                      st.showDate, st.showWeather, st.showSignal,
                      st.showBattery, st.showMusic, st.showVolume,
-                     (long)st.position, st.fontRefPt];
+                     (long)st.position, st.fontRefPt, speedKmh, overspeed];
     if (!cache || cw != w || ch != h || ![key isEqualToString:cacheKey]) {
         if (cache) { CGImageRelease(cache); cache = NULL; }
         cache = RenderOverlay(w, h, timeStr, battLevel, battCharging,
                               wxCode, wxTemp, netKind, netLabel,
-                              musicStr, volume, callActive, st);
+                              musicStr, volume, callActive,
+                              speedKmh, overspeed, st);
         cacheKey = [key copy];
         cw = w; ch = h;
     }
@@ -1022,6 +1105,7 @@ static void NoteFrame(size_t w, size_t h) {
 // 只是不出按钮。
 
 static const char NEHUDButtonKey = 0;
+static const char NESpeedLimitValueKey = 0;
 
 @interface NEHUDSettingsVC : UIViewController
 @end
@@ -1221,6 +1305,10 @@ static void NECheckSettingsButton(void) {
         forControlEvents:UIControlEventValueChanged];
     [stack addArrangedSubview:fs];
 
+    [stack addArrangedSubview:[self sectionLabel:@"超速提醒"]];
+    [stack addArrangedSubview:[self switchRow:@"超速提醒" key:@"NEHUDSpeedAlert" on:NEHUDSpeedAlert()]];
+    [stack addArrangedSubview:[self speedLimitRow]];
+
     UILabel *note = [UILabel new];
     note.text = @"提示：仪表右上角是车子自己的表盘区，HUD 放右上会被盖住一部分，一般用右下。";
     note.font = [UIFont systemFontOfSize:13];
@@ -1265,6 +1353,51 @@ static void NECheckSettingsButton(void) {
     NSString *key = sw.accessibilityIdentifier;
     if (key.length > 0)
         [[NSUserDefaults standardUserDefaults] setBool:sw.isOn forKey:key];
+    // 超速提醒开关变化时，立刻切换定位模式（连续定位开/关）
+    if ([key isEqualToString:@"NEHUDSpeedAlert"]) NEApplySpeedLocationMode();
+}
+
+// 限速行：左边“限速”+ 中间值 + 右边步进器（30–120，每 5 一档）
+- (UIView *)speedLimitRow {
+    UIView *row = [UIView new];
+    UILabel *label = [UILabel new];
+    label.text = @"限速";
+    label.font = [UIFont systemFontOfSize:16];
+    label.translatesAutoresizingMaskIntoConstraints = NO;
+    UILabel *value = [UILabel new];
+    value.text = [NSString stringWithFormat:@"%d km/h", (int)NEHUDSpeedLimit()];
+    value.font = [UIFont systemFontOfSize:16];
+    value.translatesAutoresizingMaskIntoConstraints = NO;
+    UIStepper *step = [UIStepper new];
+    step.minimumValue = 30;
+    step.maximumValue = 120;
+    step.stepValue = 5;
+    step.value = NEHUDSpeedLimit();
+    step.translatesAutoresizingMaskIntoConstraints = NO;
+    // 值 label 挂在 stepper 上，回调时直接改，不用再找
+    objc_setAssociatedObject(step, &NESpeedLimitValueKey, value, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    [step addTarget:self action:@selector(limitChanged:)
+        forControlEvents:UIControlEventValueChanged];
+    [row addSubview:label];
+    [row addSubview:value];
+    [row addSubview:step];
+    [NSLayoutConstraint activateConstraints:@[
+        [label.leadingAnchor constraintEqualToAnchor:row.leadingAnchor],
+        [label.centerYAnchor constraintEqualToAnchor:row.centerYAnchor],
+        [step.trailingAnchor constraintEqualToAnchor:row.trailingAnchor],
+        [step.centerYAnchor constraintEqualToAnchor:row.centerYAnchor],
+        [value.trailingAnchor constraintEqualToAnchor:step.leadingAnchor constant:-12],
+        [value.centerYAnchor constraintEqualToAnchor:row.centerYAnchor],
+        [row.heightAnchor constraintEqualToConstant:32]
+    ]];
+    return row;
+}
+
+- (void)limitChanged:(UIStepper *)step {
+    NSInteger v = (NSInteger)step.value;
+    [[NSUserDefaults standardUserDefaults] setInteger:v forKey:@"NEHUDSpeedLimit"];
+    UILabel *value = objc_getAssociatedObject(step, &NESpeedLimitValueKey);
+    if (value) value.text = [NSString stringWithFormat:@"%ld km/h", (long)v];
 }
 
 - (void)positionChanged:(UISegmentedControl *)seg {
@@ -1558,7 +1691,7 @@ static BOOL NEProbeAttempt(int attempt) {
                                          @"_TtC7Vehicle22BleCommandDebugManager",
                                          @"_TtC17NBBluetoothModule9DebugTool"];
     NSMutableDictionary *report = [NSMutableDictionary dictionary];
-    report[@"probe"] = @"NinebotEnhance iOS 0.1.7";
+    report[@"probe"] = @"NinebotEnhance iOS 0.1.8";
     report[@"attempt"] = @(attempt);
     report[@"date"] = [[NSDate date] description];
     if (gProbeClassInfo) report[@"classes"] = gProbeClassInfo;
@@ -1746,7 +1879,7 @@ static void NEProbeStart(void) {
                hasSel ? "YES" : "NO");
     }
 
-    os_log(gLog, "NinebotEnhance iOS 0.1.7 已加载（小胶囊 HUD：日期/天气/信号/音量/电量/音乐/来电 + 车辆数据探测）");
+    os_log(gLog, "NinebotEnhance iOS 0.1.8 已加载（小胶囊 HUD：日期/天气/信号/音量/电量/音乐/来电/超速 + 车辆数据探测）");
 
     // 电量监听 + 定位 + 来电观察，全部在主队列 / 后台队列做，不阻塞加载
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -1754,8 +1887,7 @@ static void NEProbeStart(void) {
         gLocDelegate = [NELocationDelegate new];
         gLocMgr = [CLLocationManager new];
         gLocMgr.delegate = gLocDelegate;
-        gLocMgr.desiredAccuracy = kCLLocationAccuracyThreeKilometers;
-        [gLocMgr requestLocation];
+        NEApplySpeedLocationMode(); // 提醒开着 → 连续定位；关着 → 单次定位（只够天气用）
 
         // 音乐 + 音量：每秒一刷（主线程）
         NERefreshMusicVolume();

@@ -1,9 +1,26 @@
-# NinebotEnhance iOS v0.1.7
+# NinebotEnhance iOS v0.1.8
 
 给官方九号出行 App（`cn.ninebot.segway`）的注入插件：钩住投屏画面的
 编码器入口，在 App 自己的导航画面上叠加一层 HUD，再交给 App 原来的
 H.264/RTP/RTCP/UDP 链路发给仪表。思路来自安卓的 NinebotEnhance，
 但代码是全新写的 iOS Theos 插件（安卓代码一行都搬不过来）。
+
+## v0.1.8 改了什么
+
+**HUD 加超速提醒。** 设置页新增“超速提醒”段：开关（默认开）+
+限速步进器（默认 60 km/h，30–120，每 5 一档，改完立即生效）。
+超过限速时手机震动 + 系统提示音（只在刚超速那一刻触发一次），
+HUD 胶囊里多一行红色“超速 N km/h”；速度回落到限速内就清除，
+下次再超再触发。速度取自定位：连续定位只在提醒开着时才开，
+关了就恢复原来的单次定位（只够天气用）。**只在九号 App 开着时
+有效**，App 退后台/被杀就停。其他一律不动。
+
+也可以用命令改（改完重开九号出行，或等下次投屏帧）：
+
+```sh
+defaults write cn.ninebot.segway NEHUDSpeedAlert -bool NO  # 关掉超速提醒
+defaults write cn.ninebot.segway NEHUDSpeedLimit -int 80   # 限速 80 km/h（30–120）
+```
 
 ## v0.1.6 改了什么
 
