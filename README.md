@@ -1,4 +1,16 @@
-# NinebotEnhance iOS v0.1.8
+# NinebotEnhance iOS v0.1.9
+
+给官方九号出行 App（`cn.ninebot.segway`）的注入插件：钩住投屏画面的
+编码器入口，在 App 自己的导航画面上叠加一层 HUD，再交给 App 原来的
+H.264/RTP/RTCP/UDP 链路发给仪表。思路来自安卓的 NinebotEnhance，
+但代码是全新写的 iOS Theos 插件（安卓代码一行都搬不过来）。
+
+## v0.1.9 改了什么
+
+**音乐拿掉了。** 九号 App 自己就显示音乐，插件不再重复画：
+设置页的音乐开关、HUD 的音乐行、读歌名的代码都删了，只留
+音量。**设置页“超速提醒”段的重复标题删了**，只留开关行 +
+限速步进器行（默认 60 km/h，30–120，每 5 一档）。其他一律不动。
 
 给官方九号出行 App（`cn.ninebot.segway`）的注入插件：钩住投屏画面的
 编码器入口，在 App 自己的导航画面上叠加一层 HUD，再交给 App 原来的
@@ -107,7 +119,6 @@ y 朝上的 bitmap 坐标，和 Ninebot Pro+ 的 HUDOverlay.swift
 - **上行**：时钟图标 + 日期时间（例如 `11月19日 周四 22:12`）
 - **下行**：天气图标 + 温度、联网方式（WiFi 图标 / 5G / 4G / 3G）、
   音量、电量图标 + 百分比（低于 20% 变红）
-- **有音乐在放时再加一行**：音符图标 + 歌名 - 歌手
 - **来电提示**：有未接通/通话中的电话时，左下角出现红色 `来电`
   药丸。只显示“来电”两个字，不显示号码（CallKit 不向第三方
   App 暴露号码）。
@@ -121,7 +132,7 @@ y 朝上的 bitmap 坐标，和 Ninebot Pro+ 的 HUDOverlay.swift
 **3. 新增 HUD 设置。** 九号 App 的“我的/个人/设置”页右上角会
 出现一个 **HUD设置** 按钮（插件按页面类名运行时匹配，没匹配到
 就不出现，不会崩）。点开可以开关：日期时间、天气温度、信号、
-电量、音乐、音量；还可以选位置（右下 / 左下 / 左上 / 右上）
+电量、音量；还可以选位置（右下 / 左下 / 左上 / 右上）
 和字号（小 / 中 / 大）。改完立即生效，下次投屏帧就用新设置。
 
 如果按钮没出现，也可以用命令改（改完重开九号出行，或等下次
@@ -134,7 +145,7 @@ defaults write cn.ninebot.segway NEHUDFontSize -int 2       # 0 小 1 中 2 大
 ```
 
 开关的键：`NEHUDShowDate` / `NEHUDShowWeather` / `NEHUDShowSignal` /
-`NEHUDShowBattery` / `NEHUDShowMusic` / `NEHUDShowVolume`（都是 bool，
+`NEHUDShowBattery` / `NEHUDShowVolume`（都是 bool，
 默认 YES）。
 
 ## 安装（巨魔注入器 TrollFools）

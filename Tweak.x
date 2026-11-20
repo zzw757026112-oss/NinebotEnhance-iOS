@@ -1,4 +1,10 @@
-// NinebotEnhance iOS v0.1.8 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
+// NinebotEnhance iOS v0.1.9 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
+//
+// v0.1.9 改动：音乐拿掉 + 超速提醒标题去重。
+//  音乐整个删了（九号 App 自己就显示音乐，插件不再重复画）：
+//  设置页的音乐开关、HUD 的音乐行、读歌名的代码都没了，
+//  只留音量。设置页“超速提醒”段的重复标题删了，只留开关行 +
+//  限速步进器行（默认 60 km/h，30–120，每 5 一档）。其他一律不动。
 //
 // v0.1.8 改动：HUD 加超速提醒。
 //  设置页新增“超速提醒”段：开关（默认开）+ 限速步进器（默认 60 km/h，
@@ -33,7 +39,7 @@
 //         以及对应的实例方法版本（与参考实现一致，四者都挂）。
 // 做法：不在编码器输入端整帧替换，而是把 App 自己的画面画到底层，
 // 再把 HUD 叠加层（小胶囊：日期时间 / 天气 / 信号 / 音量 / 电量，
-// 有音乐时再加一行歌名；来电提示）画在上面，
+// 超速时再加一行红色超速；来电提示）画在上面，
 // 合成后交给原实现编码发送。App 自己的 H.264/RTP/RTCP/UDP 链路不动。
 //
 // v0.1.5 改动：车辆数据探测（Route B Phase 1，只读侦察）并进插件。
@@ -88,13 +94,13 @@
 //
 // HUD 数据全部来自本进程内可公开拿到的东西：UIDevice 电量、
 // 系统时间、CoreLocation 定位 + Open-Meteo 天气（无 key，20 分钟缓存）、
-// CallKit 来电状态、联网方式、正在播放的音乐、音量。
+// CallKit 来电状态、联网方式、音量。
 // 网络和定位一律在后台做，帧回调里只读缓存，永不阻塞。
 //
 // 开关：NSUserDefaults 写 NBProjectionOverride = NO 立刻恢复原生画面。
 // HUD 设置键（defaults write cn.ninebot.segway <键> <值>）：
 //   NEHUDShowDate / NEHUDShowWeather / NEHUDShowSignal /
-//   NEHUDShowBattery / NEHUDShowMusic / NEHUDShowVolume（bool，默认 YES）
+//   NEHUDShowBattery / NEHUDShowVolume（bool，默认 YES）
 //   NEHUDPosition（int，默认 0：0 右下 1 左下 2 左上 3 右上）
 //   NEHUDFontSize（int，默认 1：0 小 1 中 2 大）
 // 日志：os_log subsystem "com.user.ninebotenhance"，只打加载、钩点检查、
@@ -110,7 +116,6 @@
 #import <UIKit/UIKit.h>
 #import <Network/Network.h>
 #import <CoreTelephony/CTTelephonyNetworkInfo.h>
-#import <MediaPlayer/MediaPlayer.h>
 #import <AVFoundation/AVFoundation.h>
 #import <AudioToolbox/AudioServices.h>
 #import <os/log.h>
@@ -127,11 +132,11 @@
 
 static os_log_t gLog      = NULL;
 static NSLock  *gLock     = nil;   // 叠加层缓存 + 帧计数
-static NSLock  *gDataLock = nil;   // 天气 / 来电 / 联网 / 音乐状态
+static NSLock  *gDataLock = nil;   // 天气 / 来电 / 联网 / 音量状态
 static int      gFrames   = 0;
 static int      gDumped   = 0;
 // 定时器必须有强引用留着（局部变量出作用域就释放，定时器会停）
-static dispatch_source_t gMusicTimer  = nil;
+static dispatch_source_t gVolumeTimer = nil;
 static dispatch_source_t gButtonTimer = nil;
 
 @class NELocationDelegate;
@@ -164,10 +169,6 @@ static BOOL NEHUDShowSignal(void) {
 }
 static BOOL NEHUDShowBattery(void) {
     id v = [[NSUserDefaults standardUserDefaults] objectForKey:@"NEHUDShowBattery"];
-    return v ? [v boolValue] : YES;
-}
-static BOOL NEHUDShowMusic(void) {
-    id v = [[NSUserDefaults standardUserDefaults] objectForKey:@"NEHUDShowMusic"];
     return v ? [v boolValue] : YES;
 }
 static BOOL NEHUDShowVolume(void) {
@@ -389,24 +390,14 @@ static void NEStartNetworkMonitor(void) {
     nw_path_monitor_start(gPathMonitor);
 }
 
-// ---------------- 音乐 + 音量（系统正在播放，1 秒一刷）----------------
+// ---------------- 音量（系统音量，1 秒一刷）----------------
 
-static NSString *gMusicString = nil; // "歌名 - 歌手"，nil = 没在放
-static float     gVolume      = -1;  // 0...1，-1 = 未知
+static float gVolume = -1;  // 0...1，-1 = 未知
 
-static void NERefreshMusicVolume(void) {
-    // 主线程调用（MPNowPlayingInfoCenter 在主线程读最稳）。
-    NSDictionary *info = [MPNowPlayingInfoCenter defaultCenter].nowPlayingInfo;
-    NSString *title = info[MPMediaItemPropertyTitle];
-    NSString *artist = info[MPMediaItemPropertyArtist];
-    NSString *music = nil;
-    if (title.length > 0) {
-        music = (artist.length > 0) ? [NSString stringWithFormat:@"%@ - %@", title, artist] : title;
-        if (music.length > 24) music = [[music substringToIndex:24] stringByAppendingString:@"…"];
-    }
+static void NERefreshVolume(void) {
+    // 主线程调用。
     float vol = [AVAudioSession sharedInstance].outputVolume;
     [gDataLock lock];
-    gMusicString = music;
     gVolume = vol;
     [gDataLock unlock];
 }
@@ -602,35 +593,6 @@ static void NEDrawWeather(CGContextRef ctx, int code, CGRect rect) {
     }
 }
 
-static void NEDrawMusic(CGContextRef ctx, CGRect rect) {
-    CGFloat headW = rect.size.width * 0.34;
-    CGFloat headH = rect.size.height * 0.26;
-    CGRect head = CGRectMake(rect.origin.x + rect.size.width * 0.18,
-                             rect.origin.y + rect.size.height * 0.08,
-                             headW, headH);
-    CGContextAddEllipseInRect(ctx, head);
-    CGContextFillPath(ctx);
-    CGFloat stemX = CGRectGetMaxX(head) - headW * 0.15;
-    CGFloat topY = rect.origin.y + rect.size.height; // rect.maxY（y 朝上）
-    CGContextBeginPath(ctx);
-    CGContextMoveToPoint(ctx, stemX, CGRectGetMidY(head));
-    CGContextAddLineToPoint(ctx, stemX, topY - rect.size.height * 0.08);
-    CGContextStrokePath(ctx);
-    // 注意：ObjC 的 AddQuadCurveToPoint 是（控制点 x,y, 终点 x,y），
-    // 和 Swift 的 addQuadCurve(to:control:) 参数顺序相反。
-    CGContextBeginPath(ctx);
-    CGContextMoveToPoint(ctx, stemX, topY - rect.size.height * 0.08);
-    CGContextAddQuadCurveToPoint(ctx,
-        stemX + rect.size.width * 0.30, topY - rect.size.height * 0.06,
-        stemX + rect.size.width * 0.34, topY - rect.size.height * 0.32);
-    CGContextAddLineToPoint(ctx, stemX + rect.size.width * 0.34, topY - rect.size.height * 0.52);
-    CGContextAddQuadCurveToPoint(ctx,
-        stemX + rect.size.width * 0.30, topY - rect.size.height * 0.28,
-        stemX, topY - rect.size.height * 0.30);
-    CGContextClosePath(ctx);
-    CGContextFillPath(ctx);
-}
-
 static void NEDrawSpeaker(CGContextRef ctx, CGRect rect) {
     CGFloat bx = rect.origin.x + rect.size.width * 0.08;
     CGFloat bw = rect.size.width * 0.20;
@@ -707,8 +669,8 @@ static void NEDrawBattery(CGContextRef ctx, float level, BOOL charging, BOOL low
 }
 
 // ---------- 胶囊行段 ----------
-// kind: 0 文字 1 图标 2 电池；icon: 0 时钟 1 WiFi 2 天气 3 音符 4 喇叭
-#define NE_MAX_ROWS 4
+// kind: 0 文字 1 图标 2 电池；icon: 0 时钟 1 WiFi 2 天气 3 喇叭
+#define NE_MAX_ROWS 3
 #define NE_MAX_SEGS 8
 
 typedef struct {
@@ -728,7 +690,7 @@ static BOOL NEIsIconSeg(NESeg *s) { return s->kind != 0; }
 // ---------- 叠加层（全尺寸透明层，只画胶囊 + 来电条）----------
 
 typedef struct {
-    BOOL showDate, showWeather, showSignal, showBattery, showMusic, showVolume;
+    BOOL showDate, showWeather, showSignal, showBattery, showVolume;
     BOOL speedAlert; // 超速提醒开关（v0.1.8）
     NSInteger position; // 0 右下 1 左下 2 左上 3 右上
     CGFloat fontRefPt;  // 16/20/24
@@ -739,8 +701,7 @@ static CGImageRef RenderOverlay(size_t w, size_t h,
                                 float battLevel, BOOL battCharging,
                                 int wxCode, int wxTemp,
                                 int netKind, NSString * __unsafe_unretained netLabel,
-                                NSString * __unsafe_unretained musicStr, float volume,
-                                BOOL callActive,
+                                float volume, BOOL callActive,
                                 int speedKmh, BOOL overspeed,
                                 NEHUDSettings st) {
     if (w == 0 || h == 0) return NULL;
@@ -777,7 +738,7 @@ static CGImageRef RenderOverlay(size_t w, size_t h,
 
     // ---- 组行 ----
     NESeg rows[NE_MAX_ROWS][NE_MAX_SEGS];
-    int rowCounts[NE_MAX_ROWS] = { 0, 0, 0, 0 };
+    int rowCounts[NE_MAX_ROWS] = { 0, 0, 0 };
     memset(rows, 0, sizeof(rows));
 
     // 上行：时钟图标 + 日期时间
@@ -803,7 +764,7 @@ static CGImageRef RenderOverlay(size_t w, size_t h,
     }
     if (st.showVolume && volume >= 0) {
         NESeg *s = &rows[1][rowCounts[1]++];
-        s->kind = 1; s->icon = 4;
+        s->kind = 1; s->icon = 3;
         s = &rows[1][rowCounts[1]++];
         s->kind = 0; s->text = [NSString stringWithFormat:@"%d%%", (int)(volume * 100)]; s->color = white;
     }
@@ -815,23 +776,16 @@ static CGImageRef RenderOverlay(size_t w, size_t h,
         s->text = battLevel < 0 ? @"--%" : [NSString stringWithFormat:@"%d%%", (int)(battLevel * 100)];
         s->color = lowBatt ? red : white;
     }
-    // 第三行：正在放的歌（没放就不画，胶囊还是两行）
-    if (st.showMusic && musicStr.length > 0) {
-        NESeg *s = &rows[2][rowCounts[2]++];
-        s->kind = 1; s->icon = 3;
-        s = &rows[2][rowCounts[2]++];
-        s->kind = 0; s->text = musicStr; s->color = white;
-    }
-    // 第四行：超速（只在超速时画，红色文字，不用图标）
+    // 第三行：超速（只在超速时画，红色文字，不用图标）
     if (st.speedAlert && overspeed) {
-        NESeg *s = &rows[3][rowCounts[3]++];
+        NESeg *s = &rows[2][rowCounts[2]++];
         s->kind = 0;
         s->text = [NSString stringWithFormat:@"超速 %d km/h", speedKmh];
         s->color = red;
     }
 
     // ---- 量每行宽度 ----
-    CGFloat rowWidths[NE_MAX_ROWS] = { 0, 0, 0, 0 };
+    CGFloat rowWidths[NE_MAX_ROWS] = { 0, 0, 0 };
     int nonEmptyRows = 0;
     int rowOrder[NE_MAX_ROWS];
     for (int r = 0; r < NE_MAX_ROWS; r++) {
@@ -915,8 +869,7 @@ static CGImageRef RenderOverlay(size_t w, size_t h,
                             case 0: NEDrawClock(ctx, rect); break;
                             case 1: NEDrawWifi(ctx, rect); break;
                             case 2: NEDrawWeather(ctx, s->wxCode, rect); break;
-                            case 3: NEDrawMusic(ctx, rect); break;
-                            case 4: NEDrawSpeaker(ctx, rect); break;
+                            case 3: NEDrawSpeaker(ctx, rect); break;
                             default: break;
                         }
                     } else if (s->kind == 2) {
@@ -994,7 +947,6 @@ static CGImageRef OverlayForSize(size_t w, size_t h) {
     int wxCode = gWeatherCode, wxTemp = gWeatherTemp;
     int netKind = gNetKind;
     NSString *netLabel = gNetLabel;
-    NSString *musicStr = gMusicString;
     float volume = gVolume;
     BOOL callActive = gCallActive;
     double speedKmhD = gSpeedKmh;
@@ -1009,21 +961,21 @@ static CGImageRef OverlayForSize(size_t w, size_t h) {
     NEHUDSettings st;
     st.showDate = NEHUDShowDate(); st.showWeather = NEHUDShowWeather();
     st.showSignal = NEHUDShowSignal(); st.showBattery = NEHUDShowBattery();
-    st.showMusic = NEHUDShowMusic(); st.showVolume = NEHUDShowVolume();
+    st.showVolume = NEHUDShowVolume();
     st.speedAlert = NEHUDSpeedAlert();
     st.position = NEHUDPosition(); st.fontRefPt = NEHUDFontRefPt();
 
-    NSString *key = [NSString stringWithFormat:@"%@|%.2f|%d|%d|%d|%d|%@|%@|%.2f|%d|%d%d%d%d%d%d|%ld|%.0f|%d|%d",
+    NSString *key = [NSString stringWithFormat:@"%@|%.2f|%d|%d|%d|%d|%@|%.2f|%d|%d%d%d%d%d|%ld|%.0f|%d|%d",
                      timeStr, battLevel, battCharging, wxCode, wxTemp, netKind,
-                     netLabel ?: @"", musicStr ?: @"", volume, callActive,
+                     netLabel ?: @"", volume, callActive,
                      st.showDate, st.showWeather, st.showSignal,
-                     st.showBattery, st.showMusic, st.showVolume,
+                     st.showBattery, st.showVolume,
                      (long)st.position, st.fontRefPt, speedKmh, overspeed];
     if (!cache || cw != w || ch != h || ![key isEqualToString:cacheKey]) {
         if (cache) { CGImageRelease(cache); cache = NULL; }
         cache = RenderOverlay(w, h, timeStr, battLevel, battCharging,
                               wxCode, wxTemp, netKind, netLabel,
-                              musicStr, volume, callActive,
+                              volume, callActive,
                               speedKmh, overspeed, st);
         cacheKey = [key copy];
         cw = w; ch = h;
@@ -1285,7 +1237,6 @@ static void NECheckSettingsButton(void) {
     [stack addArrangedSubview:[self switchRow:@"天气温度" key:@"NEHUDShowWeather" on:NEHUDShowWeather()]];
     [stack addArrangedSubview:[self switchRow:@"信号（WiFi/5G）" key:@"NEHUDShowSignal" on:NEHUDShowSignal()]];
     [stack addArrangedSubview:[self switchRow:@"电量" key:@"NEHUDShowBattery" on:NEHUDShowBattery()]];
-    [stack addArrangedSubview:[self switchRow:@"音乐" key:@"NEHUDShowMusic" on:NEHUDShowMusic()]];
     [stack addArrangedSubview:[self switchRow:@"音量" key:@"NEHUDShowVolume" on:NEHUDShowVolume()]];
 
     [stack addArrangedSubview:[self sectionLabel:@"位置"]];
@@ -1305,7 +1256,6 @@ static void NECheckSettingsButton(void) {
         forControlEvents:UIControlEventValueChanged];
     [stack addArrangedSubview:fs];
 
-    [stack addArrangedSubview:[self sectionLabel:@"超速提醒"]];
     [stack addArrangedSubview:[self switchRow:@"超速提醒" key:@"NEHUDSpeedAlert" on:NEHUDSpeedAlert()]];
     [stack addArrangedSubview:[self speedLimitRow]];
 
@@ -1691,7 +1641,7 @@ static BOOL NEProbeAttempt(int attempt) {
                                          @"_TtC7Vehicle22BleCommandDebugManager",
                                          @"_TtC17NBBluetoothModule9DebugTool"];
     NSMutableDictionary *report = [NSMutableDictionary dictionary];
-    report[@"probe"] = @"NinebotEnhance iOS 0.1.8";
+    report[@"probe"] = @"NinebotEnhance iOS 0.1.9";
     report[@"attempt"] = @(attempt);
     report[@"date"] = [[NSDate date] description];
     if (gProbeClassInfo) report[@"classes"] = gProbeClassInfo;
@@ -1879,7 +1829,7 @@ static void NEProbeStart(void) {
                hasSel ? "YES" : "NO");
     }
 
-    os_log(gLog, "NinebotEnhance iOS 0.1.8 已加载（小胶囊 HUD：日期/天气/信号/音量/电量/音乐/来电/超速 + 车辆数据探测）");
+    os_log(gLog, "NinebotEnhance iOS 0.1.9 已加载（小胶囊 HUD：日期/天气/信号/音量/电量/来电/超速 + 车辆数据探测）");
 
     // 电量监听 + 定位 + 来电观察，全部在主队列 / 后台队列做，不阻塞加载
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -1889,14 +1839,14 @@ static void NEProbeStart(void) {
         gLocMgr.delegate = gLocDelegate;
         NEApplySpeedLocationMode(); // 提醒开着 → 连续定位；关着 → 单次定位（只够天气用）
 
-        // 音乐 + 音量：每秒一刷（主线程）
-        NERefreshMusicVolume();
-        gMusicTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0,
-                                             dispatch_get_main_queue());
-        dispatch_source_set_timer(gMusicTimer, dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC),
+        // 音量：每秒一刷（主线程）
+        NERefreshVolume();
+        gVolumeTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0,
+                                              dispatch_get_main_queue());
+        dispatch_source_set_timer(gVolumeTimer, dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC),
                                   NSEC_PER_SEC, NSEC_PER_SEC / 2);
-        dispatch_source_set_event_handler(gMusicTimer, ^{ NERefreshMusicVolume(); });
-        dispatch_resume(gMusicTimer);
+        dispatch_source_set_event_handler(gVolumeTimer, ^{ NERefreshVolume(); });
+        dispatch_resume(gVolumeTimer);
 
         // HUD 设置按钮：每 3 秒看一次最上层页面，只在“我的”页加按钮
         gButtonTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0,
