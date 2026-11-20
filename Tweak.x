@@ -1,16 +1,19 @@
 // NinebotEnhance iOS v0.2.0 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
 //
-// v0.2.0 改动：HUD 加骑行小人，直接用用户发的参考图贴图。
+// v0.2.0 改动：HUD 加骑行小人，AI 重画的插画分层动画版。
 //  表盘区下面紧挨着一个带边框的小框（背景跟 HUD 胶囊一样：黑 45% +
-//  白 35% 边框、圆角 12），里面就是用户那张图：大黄头盔竹蜻蜓、圆脸腮红、
-//  白上衣灰裤子骑浅蓝小绵羊，一模一样，固定在框中间。
+//  白 35% 边框、圆角 12），里面是 AI 照着用户参考图重画的插画：大黄头盔
+//  竹蜻蜓、圆脸腮红、白上衣灰裤子骑浅蓝小绵羊，朝左，跟原图同构图同配色。
 //  框顶边在帧高 0.30，框高按日期天气胶囊之上的可用空间定，框宽 = 框高 ×
-//  299/320，水平居中，不去碰底下日期天气那几行。车子行驶时小人跟着骑
-//  （3 帧循环：整图轻晃 + 螺旋桨转，骑得越快帧切换越快），车子停下来小人
-//  也停在静止帧；速度用插件已有的 GPS 速度驱动（>2 km/h 开始骑，<1 km/h
-//  停下，中间迟滞防抖）。设置页加“骑行小人”开关（默认开）。
-//  画法是贴图（NEDrawRider）：RiderImage.h 里两张 PNG 的 base64，运行时
-//  解码一次缓存；先画整图，再绕 hub 旋转画螺旋桨。超速提醒、探针一律不动。
+//  314/320，水平居中，不去碰底下日期天气那几行。车子行驶时小人跟着骑
+//  （3 帧循环：轮子转 + 螺旋桨转 + 速度线尾气，骑得越快帧切换越快），车子
+//  停下来小人也停在静止帧（轮子不转、不喷尾气）；速度用插件已有的 GPS
+//  速度驱动（>2 km/h 开始骑，<1 km/h 停下，中间迟滞防抖）。设置页加
+//  “骑行小人”开关（默认开）。不晃动、不上下位移、不摇摆（用户明确不要）。
+//  画法是分层贴图（NEDrawRider）：底下先画手绘轮子（CG，胎/盘/放射线/毂，
+//  绕轮心转），再画 RiderImage.h 的 main 图，再绕 hub 旋转画螺旋桨，行驶帧
+//  再画 RiderMotion.h 的速度线 + 尾气层；三张图 base64 运行时解码一次缓存。
+//  超速提醒、探针一律不动。
 //
 // v0.1.9 改动：音乐拿掉 + 超速提醒标题去重。
 //  音乐整个删了（九号 App 自己就显示音乐，插件不再重复画）：
@@ -134,7 +137,8 @@
 #import <objc/message.h>
 #import <objc/runtime.h>
 #import <substrate.h>
-#include "RiderImage.h" // 用户原图贴图素材（base64，见 RiderImage.h）
+#include "RiderImage.h"  // AI 重画插画贴图素材（base64，见 RiderImage.h）
+#include "RiderMotion.h" // 速度线 + 尾气层素材（base64，见 RiderMotion.h）
 
 @interface NBPixelBufferConverter : NSObject
 + (CVPixelBufferRef)pixelBufferFromCGImage:(CGImageRef)image;
@@ -716,26 +720,32 @@ typedef struct {
     CGFloat fontRefPt;  // 16/20/24
 } NEHUDSettings;
 
-// ---------- 骑行小人（v0.2.0）：直接用用户原图贴图 ----------
-// 用户明确要求：不要 Muse 自己画的风格，直接用用户发的参考图，一模一样。
-// 上一版手绘 Q 版 Core Graphics 代码（commit cf290af0）已删掉。
-// 素材在 RiderImage.h：kRiderMainB64（299x320，用户原图去白底，螺旋桨已抠掉）、
-// kRiderPropB64（49x24，单独的螺旋桨叶片）。运行时 base64 解码一次并缓存。
-// 动画：frame 0 停车静止；frame 1 上移 2px + 轻转 -1°、螺旋桨 +40°；
-// frame 2 回原位 + 轻转 +1°、螺旋桨 +80°。螺旋桨绕 hub (136.7, 17.5) 旋转。
-// 边框：顶边在帧高 0.30；高度按日期天气胶囊之上的可用空间定（RenderOverlay
-// 把胶囊顶边位置写进 gNERiderLimitBottomFromTop），宽度 = 高度 × 299/320，
-// 水平居中；样式跟 HUD 胶囊一样（黑 45% + 白 35% 边、圆角 12）。
-// 框高 = 图片高 + 内边距，不去碰底下日期天气那几行。
-// 位置/尺寸全部是常量，方便按用户实测照片微调。
-#define NE_RIDER_IMG_W 299.0
+// ---------- 骑行小人（v0.2.0）：AI 重画的插画，分层动画 ----------
+// 用户已认可 AI 照着参考图重画的插画（rider-redrawn.png，手绘风，同构图
+// 同配色）。上一版用户原图贴图（commit 817d57e9）作废，不用交付。
+// 素材：RiderImage.h：kRiderMainB64（314x320，主体，轮子、螺旋桨、速度线、
+// 尾气已抠掉，轮子处是透明洞）、kRiderPropB64（314x320 全画布，螺旋桨叶片）；
+// RiderMotion.h：kRiderMotionB64（314x320 全画布，速度线 + 尾气，只在行驶帧）。
+// 运行时 base64 解码一次并缓存。绘制顺序（同一坐标系）：(1) 手绘轮子
+// （CG，胎/盘/12 根放射线/毂，绕轮心转，画在 main 图底下，main 图的轮洞
+// 露出它们，main 图里的前叉/挡泥板/后车罩/消声器自然盖住轮子上部）；
+// (2) main 图；(3) 螺旋桨（绕中心旋转）；(4) motion 层（只在行驶帧）。
+// 动画：frame 0 停车静止（轮子 0°、螺旋桨 0°、无 motion 层）；frame 1/2
+// 行驶（轮子 40°/80°、螺旋桨 40°/80°、motion 层显示）。不晃动、不上下
+// 位移、不摇摆（用户明确不要）。边框：顶边在帧高 0.30；高度按日期天气
+// 胶囊之上的可用空间定（RenderOverlay 把胶囊顶边位置写进
+// gNERiderLimitBottomFromTop），宽度 = 高度 × 314/320，水平居中；样式
+// 跟 HUD 胶囊一样（黑 45% + 白 35% 边、圆角 12）。框高 = 图片高 + 内边距，
+// 不去碰底下日期天气那几行。位置/尺寸全部是常量，方便按用户实测照片微调。
+#define NE_RIDER_IMG_W 314.0
 #define NE_RIDER_IMG_H 320.0
-#define NE_RIDER_PROP_W 49.0
-#define NE_RIDER_PROP_H 24.0
-#define NE_RIDER_PROP_OFF_X 110.7 // 螺旋桨素材在 main 图里的左上角偏移
-#define NE_RIDER_PROP_OFF_Y 5.8
-#define NE_RIDER_HUB_X 136.7      // 螺旋桨中心（main 图坐标）
-#define NE_RIDER_HUB_Y 17.5
+#define NE_RIDER_HUB_X 143.5      // 螺旋桨中心（main 图坐标，314x320）
+#define NE_RIDER_HUB_Y 22.5
+#define NE_RIDER_WHEEL_FX 46.0    // 前轮中心 x（图坐标）
+#define NE_RIDER_WHEEL_FY 285.0   // 前轮中心 y（图坐标）
+#define NE_RIDER_WHEEL_RX 189.0   // 后轮中心 x（图坐标）
+#define NE_RIDER_WHEEL_RY 285.0   // 后轮中心 y（图坐标）
+#define NE_RIDER_WHEEL_R 25.0     // 轮子半径（图坐标）
 static const CGFloat NE_RIDER_BOX_TOP_FRAC = 0.30; // 边框顶边离顶 = 帧高 × 0.30（表盘区下方，待实测校准）
 static const CGFloat NE_RIDER_PAD          = 8;    // 边框内边距（848x480 参考 px）
 static const double  NE_RIDER_SPEED_START  = 2.0;  // >2 km/h 开始骑
@@ -792,19 +802,30 @@ static CGImageRef NERiderPropImage(void) {
     return img;
 }
 
-// 画小人框：黑 45% + 白 35% 边、圆角 12（跟 HUD 胶囊一样的底板），
-// 用户原图贴图固定在框中间。ctx 是 y 朝上的 bitmap（跟 RenderOverlay 同一套坐标）。
-// 图片按等比缩放进框里（不拉伸），螺旋桨绕 hub 旋转。
+static CGImageRef NERiderMotionImage(void) {
+    static CGImageRef img = NULL;
+    static dispatch_once_t once = 0;
+    dispatch_once(&once, ^{ img = NERiderImageFromB64(kRiderMotionB64); });
+    return img;
+}
+
+// 画小人框：黑 45% + 白 35% 边、圆角 12（跟 HUD 胶囊一样的底板）。
+// ctx 是 y 朝上的 bitmap（跟 RenderOverlay 同一套坐标）。
+// 绘制顺序（都在翻转后的图坐标里，y 朝下，跟预览脚本一致）：
+//   (1) 手绘轮子（CG，画在 main 图底下）；(2) main 图；
+//   (3) 螺旋桨（绕中心旋转）；(4) motion 层（只在行驶帧）。
+// 不晃动、不上下位移、不摇摆。图片按等比缩放进框里（不拉伸）。
 static void NEDrawRider(CGContextRef ctx, CGFloat w, CGFloat h, int frame) {
     if (frame < 0 || frame > 2) frame = 0;
     CGImageRef mainImg = NERiderMainImage();
     CGImageRef propImg = NERiderPropImage();
-    if (!mainImg || !propImg) return;
+    CGImageRef motionImg = NERiderMotionImage();
+    if (!mainImg || !propImg || !motionImg) return;
 
     CGFloat sx = w / 848.0;
     CGFloat sy = h / 480.0;
 
-    // 边框：顶边 0.30，底边在胶囊上面（留空隙）；宽 = 高 × 299/320，水平居中
+    // 边框：顶边 0.30，底边在胶囊上面（留空隙）；宽 = 高 × 314/320，水平居中
     CGFloat boxTopFromTop = NE_RIDER_BOX_TOP_FRAC * h;
     CGFloat limitBottomFromTop = (gNERiderLimitBottomFromTop > 0)
         ? gNERiderLimitBottomFromTop : (h - 12 * sy);
@@ -835,37 +856,74 @@ static void NEDrawRider(CGContextRef ctx, CGFloat w, CGFloat h, int frame) {
     CGFloat imgX = boxX + padX + (contentW - imgW) / 2;
     CGFloat imgY = boxY + padY + (contentH - imgH) / 2; // y 朝上：图片底边
 
-    // 动画：frame 1 上移 2px + 轻转 -1°；frame 2 回原位 + 轻转 +1°（绕图中心）
-    CGFloat tiltDeg = (frame == 1) ? -1.0 : (frame == 2) ? 1.0 : 0.0;
-    CGFloat dyUp = (frame == 1) ? 2.0 * s : 0.0; // 上移 2px（图片坐标，按比例换算）
-    CGFloat cx = imgX + imgW / 2;
-    CGFloat cy = imgY + imgH / 2;
-
+    // 翻转成图坐标（y 朝下，原点在图片左上角），跟预览脚本一致。
+    // 下面所有坐标都是“图坐标 × s”。
     CGContextSaveGState(ctx);
-    CGContextTranslateCTM(ctx, cx, cy + dyUp);
-    CGContextRotateCTM(ctx, tiltDeg * M_PI / 180.0);
-    CGContextTranslateCTM(ctx, -imgW / 2, -imgH / 2);
-    // y 朝上的 context 里画图要先翻转，否则图片上下颠倒
-    CGContextTranslateCTM(ctx, 0, imgH);
+    CGContextTranslateCTM(ctx, imgX, imgY + imgH);
     CGContextScaleCTM(ctx, 1, -1);
+
+    // (1) 手绘轮子（画在 main 图底下）。轮子位置/半径按 rider-gen-geo.json。
+    // 画法跟预览脚本的 draw_wheel 一致：胎、盘、12 根放射线、毂。
+    // 放射线角度 = frame×40° + k×30°，用 cos/sin 直接算端点（y 朝下坐标，
+    // 跟 PIL 一样），不用 CTM 旋转。
+    CGFloat spokeDeg = frame * 40.0; // frame 0: 0°，frame 1: +40°，frame 2: +80°
+    CGFloat wheelCX[2] = { NE_RIDER_WHEEL_FX * s, NE_RIDER_WHEEL_RX * s };
+    CGFloat wheelCY[2] = { NE_RIDER_WHEEL_FY * s, NE_RIDER_WHEEL_RY * s };
+    CGFloat wheelR = NE_RIDER_WHEEL_R * s;
+    for (int wi = 0; wi < 2; wi++) {
+        CGFloat cx = wheelCX[wi], cy = wheelCY[wi];
+        // 胎：深灰填 + 棕描边
+        CGContextSetRGBFillColor(ctx, 75/255.0, 65/255.0, 65/255.0, 1);
+        CGContextSetRGBStrokeColor(ctx, 150/255.0, 45/255.0, 25/255.0, 1);
+        CGContextSetLineWidth(ctx, 3 * s);
+        CGContextFillEllipseInRect(ctx, CGRectMake(cx - wheelR, cy - wheelR, wheelR * 2, wheelR * 2));
+        CGContextStrokeEllipseInRect(ctx, CGRectMake(cx - wheelR, cy - wheelR, wheelR * 2, wheelR * 2));
+        // 内盘：暖灰
+        CGFloat discR = wheelR * 0.77;
+        CGContextSetRGBFillColor(ctx, 110/255.0, 100/255.0, 95/255.0, 1);
+        CGContextFillEllipseInRect(ctx, CGRectMake(cx - discR, cy - discR, discR * 2, discR * 2));
+        // 12 根短放射线（红棕），绕轮心转
+        CGContextSetRGBStrokeColor(ctx, 150/255.0, 60/255.0, 35/255.0, 1);
+        CGContextSetLineWidth(ctx, 4 * s);
+        CGContextBeginPath(ctx);
+        for (int k = 0; k < 12; k++) {
+            double a = (spokeDeg + k * 30.0) * M_PI / 180.0;
+            CGFloat x1 = cx + wheelR * 0.45 * cos(a);
+            CGFloat y1 = cy + wheelR * 0.45 * sin(a);
+            CGFloat x2 = cx + wheelR * 0.68 * cos(a);
+            CGFloat y2 = cy + wheelR * 0.68 * sin(a);
+            CGContextMoveToPoint(ctx, x1, y1);
+            CGContextAddLineToPoint(ctx, x2, y2);
+        }
+        CGContextStrokePath(ctx);
+        // 毂：浅灰填 + 棕描边
+        CGFloat hubR = wheelR * 0.2;
+        CGContextSetRGBFillColor(ctx, 200/255.0, 200/255.0, 200/255.0, 1);
+        CGContextSetRGBStrokeColor(ctx, 150/255.0, 45/255.0, 25/255.0, 1);
+        CGContextSetLineWidth(ctx, 2 * s);
+        CGContextFillEllipseInRect(ctx, CGRectMake(cx - hubR, cy - hubR, hubR * 2, hubR * 2));
+        CGContextStrokeEllipseInRect(ctx, CGRectMake(cx - hubR, cy - hubR, hubR * 2, hubR * 2));
+    }
+
+    // (2) main 图
     CGContextDrawImage(ctx, CGRectMake(0, 0, imgW, imgH), mainImg);
 
-    // 螺旋桨：绕 hub 旋转。hub 在图片坐标里是 (136.7, 17.5)（y 朝下），
-    // 此时 CTM 已翻转（y 朝下），hub 的图内坐标 = (136.7*s, 17.5*s)。
+    // (3) 螺旋桨：绕中心 (143.5, 22.5) 旋转。prop 层是全画布图，绕 hub
+    // 旋转整张图（跟预览脚本的 prop.rotate(frame*40, center=hub) 一致）。
     // 预览里螺旋桨是逆时针转；y 翻转的 CTM 下取负角才与预览一致（跟上一版一样）。
-    CGFloat propAngleDeg = frame * 40.0; // frame 0: 0°，frame 1: +40°，frame 2: +80°
     CGFloat hubX = NE_RIDER_HUB_X * s;
     CGFloat hubY = NE_RIDER_HUB_Y * s;
-    CGFloat propW = NE_RIDER_PROP_W * s;
-    CGFloat propH = NE_RIDER_PROP_H * s;
-    CGFloat propX = NE_RIDER_PROP_OFF_X * s;
-    CGFloat propY = NE_RIDER_PROP_OFF_Y * s;
     CGContextSaveGState(ctx);
     CGContextTranslateCTM(ctx, hubX, hubY);
-    CGContextRotateCTM(ctx, -propAngleDeg * M_PI / 180.0);
+    CGContextRotateCTM(ctx, -spokeDeg * M_PI / 180.0);
     CGContextTranslateCTM(ctx, -hubX, -hubY);
-    CGContextDrawImage(ctx, CGRectMake(propX, propY, propW, propH), propImg);
+    CGContextDrawImage(ctx, CGRectMake(0, 0, imgW, imgH), propImg);
     CGContextRestoreGState(ctx);
+
+    // (4) motion 层（速度线 + 尾气）：只在行驶帧画在最上面
+    if (frame > 0) {
+        CGContextDrawImage(ctx, CGRectMake(0, 0, imgW, imgH), motionImg);
+    }
 
     CGContextRestoreGState(ctx);
 }
