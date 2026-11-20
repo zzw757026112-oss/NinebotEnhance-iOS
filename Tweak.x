@@ -853,12 +853,12 @@ static void NEDrawRider(CGContextRef ctx, CGFloat w, CGFloat h, int frame) {
             char ch = row[c];
             if (ch == '.' || ch == '\0') continue;
             switch (ch) {
-                case 'K': CGContextSetRGBFillColor(ctx, 0.12, 0.12, 0.14); break;
-                case 'R': CGContextSetRGBFillColor(ctx, 0.95, 0.25, 0.25); break;
-                case 'S': CGContextSetRGBFillColor(ctx, 1.0, 0.80, 0.60); break;
-                case 'U': CGContextSetRGBFillColor(ctx, 0.25, 0.50, 1.0); break;
-                case 'W': CGContextSetRGBFillColor(ctx, 1.0, 1.0, 1.0); break;
-                case 'G': CGContextSetRGBFillColor(ctx, 0.55, 0.55, 0.60); break;
+                case 'K': CGContextSetRGBFillColor(ctx, 0.12, 0.12, 0.14, 1.0); break;
+                case 'R': CGContextSetRGBFillColor(ctx, 0.95, 0.25, 0.25, 1.0); break;
+                case 'S': CGContextSetRGBFillColor(ctx, 1.0, 0.80, 0.60, 1.0); break;
+                case 'U': CGContextSetRGBFillColor(ctx, 0.25, 0.50, 1.0, 1.0); break;
+                case 'W': CGContextSetRGBFillColor(ctx, 1.0, 1.0, 1.0, 1.0); break;
+                case 'G': CGContextSetRGBFillColor(ctx, 0.55, 0.55, 0.60, 1.0); break;
                 default: continue;
             }
             CGFloat x = boxX + padX + c * cell;
