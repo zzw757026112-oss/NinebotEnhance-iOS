@@ -1,20 +1,16 @@
-// 触发重建：RiderImage.h 已换成抠净腿左边白区的修复版（head 575249ab），workflow 只监听 Tweak.x 等文件，头文件单独推不触发构建。
-// NinebotEnhance iOS v0.2.0 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
+// NinebotEnhance iOS v0.3.0 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
 //
-// v0.2.0 改动：HUD 加骑行小人，AI 重画的插画分层动画版。
-//  表盘区下面紧挨着一个带边框的小框（背景跟 HUD 胶囊一样：黑 45% +
-//  白 35% 边框、圆角 12），里面是 AI 照着用户参考图重画的插画：大黄头盔
-//  竹蜻蜓、圆脸腮红、白上衣灰裤子骑浅蓝小绵羊，朝左，跟原图同构图同配色。
-//  框顶边在帧高 0.30，框高按日期天气胶囊之上的可用空间定，框宽 = 框高 ×
-//  314/320，水平居中，不去碰底下日期天气那几行。车子行驶时小人跟着骑
-//  （3 帧循环：轮子转 + 螺旋桨转 + 速度线尾气，骑得越快帧切换越快），车子
-//  停下来小人也停在静止帧（轮子不转、不喷尾气）；速度用插件已有的 GPS
-//  速度驱动（>2 km/h 开始骑，<1 km/h 停下，中间迟滞防抖）。设置页加
-//  “骑行小人”开关（默认开）。不晃动、不上下位移、不摇摆（用户明确不要）。
-//  画法是分层贴图（NEDrawRider）：底下先画手绘轮子（CG，胎/盘/放射线/毂，
-//  绕轮心转），再画 RiderImage.h 的 main 图，再绕 hub 旋转画螺旋桨，行驶帧
-//  再画 RiderMotion.h 的速度线 + 尾气层；三张图 base64 运行时解码一次缓存。
-//  超速提醒、探针一律不动。
+// v0.3.0 改动：骑行小人拿掉，换成动态图片（老虎机），和 App 1.3.12 同款。
+//  用户 2026-11-21 03:41 定名：不叫卡通人物了，叫动态图片。
+//  位置跟 App 一样：P 表盘下面，x 375–656（宽 281）、高 108，在表盘底沿
+//  （214）和胶囊顶之间垂直居中。机身是用户参考图抠出来的（白机身、黑色
+//  格子、横向拉长 1.4 倍、摇杆已去掉），base64 嵌在 Tweak.x 里；数字是运行
+//  时画的文字（1–9 上下滚动，停下变 888）；摇杆也是运行时画的，骑行开始
+//  朝前方下面扳（透视缩短，0→80°，球直直往下掉），车停下三格依次停成 888。
+//  速度用插件已有的 GPS（>2 km/h 开始转，<1 km/h 停下）。设置页的开关改
+//  叫“动态图片”（默认开）。超速提醒、探针一律不动。
+//  v0.2.0 的像素骑行小人（AI 重画插画分层动画）已删除，RiderImage.h /
+//  RiderMotion.h 留在仓库里不再用。
 //
 // v0.1.9 改动：音乐拿掉 + 超速提醒标题去重。
 //  音乐整个删了（九号 App 自己就显示音乐，插件不再重复画）：
@@ -116,7 +112,7 @@
 // 开关：NSUserDefaults 写 NBProjectionOverride = NO 立刻恢复原生画面。
 // HUD 设置键（defaults write cn.ninebot.segway <键> <值>）：
 //   NEHUDShowDate / NEHUDShowWeather / NEHUDShowSignal /
-//   NEHUDShowBattery / NEHUDShowVolume / NEHUDShowRider（bool，默认 YES）
+//   NEHUDShowBattery / NEHUDShowVolume / NEHUDShowSlot（bool，默认 YES）
 //   NEHUDPosition（int，默认 0：0 右下 1 左下 2 左上 3 右上）
 //   NEHUDFontSize（int，默认 1：0 小 1 中 2 大）
 // 日志：os_log subsystem "com.user.ninebotenhance"，只打加载、钩点检查、
@@ -138,8 +134,8 @@
 #import <objc/message.h>
 #import <objc/runtime.h>
 #import <substrate.h>
-#include "RiderImage.h"  // AI 重画插画贴图素材（base64，见 RiderImage.h）
-#include "RiderMotion.h" // 速度线 + 尾气层素材（base64，见 RiderMotion.h）
+// 老虎机机身图 base64 嵌在下面 kSlotMachineB64（RiderImage.h / RiderMotion.h
+// 已不用，留在仓库里）。
 
 @interface NBPixelBufferConverter : NSObject
 + (CVPixelBufferRef)pixelBufferFromCGImage:(CGImageRef)image;
@@ -193,9 +189,9 @@ static BOOL NEHUDShowVolume(void) {
     id v = [[NSUserDefaults standardUserDefaults] objectForKey:@"NEHUDShowVolume"];
     return v ? [v boolValue] : YES;
 }
-// 像素骑行小人开关（v0.2.0，默认 YES）
-static BOOL NEHUDShowRider(void) {
-    id v = [[NSUserDefaults standardUserDefaults] objectForKey:@"NEHUDShowRider"];
+// 动态图片（老虎机）开关（v0.3.0，默认 YES）
+static BOOL NEHUDShowSlot(void) {
+    id v = [[NSUserDefaults standardUserDefaults] objectForKey:@"NEHUDShowSlot"];
     return v ? [v boolValue] : YES;
 }
 static BOOL NEHUDSpeedAlert(void) {
@@ -367,11 +363,11 @@ static void RefreshWeatherIfNeeded(void) {
 }
 @end
 
-// 超速提醒或骑行小人开 → 连续定位（best 精度）；都关 → 恢复单次定位
+// 超速提醒或动态图片开 → 连续定位（best 精度）；都关 → 恢复单次定位
 // （3km 精度，只够天气用）。主线程调（gLocMgr 在主队列创建，回调也在主队列）。
 static void NEApplySpeedLocationMode(void) {
     if (!gLocMgr) return;
-    if (NEHUDSpeedAlert() || NEHUDShowRider()) {
+    if (NEHUDSpeedAlert() || NEHUDShowSlot()) {
         gLocMgr.desiredAccuracy = kCLLocationAccuracyBest;
         [gLocMgr startUpdatingLocation];
     } else {
@@ -735,67 +731,143 @@ static BOOL NEIsIconSeg(NESeg *s) { return s->kind != 0; }
 
 typedef struct {
     BOOL showDate, showWeather, showSignal, showBattery, showVolume;
-    BOOL showRider;  // 骑行小人开关（v0.2.0）
+    BOOL showSlot;  // 动态图片（老虎机）开关（v0.3.0）
     BOOL speedAlert; // 超速提醒开关（v0.1.8）
     NSInteger position; // 0 右下 1 左下 2 左上 3 右上
     CGFloat fontRefPt;  // 16/20/24
 } NEHUDSettings;
 
-// ---------- 骑行小人（v0.2.0）：AI 重画的插画，分层动画 ----------
-// 用户已认可 AI 照着参考图重画的插画（rider-redrawn.png，手绘风，同构图
-// 同配色）。上一版用户原图贴图（commit 817d57e9）作废，不用交付。
-// 素材：RiderImage.h：kRiderMainB64（314x320，主体，轮子、螺旋桨、速度线、
-// 尾气已抠掉，轮子处是透明洞）、kRiderPropB64（314x320 全画布，螺旋桨叶片）；
-// RiderMotion.h：kRiderMotionB64（314x320 全画布，速度线 + 尾气，只在行驶帧）。
-// 运行时 base64 解码一次并缓存。绘制顺序（同一坐标系）：(1) 手绘轮子
-// （CG，胎/盘/12 根放射线/毂，绕轮心转，画在 main 图底下，main 图的轮洞
-// 露出它们，main 图里的前叉/挡泥板/后车罩/消声器自然盖住轮子上部）；
-// (2) main 图；(3) 螺旋桨（绕中心旋转）；(4) motion 层（只在行驶帧）。
-// 动画：frame 0 停车静止（轮子 0°、螺旋桨 0°、无 motion 层）；frame 1/2
-// 行驶（轮子 40°/80°、螺旋桨 40°/80°、motion 层显示）。不晃动、不上下
-// 位移、不摇摆（用户明确不要）。边框：顶边在帧高 0.30；高度按日期天气
-// 胶囊之上的可用空间定（RenderOverlay 把胶囊顶边位置写进
-// gNERiderLimitBottomFromTop），宽度 = 高度 × 314/320，水平居中；样式
-// 跟 HUD 胶囊一样（黑 45% + 白 35% 边、圆角 12）。框高 = 图片高 + 内边距，
-// 不去碰底下日期天气那几行。位置/尺寸全部是常量，方便按用户实测照片微调。
-#define NE_RIDER_IMG_W 314.0
-#define NE_RIDER_IMG_H 320.0
-#define NE_RIDER_HUB_X 143.5      // 螺旋桨中心（main 图坐标，314x320）
-#define NE_RIDER_HUB_Y 22.5
-#define NE_RIDER_WHEEL_FX 46.0    // 前轮中心 x（图坐标）
-#define NE_RIDER_WHEEL_FY 285.0   // 前轮中心 y（图坐标）
-#define NE_RIDER_WHEEL_RX 189.0   // 后轮中心 x（图坐标）
-#define NE_RIDER_WHEEL_RY 285.0   // 后轮中心 y（图坐标）
-#define NE_RIDER_WHEEL_R 25.0     // 轮子半径（图坐标）
-static const CGFloat NE_RIDER_BOX_TOP_FRAC = 0.30; // 边框顶边离顶 = 帧高 × 0.30（表盘区下方，待实测校准）
-static const CGFloat NE_RIDER_PAD          = 8;    // 边框内边距（848x480 参考 px）
-static const double  NE_RIDER_SPEED_START  = 2.0;  // >2 km/h 开始骑
-static const double  NE_RIDER_SPEED_STOP   = 1.0;  // <1 km/h 停下（迟滞，防抖）
+// ---------- 动态图片（v0.3.0）：老虎机，和 App 1.3.12 同款 ----------
+// 用户 2026-11-21 03:41 定名：不叫卡通人物了，叫动态图片。像素骑行小人
+// （v0.2.0）已拿掉，换成老虎机，位置/对齐跟 App 一样：P 表盘下面，
+// x 375–656（宽 281）、高 108，在表盘底沿（214）和胶囊顶之间垂直居中。
+// 机身图是用户参考图抠出来的（白机身、黑色格子、摇杆已去掉），base64 嵌
+// 在下面（kSlotMachineB64，724x473 PNG，7.7KB），运行时解码一次缓存。
+// 数字是运行时画的文字：1–9 上下滚动，停下变 888；摇杆也是运行时画的，
+// 骑行开始朝前方下面扳（透视缩短，0→80°，球直直往下掉），不是往右下甩。
+// 速度用插件已有的 GPS（>2 km/h 开始转，<1 km/h 停下，三格依次停 0/0.4/0.8 秒）。
+// 画法跟 App 的 HUDOverlay.swift 同一套数（参考点、y 朝下局部坐标 →
+// 设备 y 朝上坐标：x = slotX + lx*sx，y = slotY + slotH - ly*sy）。
+static const char *kSlotMachineB64 =
+    "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";
+static const CGFloat NE_SLOT_PITCH = 40.0;    // 数字格距（参考点）
+static const CGFloat NE_SLOT_IMG_W = 724.0;   // 机身图原宽
+static const CGFloat NE_SLOT_IMG_H = 473.0;   // 机身图原高
+static const CGFloat NE_SLOT_PANEL_W = 281.0; // 面板宽（参考点）
+static const CGFloat NE_SLOT_PANEL_H = 108.0; // 面板高（参考点）
+static const double  NE_SLOT_SPEED_START = 2.0; // >2 km/h 开始转
+static const double  NE_SLOT_SPEED_STOP  = 1.0; // <1 km/h 停下
 
 // RenderOverlay 每次重画时把日期天气胶囊的顶边（离顶距离）写到这里，
-// 供 NEDrawRider 定边框高度：边框底边必须在胶囊上面，留 12*sy 空隙。
+// 供 NEDrawSlot 定面板高度：面板底边必须在胶囊上面，留 12*sy 空隙。
 // 胶囊在顶部时（position 左上/右上）或没有胶囊时，值 = 帧高 - 12*sy。
-static CGFloat gNERiderLimitBottomFromTop = 0;
-
-// 当前该画第几帧（0/1/2）。速度用 GPS 速度（km/h），speedFresh 为 NO
-// （5 秒内没新定位）就当停车。>2 开始骑，<1 停下，中间保持上次状态
-// （迟滞，避免在 1–2 之间抖）。骑得越快帧切换越快（0.45s→0.12s 下限）。
-// 叠加层最多 250ms 重画一次，所以实际动画帧率 ≤4fps，贴图够用。
-static int NERiderFrameIndex(double speedKmh, BOOL speedFresh, CFAbsoluteTime now) {
-    static BOOL moving = NO;
-    double speed = speedFresh ? speedKmh : 0;
-    if (speed > NE_RIDER_SPEED_START) moving = YES;
-    else if (speed < NE_RIDER_SPEED_STOP) moving = NO;
-    if (!moving) return 0;
-    double dur = 0.45 - speed * 0.006;
-    if (dur < 0.12) dur = 0.12;
-    if (dur > 0.45) dur = 0.45;
-    long long ticks = (long long)(now / dur);
-    return (int)(ticks % 3);
-}
+static CGFloat gNESlotLimitBottomFromTop = 0;
 
 // base64 解码成 CGImage（只解码一次，缓存）。都是 iOS 7/4 时代的老 API。
-static CGImageRef NERiderImageFromB64(const char *b64) {
+static CGImageRef NEImageFromB64(const char *b64) {
     if (!b64) return NULL;
     NSString *s = [NSString stringWithUTF8String:b64];
     if (!s) return NULL;
@@ -809,146 +881,208 @@ static CGImageRef NERiderImageFromB64(const char *b64) {
     return img;
 }
 
-static CGImageRef NERiderMainImage(void) {
+static CGImageRef NESlotImage(void) {
     static CGImageRef img = NULL;
     static dispatch_once_t once = 0;
-    dispatch_once(&once, ^{ img = NERiderImageFromB64(kRiderMainB64); });
+    dispatch_once(&once, ^{ img = NEImageFromB64(kSlotMachineB64); });
     return img;
 }
 
-static CGImageRef NERiderPropImage(void) {
-    static CGImageRef img = NULL;
-    static dispatch_once_t once = 0;
-    dispatch_once(&once, ^{ img = NERiderImageFromB64(kRiderPropB64); });
-    return img;
+// ---------- 老虎机状态机（v0.3.0，和 App 1.3.12 同逻辑） ----------
+// 数字带 1–9 循环，格距 40 参考点；偏移 ≡ 280（= 7×40）时正中是 8。
+// NESlotTick 在 OverlayForSize 里调（过节流才调一次），推进状态。
+// 返回：是否在动（在动时 OverlayForSize 用 150ms 档重画；静止时 250ms）。
+static CGFloat gNESlotOffsets[3] = { 0, 0, 0 };       // 每格滚动偏移（参考点）
+static CGFloat gNESlotLever = 0;                       // 摇杆角度 0–80
+static BOOL    gNESlotSpinning = NO;
+static CFAbsoluteTime gNESlotStopAt[3] = { 0, 0, 0 };  // 每格停下的时刻（0=未排）
+static CGFloat gNESlotSettle[3] = { 0, 0, 0 };         // 每格对准 8 的目标偏移
+static BOOL    gNESlotHasSettle[3] = { NO, NO, NO };   // 有没有算好的目标
+static CFAbsoluteTime gNESlotLastTick = 0;
+static BOOL    gNESlotMoving = NO;                     // 上次 tick 是否在动（节流用）
+
+static BOOL NESlotTick(CFAbsoluteTime now, double speedKmh, BOOL speedFresh, BOOL enabled) {
+    if (!enabled) {
+        // 没开动态图片：状态归零，下次开从 888 / 摇杆 0 开始。
+        if (gNESlotLever != 0 || gNESlotSpinning ||
+            gNESlotOffsets[0] != 0 || gNESlotOffsets[1] != 0 || gNESlotOffsets[2] != 0) {
+            gNESlotOffsets[0] = gNESlotOffsets[1] = gNESlotOffsets[2] = 0;
+            gNESlotLever = 0;
+            gNESlotSpinning = NO;
+            gNESlotStopAt[0] = gNESlotStopAt[1] = gNESlotStopAt[2] = 0;
+            gNESlotHasSettle[0] = gNESlotHasSettle[1] = gNESlotHasSettle[2] = NO;
+            gNESlotLastTick = 0;
+        }
+        gNESlotMoving = NO;
+        return NO;
+    }
+    double dt = (gNESlotLastTick == 0) ? 0 : (now - gNESlotLastTick);
+    gNESlotLastTick = now;
+    double dtC = dt;
+    if (dtC < 0) dtC = 0;
+    if (dtC > 0.5) dtC = 0.5;
+    double speed = speedFresh ? speedKmh : 0;
+    BOOL spinning = speed > NE_SLOT_SPEED_START;
+    // 摇杆：转时目标 80°，停时目标 0°；每秒 240° 逼近。
+    double leverTarget = spinning ? 80 : 0;
+    double leverStep = 240 * dtC;
+    if (gNESlotLever < leverTarget) {
+        gNESlotLever = MIN(leverTarget, gNESlotLever + leverStep);
+    } else if (gNESlotLever > leverTarget) {
+        gNESlotLever = MAX(leverTarget, gNESlotLever - leverStep);
+    }
+    if (spinning) {
+        if (!gNESlotSpinning) {
+            gNESlotSpinning = YES;
+            gNESlotStopAt[0] = gNESlotStopAt[1] = gNESlotStopAt[2] = 0;
+            gNESlotHasSettle[0] = gNESlotHasSettle[1] = gNESlotHasSettle[2] = NO;
+        }
+        // 滚动速度随车速：每秒 2 + 车速/10 格；偏移对 360 取余防越滚越大。
+        double rate = NE_SLOT_PITCH * (2 + speed / 10);
+        for (int i = 0; i < 3; i++) {
+            gNESlotOffsets[i] += rate * dtC;
+            gNESlotOffsets[i] = fmod(gNESlotOffsets[i], 9 * NE_SLOT_PITCH);
+        }
+    } else {
+        if (gNESlotSpinning) {
+            // 刚停下：排停表，三格依次停（0 / 0.4 / 0.8 秒）。
+            gNESlotSpinning = NO;
+            for (int i = 0; i < 3; i++) gNESlotStopAt[i] = now + i * 0.4;
+        }
+        for (int i = 0; i < 3; i++) {
+            if (gNESlotStopAt[i] == 0 || now < gNESlotStopAt[i]) continue;
+            if (!gNESlotHasSettle[i]) {
+                // 下一个 8：偏移 ≡ 280（mod 360）。
+                double period = 9 * NE_SLOT_PITCH;
+                double rem = fmod(gNESlotOffsets[i], period);
+                double target = gNESlotOffsets[i] - rem + 7 * NE_SLOT_PITCH;
+                if (target < gNESlotOffsets[i]) target += period;
+                gNESlotSettle[i] = target;
+                gNESlotHasSettle[i] = YES;
+            }
+            double target = gNESlotSettle[i];
+            // 滑向 8：每帧走剩下距离的 1/4，快到时贴上去。
+            double step = (target - gNESlotOffsets[i]) * MIN(1, dtC / 0.25);
+            gNESlotOffsets[i] += step;
+            if (fabs(target - gNESlotOffsets[i]) < 0.5) {
+                gNESlotOffsets[i] = fmod(target, 9 * NE_SLOT_PITCH);
+                gNESlotHasSettle[i] = NO;
+                gNESlotStopAt[i] = 0;
+            }
+        }
+    }
+    // 在动 = 转着，或摇杆没归位，或还有格子没停稳。
+    BOOL moving = NO;
+    if (spinning || gNESlotLever != 0) moving = YES;
+    for (int i = 0; i < 3; i++) {
+        if (gNESlotStopAt[i] != 0 || gNESlotHasSettle[i]) moving = YES;
+    }
+    gNESlotMoving = moving;
+    return moving;
 }
 
-static CGImageRef NERiderMotionImage(void) {
-    static CGImageRef img = NULL;
-    static dispatch_once_t once = 0;
-    dispatch_once(&once, ^{ img = NERiderImageFromB64(kRiderMotionB64); });
-    return img;
-}
-
-// 画小人框：黑 45% + 白 35% 边、圆角 12（跟 HUD 胶囊一样的底板）。
-// ctx 是 y 朝上的 bitmap（跟 RenderOverlay 同一套坐标）。
-// 绘制顺序（都在翻转后的图坐标里，y 朝下，跟预览脚本一致）：
-//   (1) 手绘轮子（CG，画在 main 图底下）；(2) main 图；
-//   (3) 螺旋桨（绕中心旋转）；(4) motion 层（只在行驶帧）。
-// 不晃动、不上下位移、不摇摆。图片按等比缩放进框里（不拉伸）。
-static void NEDrawRider(CGContextRef ctx, CGFloat w, CGFloat h, int frame) {
-    if (frame < 0 || frame > 2) frame = 0;
-    CGImageRef mainImg = NERiderMainImage();
-    CGImageRef propImg = NERiderPropImage();
-    CGImageRef motionImg = NERiderMotionImage();
-    if (!mainImg || !propImg || !motionImg) return;
-
+// 画老虎机：面板 281x108（参考点），x 375–656，在 P 表盘底沿（214）和
+// 胶囊顶之间垂直居中（没胶囊时顶边 222）。ctx 是 y 朝上的 bitmap，
+// 跟 RenderOverlay 同一套坐标，不翻转；文字用 CTLineDraw + Identity
+// 矩阵，跟 HUD 文字同一画法。
+static void NEDrawSlot(CGContextRef ctx, CGFloat w, CGFloat h) {
+    CGImageRef tmpl = NESlotImage();
+    if (!tmpl) return;
     CGFloat sx = w / 848.0;
     CGFloat sy = h / 480.0;
-
-    // 边框：可用高度 = 胶囊顶边 − 0.30×帧高；框高取可用的 0.60 倍，
-    // 在可用空间里垂直居中（上下各留 0.20×可用高度）；宽 = 高 × 314/320，右对齐
-    CGFloat boxTopFromTop = NE_RIDER_BOX_TOP_FRAC * h;
-    CGFloat limitBottomFromTop = (gNERiderLimitBottomFromTop > 0)
-        ? gNERiderLimitBottomFromTop : (h - 12 * sy);
-    CGFloat availH = limitBottomFromTop - boxTopFromTop;
-    CGFloat boxH = availH * 0.60;
-    if (boxH < 80 * sy) boxH = 80 * sy; // 兜底：可用空间太小也别画崩
-    CGFloat centerOff = (availH - boxH) / 2;
-    if (centerOff > 0) boxTopFromTop += centerOff; // 垂直居中
-    CGFloat boxW = boxH * (NE_RIDER_IMG_W / NE_RIDER_IMG_H);
-    CGFloat boxX = w - boxW - 12 * sx; // 右对齐：贴右边，落在右上仪表区下面、HUD 日期上面，避开中间的指南针
-    CGFloat boxY = h - boxTopFromTop - boxH; // y 朝上坐标：底边离底的距离
-
-    // 底板：跟 HUD 胶囊一样
-    CGPathRef panel = CGPathCreateWithRoundedRect(
-        CGRectMake(boxX, boxY, boxW, boxH), 12 * sx, 12 * sy, NULL);
-    CGContextSetRGBFillColor(ctx, 0, 0, 0, 0.45);
-    CGContextSetRGBStrokeColor(ctx, 1, 1, 1, 0.35);
-    CGContextSetLineWidth(ctx, MAX(1, 1 * sx));
-    CGContextAddPath(ctx, panel);
-    CGContextDrawPath(ctx, kCGPathFillStroke);
-    CGPathRelease(panel);
-
-    // 图片等比放进框内（留内边距），居中
-    CGFloat padX = NE_RIDER_PAD * sx;
-    CGFloat padY = NE_RIDER_PAD * sy;
-    CGFloat contentW = boxW - 2 * padX;
-    CGFloat contentH = boxH - 2 * padY;
-    CGFloat s = MIN(contentW / NE_RIDER_IMG_W, contentH / NE_RIDER_IMG_H);
-    CGFloat imgW = NE_RIDER_IMG_W * s;
-    CGFloat imgH = NE_RIDER_IMG_H * s;
-    CGFloat imgX = boxX + padX + (contentW - imgW) / 2;
-    CGFloat imgY = boxY + padY + (contentH - imgH) / 2; // y 朝上：图片底边
-
-    // 不翻转：这条管线全程不翻转才是正的（文字、原图都不翻转；
-    // v0.1.2 翻转过一次字是倒的）。下面所有坐标都是 bitmap 原生
-    // y 朝上设备坐标，跟文字、图标同一套。
-    // 图坐标 (wx, wy)（y 朝下，0=顶）→ 设备坐标：
-    //   x = imgX + wx*s，y = imgY + imgH - wy*s。
-
-    // (1) 手绘轮子（画在 main 图底下）。轮子位置/半径按 rider-gen-geo.json。
-    // 画法跟预览脚本的 draw_wheel 一致：胎、盘、12 根放射线、毂。
-    // 放射线角度 = frame×40° + k×30°，端点先在图坐标里用 cos/sin 算，
-    // 再换算成设备坐标（y 用 imgY+imgH-…），不用 CTM 旋转。
-    CGFloat spokeDeg = frame * 40.0; // frame 0: 0°，frame 1: +40°，frame 2: +80°
-    CGFloat wheelCX[2] = { imgX + NE_RIDER_WHEEL_FX * s, imgX + NE_RIDER_WHEEL_RX * s };
-    CGFloat wheelCY[2] = { imgY + imgH - NE_RIDER_WHEEL_FY * s, imgY + imgH - NE_RIDER_WHEEL_RY * s };
-    CGFloat wheelR = NE_RIDER_WHEEL_R * s;
-    for (int wi = 0; wi < 2; wi++) {
-        CGFloat cx = wheelCX[wi], cy = wheelCY[wi];
-        // 胎：深灰填 + 棕描边
-        CGContextSetRGBFillColor(ctx, 75/255.0, 65/255.0, 65/255.0, 1);
-        CGContextSetRGBStrokeColor(ctx, 150/255.0, 45/255.0, 25/255.0, 1);
-        CGContextSetLineWidth(ctx, 3 * s);
-        CGContextFillEllipseInRect(ctx, CGRectMake(cx - wheelR, cy - wheelR, wheelR * 2, wheelR * 2));
-        CGContextStrokeEllipseInRect(ctx, CGRectMake(cx - wheelR, cy - wheelR, wheelR * 2, wheelR * 2));
-        // 内盘：暖灰
-        CGFloat discR = wheelR * 0.77;
-        CGContextSetRGBFillColor(ctx, 110/255.0, 100/255.0, 95/255.0, 1);
-        CGContextFillEllipseInRect(ctx, CGRectMake(cx - discR, cy - discR, discR * 2, discR * 2));
-        // 12 根短放射线（红棕），绕轮心转
-        CGContextSetRGBStrokeColor(ctx, 150/255.0, 60/255.0, 35/255.0, 1);
-        CGContextSetLineWidth(ctx, 4 * s);
-        CGContextBeginPath(ctx);
-        for (int k = 0; k < 12; k++) {
-            double a = (spokeDeg + k * 30.0) * M_PI / 180.0;
-            CGFloat x1 = cx + wheelR * 0.45 * cos(a);
-            CGFloat y1 = cy - wheelR * 0.45 * sin(a);
-            CGFloat x2 = cx + wheelR * 0.68 * cos(a);
-            CGFloat y2 = cy - wheelR * 0.68 * sin(a);
-            CGContextMoveToPoint(ctx, x1, y1);
-            CGContextAddLineToPoint(ctx, x2, y2);
+    CGFloat H = h;
+    CGFloat slotW = NE_SLOT_PANEL_W;
+    CGFloat slotH = NE_SLOT_PANEL_H;
+    // 位置：P 表盘底沿（214）和胶囊顶之间垂直居中，跟 App 同一算法。
+    CGFloat slotTopFromTop;
+    if (gNESlotLimitBottomFromTop > 0 &&
+        gNESlotLimitBottomFromTop < H - 12 * sy - 1) {
+        CGFloat capsuleTop = gNESlotLimitBottomFromTop + 12 * sy;
+        CGFloat pBottom = 214 * sy;
+        slotTopFromTop = pBottom + (capsuleTop - pBottom - slotH * sy) / 2;
+    } else {
+        slotTopFromTop = 222 * sy;
+    }
+    CGFloat slotX = 375 * sx;
+    CGFloat slotY = H - slotTopFromTop - slotH * sy; // y 朝上：面板底边离底的距离
+    // 机身图：高 104，横向拉长 1.4（用户定的，左右不那么空），面板内居中。
+    CGFloat imgH = 104;
+    CGFloat imgW = NE_SLOT_IMG_W * (imgH / NE_SLOT_IMG_H) * 1.4;
+    CGFloat imgX = (slotW - imgW) / 2;
+    CGContextDrawImage(ctx, CGRectMake(slotX + imgX * sx,
+                                       slotY + (slotH - 2 - imgH) * sy,
+                                       imgW * sx, imgH * sy), tmpl);
+    // 三格数字：格子窗口（面板局部、y 朝下、参考点），跟 App 同一套数。
+    CGFloat reels[3][4] = {
+        { 65.67, 38.33, 42.33, 61.67 },
+        { 116.67, 38.33, 42.33, 61.67 },
+        { 165.67, 38.33, 42.67, 61.67 },
+    };
+    CTFontRef digitFont = CTFontCreateWithName(CFSTR("Helvetica-Bold"), 32 * sy, NULL);
+    if (!digitFont) digitFont = HUDFont(32 * sy);
+    CGFloat digitAscent = (CGFloat)CTFontGetAscent(digitFont);
+    CGFloat digitDescent = (CGFloat)CTFontGetDescent(digitFont);
+    CGColorRef white = CGColorCreateGenericRGB(1, 1, 1, 1);
+    for (int i = 0; i < 3; i++) {
+        CGFloat rx = reels[i][0], ry = reels[i][1], rw = reels[i][2], rh = reels[i][3];
+        CGRect reelRect = CGRectMake(slotX + rx * sx,
+                                     slotY + (slotH - ry - rh) * sy,
+                                     rw * sx, rh * sy);
+        CGContextSaveGState(ctx);
+        CGPathRef clip = CGPathCreateWithRoundedRect(reelRect, rw * sx / 2, rh * sy / 2, NULL);
+        CGContextAddPath(ctx, clip);
+        CGContextClip(ctx);
+        CGPathRelease(clip);
+        // 数字带 1–9 循环；偏移 gNESlotOffsets[i]（参考点），画够覆盖格子。
+        CGFloat off = gNESlotOffsets[i];
+        CGFloat pitch = NE_SLOT_PITCH;
+        int jMin = (int)floor((off - rh / 2 - pitch) / pitch);
+        int jMax = (int)ceil((off + rh / 2 + pitch) / pitch);
+        CGFloat midY = ry + rh / 2;
+        for (int j = jMin; j <= jMax; j++) {
+            int digit = ((j % 9) + 9) % 9 + 1;
+            CGFloat cy = j * pitch - off + midY; // 局部 y 朝下
+            NSString *text = [NSString stringWithFormat:@"%d", digit];
+            CTLineRef line = NETextLine(text, digitFont, white);
+            CGFloat tw = NETextWidth(line);
+            CGFloat centerX = slotX + (rx + rw / 2) * sx;
+            CGFloat centerY = slotY + (slotH - cy) * sy;
+            CGFloat baseline = centerY - (digitAscent - digitDescent) / 2;
+            CGContextSetTextMatrix(ctx, CGAffineTransformIdentity);
+            CGContextSetTextPosition(ctx, centerX - tw / 2, baseline);
+            CTLineDraw(line, ctx);
+            CFRelease(line);
         }
-        CGContextStrokePath(ctx);
-        // 毂：浅灰填 + 棕描边
-        CGFloat hubR = wheelR * 0.2;
-        CGContextSetRGBFillColor(ctx, 200/255.0, 200/255.0, 200/255.0, 1);
-        CGContextSetRGBStrokeColor(ctx, 150/255.0, 45/255.0, 25/255.0, 1);
-        CGContextSetLineWidth(ctx, 2 * s);
-        CGContextFillEllipseInRect(ctx, CGRectMake(cx - hubR, cy - hubR, hubR * 2, hubR * 2));
-        CGContextStrokeEllipseInRect(ctx, CGRectMake(cx - hubR, cy - hubR, hubR * 2, hubR * 2));
+        CGContextRestoreGState(ctx);
     }
-
-    // (2) main 图：直接画，不翻转
-    CGContextDrawImage(ctx, CGRectMake(imgX, imgY, imgW, imgH), mainImg);
-
-    // (3) 螺旋桨：绕设备坐标下的 hub 中心旋转。prop 层是全画布图，绕 hub
-    // 旋转整张图（跟预览脚本的 prop.rotate(frame*40, center=hub) 一致）。
-    // 预览里螺旋桨逆时针转；y 朝上坐标里逆时针是正角，取 +spokeDeg。
-    CGFloat hubX = imgX + NE_RIDER_HUB_X * s;
-    CGFloat hubY = imgY + imgH - NE_RIDER_HUB_Y * s;
-    CGContextSaveGState(ctx);
-    CGContextTranslateCTM(ctx, hubX, hubY);
-    CGContextRotateCTM(ctx, spokeDeg * M_PI / 180.0);
-    CGContextTranslateCTM(ctx, -hubX, -hubY);
-    CGContextDrawImage(ctx, CGRectMake(imgX, imgY, imgW, imgH), propImg);
-    CGContextRestoreGState(ctx);
-
-    // (4) motion 层（速度线 + 尾气）：只在行驶帧画在最上面
-    if (frame > 0) {
-        CGContextDrawImage(ctx, CGRectMake(imgX, imgY, imgW, imgH), motionImg);
-    }
+    CFRelease(digitFont);
+    CGColorRelease(white);
+    // 摇杆：从支点（236, 56.1）出发；扳动是向前下方（透视缩短），
+    // 球直直往下掉、杆变短、球微微变大，不是往右下甩。
+    CGFloat pivotX = 236, pivotY = 56.1;
+    double th = gNESlotLever * M_PI / 180.0;
+    double proj = 47 * cos(th);
+    CGFloat ballX = pivotX + 10 * sin(th);
+    CGFloat ballY = pivotY - proj;
+    CGFloat ballR = 11 * (1 + 0.18 * sin(th));
+    CGFloat pivotDevX = slotX + pivotX * sx;
+    CGFloat pivotDevY = slotY + (slotH - pivotY) * sy;
+    CGFloat ballDevX = slotX + ballX * sx;
+    CGFloat ballDevY = slotY + (slotH - ballY) * sy;
+    CGContextSetRGBStrokeColor(ctx, 0.78, 0.78, 0.78, 1);
+    CGContextSetLineWidth(ctx, MAX(1, 4 * sx));
+    CGContextSetLineCap(ctx, kCGLineCapRound);
+    CGContextBeginPath(ctx);
+    CGContextMoveToPoint(ctx, pivotDevX, pivotDevY);
+    CGContextAddLineToPoint(ctx, ballDevX, ballDevY);
+    CGContextStrokePath(ctx);
+    CGContextSetRGBFillColor(ctx, 1, 1, 1, 1);
+    CGContextSetRGBStrokeColor(ctx, 0.7, 0.7, 0.7, 1);
+    CGContextSetLineWidth(ctx, MAX(1, 2 * sx));
+    CGContextFillEllipseInRect(ctx, CGRectMake(ballDevX - ballR * sx, ballDevY - ballR * sy,
+                                               ballR * 2 * sx, ballR * 2 * sy));
+    CGContextStrokeEllipseInRect(ctx, CGRectMake(ballDevX - ballR * sx, ballDevY - ballR * sy,
+                                                 ballR * 2 * sx, ballR * 2 * sy));
 }
 
 static CGImageRef RenderOverlay(size_t w, size_t h,
@@ -958,7 +1092,6 @@ static CGImageRef RenderOverlay(size_t w, size_t h,
                                 int netKind, NSString * __unsafe_unretained netLabel,
                                 float volume, BOOL callActive,
                                 int speedKmh, BOOL overspeed,
-                                int riderFrame,
                                 NEHUDSettings st) {
     if (w == 0 || h == 0) return NULL;
     CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
@@ -976,8 +1109,8 @@ static CGImageRef RenderOverlay(size_t w, size_t h,
     CGFloat sy = (CGFloat)h / 480.0;
     CGFloat H = (CGFloat)h;
 
-    // 骑行小人框的底边上限：默认到帧底；有底部胶囊时改成胶囊顶边之上（留空隙）
-    gNERiderLimitBottomFromTop = H - 12 * sy;
+    // 老虎机面板的底边上限：默认到帧底；有底部胶囊时改成胶囊顶边之上（留空隙）
+    gNESlotLimitBottomFromTop = H - 12 * sy;
 
     CGFloat fontSize = MAX(12, st.fontRefPt * sy);
     CTFontRef font = HUDFont(fontSize);
@@ -1105,7 +1238,7 @@ static CGImageRef RenderOverlay(size_t w, size_t h,
 
             // 画各行（左对齐，图标与文字垂直居中对齐）
             CGFloat pillTopFromTop = H - (pillY + pillH);
-            if (pillY < H / 2) gNERiderLimitBottomFromTop = pillTopFromTop - 12 * sy; // 胶囊在底部时，小人框底边在它上面
+            if (pillY < H / 2) gNESlotLimitBottomFromTop = pillTopFromTop - 12 * sy; // 胶囊在底部时，老虎机面板底边在它上面
             for (int ri = 0; ri < nonEmptyRows; ri++) {
                 int r = rowOrder[ri];
                 CGFloat rowTop = pillTopFromTop + padY + ri * (rowHeight + rowGap);
@@ -1174,9 +1307,9 @@ static CGImageRef RenderOverlay(size_t w, size_t h,
         for (int i = 0; i < rowCounts[r]; i++)
             if (rows[r][i].line) CFRelease(rows[r][i].line);
 
-    // 骑行小人（v0.2.0）：跟 HUD 一起出现/消失；就算胶囊各行全关也照画
-    if (st.showRider) {
-        NEDrawRider(ctx, (CGFloat)w, (CGFloat)h, riderFrame);
+    // 动态图片（v0.3.0，老虎机）：跟 HUD 一起出现/消失；就算胶囊各行全关也照画
+    if (st.showSlot) {
+        NEDrawSlot(ctx, (CGFloat)w, (CGFloat)h);
     }
 
     out = CGBitmapContextCreateImage(ctx);
@@ -1197,7 +1330,10 @@ static CGImageRef OverlayForSize(size_t w, size_t h) {
     static CFAbsoluteTime at = 0;
 
     CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
-    if (cache && cw == w && ch == h && (now - at) <= 0.25) {
+    // 老虎机在动时 150ms 档重画（数字滚动才跟得上），静止时 250ms。
+    // gNESlotMoving 是上次 tick 的状态（tick 在下面过节流时才跑一次）。
+    double throttle = gNESlotMoving ? 0.15 : 0.25;
+    if (cache && cw == w && ch == h && (now - at) <= throttle) {
         CGImageRef out = CGImageRetain(cache);
         [gLock unlock];
         return out;
@@ -1227,26 +1363,27 @@ static CGImageRef OverlayForSize(size_t w, size_t h) {
     st.showDate = NEHUDShowDate(); st.showWeather = NEHUDShowWeather();
     st.showSignal = NEHUDShowSignal(); st.showBattery = NEHUDShowBattery();
     st.showVolume = NEHUDShowVolume();
-    st.showRider = NEHUDShowRider();
+    st.showSlot = NEHUDShowSlot();
     st.speedAlert = NEHUDSpeedAlert();
     st.position = NEHUDPosition(); st.fontRefPt = NEHUDFontRefPt();
 
-    // 骑行小人帧号（v0.2.0）：放进缓存 key，帧变了才重画
-    int riderFrame = 0;
-    if (st.showRider) riderFrame = NERiderFrameIndex(speedKmhD, speedFresh, now);
+    // 老虎机状态机（v0.3.0）：推进转/停/摇杆；动的时候缓存 key 里加一个
+    // 150ms 档位，逼重画跟上动画；静止时档位固定，不多重画。
+    BOOL slotMoving = NESlotTick(now, speedKmhD, speedFresh, st.showSlot);
+    long slotBucket = slotMoving ? (long)(now / 0.15) : -1;
 
-    NSString *key = [NSString stringWithFormat:@"%@|%.2f|%d|%d|%d|%d|%@|%.2f|%d|%d%d%d%d%d|%ld|%.0f|%d|%d|%d",
+    NSString *key = [NSString stringWithFormat:@"%@|%.2f|%d|%d|%d|%d|%@|%.2f|%d|%d%d%d%d%d|%ld|%.0f|%d|%d|%ld",
                      timeStr, battLevel, battCharging, wxCode, wxTemp, netKind,
                      netLabel ?: @"", volume, callActive,
                      st.showDate, st.showWeather, st.showSignal,
                      st.showBattery, st.showVolume,
-                     (long)st.position, st.fontRefPt, speedKmh, overspeed, riderFrame];
+                     (long)st.position, st.fontRefPt, speedKmh, overspeed, slotBucket];
     if (!cache || cw != w || ch != h || ![key isEqualToString:cacheKey]) {
         if (cache) { CGImageRelease(cache); cache = NULL; }
         cache = RenderOverlay(w, h, timeStr, battLevel, battCharging,
                               wxCode, wxTemp, netKind, netLabel,
                               volume, callActive,
-                              speedKmh, overspeed, riderFrame, st);
+                              speedKmh, overspeed, st);
         cacheKey = [key copy];
         cw = w; ch = h;
     }
@@ -1508,7 +1645,7 @@ static void NECheckSettingsButton(void) {
     [stack addArrangedSubview:[self switchRow:@"信号（WiFi/5G）" key:@"NEHUDShowSignal" on:NEHUDShowSignal()]];
     [stack addArrangedSubview:[self switchRow:@"电量" key:@"NEHUDShowBattery" on:NEHUDShowBattery()]];
     [stack addArrangedSubview:[self switchRow:@"音量" key:@"NEHUDShowVolume" on:NEHUDShowVolume()]];
-    [stack addArrangedSubview:[self switchRow:@"骑行小人" key:@"NEHUDShowRider" on:NEHUDShowRider()]];
+    [stack addArrangedSubview:[self switchRow:@"动态图片" key:@"NEHUDShowSlot" on:NEHUDShowSlot()]];
 
     [stack addArrangedSubview:[self sectionLabel:@"位置"]];
     UISegmentedControl *pos = [[UISegmentedControl alloc]
@@ -1574,9 +1711,9 @@ static void NECheckSettingsButton(void) {
     NSString *key = sw.accessibilityIdentifier;
     if (key.length > 0)
         [[NSUserDefaults standardUserDefaults] setBool:sw.isOn forKey:key];
-    // 超速提醒或骑行小人开关变化时，立刻切换定位模式（连续定位开/关）
+    // 超速提醒或动态图片开关变化时，立刻切换定位模式（连续定位开/关）
     if ([key isEqualToString:@"NEHUDSpeedAlert"] ||
-        [key isEqualToString:@"NEHUDShowRider"]) NEApplySpeedLocationMode();
+        [key isEqualToString:@"NEHUDShowSlot"]) NEApplySpeedLocationMode();
 }
 
 // 限速行：左边“限速”+ 中间值 + 右边步进器（30–120，每 5 一档）
@@ -2119,7 +2256,7 @@ static void NEProbeStart(void) {
                hasSel ? "YES" : "NO");
     }
 
-    os_log(gLog, "NinebotEnhance iOS 0.2.0 已加载（小胶囊 HUD：日期/天气/信号/音量/电量/来电/超速 + 像素骑行小人 + 车辆数据探测）");
+    os_log(gLog, "NinebotEnhance iOS 0.3.0 已加载（小胶囊 HUD：日期/天气/信号/音量/电量/来电/超速 + 动态图片（老虎机） + 车辆数据探测）");
 
     // 电量监听 + 定位 + 来电观察，全部在主队列 / 后台队列做，不阻塞加载
     dispatch_async(dispatch_get_main_queue(), ^{
