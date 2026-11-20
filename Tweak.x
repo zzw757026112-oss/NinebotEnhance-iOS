@@ -847,7 +847,7 @@ static void NEDrawRider(CGContextRef ctx, CGFloat w, CGFloat h, int frame) {
     CGFloat sy = h / 480.0;
 
     // 边框：可用高度 = 胶囊顶边 − 0.30×帧高；框高取可用的 0.60 倍，
-    // 在可用空间里垂直居中（上下各留 0.20×可用高度）；宽 = 高 × 314/320，水平居中
+    // 在可用空间里垂直居中（上下各留 0.20×可用高度）；宽 = 高 × 314/320，右对齐
     CGFloat boxTopFromTop = NE_RIDER_BOX_TOP_FRAC * h;
     CGFloat limitBottomFromTop = (gNERiderLimitBottomFromTop > 0)
         ? gNERiderLimitBottomFromTop : (h - 12 * sy);
@@ -857,7 +857,7 @@ static void NEDrawRider(CGContextRef ctx, CGFloat w, CGFloat h, int frame) {
     CGFloat centerOff = (availH - boxH) / 2;
     if (centerOff > 0) boxTopFromTop += centerOff; // 垂直居中
     CGFloat boxW = boxH * (NE_RIDER_IMG_W / NE_RIDER_IMG_H);
-    CGFloat boxX = 12 * sx; // 左对齐：贴左边，落在左上仪表区下面，避开中间的指南针
+    CGFloat boxX = w - boxW - 12 * sx; // 右对齐：贴右边，落在右上仪表区下面、HUD 日期上面，避开中间的指南针
     CGFloat boxY = h - boxTopFromTop - boxH; // y 朝上坐标：底边离底的距离
 
     // 底板：跟 HUD 胶囊一样
