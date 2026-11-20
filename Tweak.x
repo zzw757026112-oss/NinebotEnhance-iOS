@@ -1,4 +1,17 @@
-// NinebotEnhance iOS v0.1.9 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
+// NinebotEnhance iOS v0.2.0 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
+//
+// v0.2.0 改动：HUD 加像素风卡通骑行小人。
+//  表盘区下面紧挨着一个带边框的小框（背景跟 HUD 胶囊一样：黑 45% +
+//  白 35% 边框、圆角 12），里面是像素小人骑着电动车，固定在框中间。
+//  框宽默认取帧宽 0.62（当作表盘宽度估计值，等用户实测照片再校准），
+//  水平居中，顶边在帧高 0.30；框高 = 像素画高 + 内边距，不去碰底下
+//  日期天气那几行。车子行驶时小人跟着蹬（3 帧循环 + 轮子辐条转，
+//  蹬车越快帧切换越快），车子停下来小人也停在静止帧；速度用插件
+//  已有的 GPS 速度驱动（>2 km/h 开始骑，<1 km/h 停下，中间迟滞
+//  防抖）。设置页加“骑行小人”开关（默认开）。
+//  注意：本版小人造型是占位网格（NE_RIDER_FRAME0/1/2），用户正
+//  在 4 个设计里选，选好后只换这三个数组即可，边框/动画/开关不动。
+//  超速提醒、探针一律不动。
 //
 // v0.1.9 改动：音乐拿掉 + 超速提醒标题去重。
 //  音乐整个删了（九号 App 自己就显示音乐，插件不再重复画）：
@@ -100,7 +113,7 @@
 // 开关：NSUserDefaults 写 NBProjectionOverride = NO 立刻恢复原生画面。
 // HUD 设置键（defaults write cn.ninebot.segway <键> <值>）：
 //   NEHUDShowDate / NEHUDShowWeather / NEHUDShowSignal /
-//   NEHUDShowBattery / NEHUDShowVolume（bool，默认 YES）
+//   NEHUDShowBattery / NEHUDShowVolume / NEHUDShowRider（bool，默认 YES）
 //   NEHUDPosition（int，默认 0：0 右下 1 左下 2 左上 3 右上）
 //   NEHUDFontSize（int，默认 1：0 小 1 中 2 大）
 // 日志：os_log subsystem "com.user.ninebotenhance"，只打加载、钩点检查、
@@ -173,6 +186,11 @@ static BOOL NEHUDShowBattery(void) {
 }
 static BOOL NEHUDShowVolume(void) {
     id v = [[NSUserDefaults standardUserDefaults] objectForKey:@"NEHUDShowVolume"];
+    return v ? [v boolValue] : YES;
+}
+// 像素骑行小人开关（v0.2.0，默认 YES）
+static BOOL NEHUDShowRider(void) {
+    id v = [[NSUserDefaults standardUserDefaults] objectForKey:@"NEHUDShowRider"];
     return v ? [v boolValue] : YES;
 }
 static BOOL NEHUDSpeedAlert(void) {
@@ -294,14 +312,15 @@ static void RefreshWeatherIfNeeded(void) {
     // 超速提醒：过滤后算 km/h，越界沿触发一次震动+提示音。
     // RefreshWeatherIfNeeded 内部有 20 分钟缓存 + fetching 节流，
     // 连续定位每秒调它也不会多拉天气。
-    if (NEHUDSpeedAlert()) {
-        NSTimeInterval age = -[loc.timestamp timeIntervalSinceNow];
-        if (loc.speed >= 0 && loc.horizontalAccuracy <= 65 && age <= 10) {
-            double kmh = loc.speed * 3.6;
-            [gDataLock lock];
-            gSpeedKmh = kmh;
-            gSpeedAt = CFAbsoluteTimeGetCurrent();
-            [gDataLock unlock];
+    // 速度一直记（超速提醒和骑行小人共用）；提醒的触发仍只在开关开着时做。
+    NSTimeInterval age = -[loc.timestamp timeIntervalSinceNow];
+    if (loc.speed >= 0 && loc.horizontalAccuracy <= 65 && age <= 10) {
+        double kmh = loc.speed * 3.6;
+        [gDataLock lock];
+        gSpeedKmh = kmh;
+        gSpeedAt = CFAbsoluteTimeGetCurrent();
+        [gDataLock unlock];
+        if (NEHUDSpeedAlert()) {
             NSInteger limit = NEHUDSpeedLimit();
             if (kmh > limit) {
                 if (!gWasOverspeed) {
@@ -323,11 +342,11 @@ static void RefreshWeatherIfNeeded(void) {
 }
 @end
 
-// 超速提醒开 → 连续定位（best 精度）；关 → 恢复单次定位（3km 精度，只够天气用）。
-// 主线程调（gLocMgr 在主队列创建，回调也在主队列）。
+// 超速提醒或骑行小人开 → 连续定位（best 精度）；都关 → 恢复单次定位
+// （3km 精度，只够天气用）。主线程调（gLocMgr 在主队列创建，回调也在主队列）。
 static void NEApplySpeedLocationMode(void) {
     if (!gLocMgr) return;
-    if (NEHUDSpeedAlert()) {
+    if (NEHUDSpeedAlert() || NEHUDShowRider()) {
         gLocMgr.desiredAccuracy = kCLLocationAccuracyBest;
         [gLocMgr startUpdatingLocation];
     } else {
@@ -691,10 +710,163 @@ static BOOL NEIsIconSeg(NESeg *s) { return s->kind != 0; }
 
 typedef struct {
     BOOL showDate, showWeather, showSignal, showBattery, showVolume;
+    BOOL showRider;  // 像素骑行小人开关（v0.2.0）
     BOOL speedAlert; // 超速提醒开关（v0.1.8）
     NSInteger position; // 0 右下 1 左下 2 左上 3 右上
     CGFloat fontRefPt;  // 16/20/24
 } NEHUDSettings;
+
+// ---------- 像素骑行小人（v0.2.0）----------
+// 边框 + 动画 + GPS 驱动 + 开关都在这里；造型只在下面三个数组里。
+// 位置/尺寸全部是常量，方便按用户实测照片微调：
+//  表盘宽度是估计值——用户说边框和车子表盘一样宽，这里先按帧宽
+//  0.62 估，等用户发骑行实测照片后再校准；y 是边框顶边离画面顶的距离。
+// 框高 = 像素画高 + 内边距，不去碰底下日期天气那几行。
+// 造型是占位网格：用户正在 4 个设计里选，选好后只换 NE_RIDER_FRAME0/1/2
+// 这三个数组即可（行数 NE_RIDER_H、列数 NE_RIDER_W 保持一致），其他不动。
+// 调色板：K 深灰（轮胎/描边） R 红 S 肤色 U 蓝 W 白 G 灰；'.' 透明。
+#define NE_RIDER_W 56
+#define NE_RIDER_H 20
+static const CGFloat NE_RIDER_BOX_W_FRAC   = 0.62; // 边框宽 = 帧宽 × 0.62（表盘宽度估计值，待实测校准）
+static const CGFloat NE_RIDER_BOX_TOP_FRAC = 0.30; // 边框顶边离顶 = 帧高 × 0.30（表盘区下方，待实测校准）
+static const CGFloat NE_RIDER_PAD          = 8;    // 边框内边距（848x480 参考 px）
+static const double  NE_RIDER_SPEED_START  = 2.0;  // >2 km/h 开始骑
+static const double  NE_RIDER_SPEED_STOP   = 1.0;  // <1 km/h 停下（迟滞，防抖）
+
+// 占位造型：两个轮圈 + 车身横条 + 方块头 + 人柱；只有辐条在转。
+// 正式造型替换时保持 3 帧 × 20 行 × 56 列，帧 0 是静止帧（停车时停在这一帧）。
+static const char *NE_RIDER_FRAME0[NE_RIDER_H] = {
+    "........................................................",
+    "........................................................",
+    "........................................................",
+    "........................................................",
+    "........................................................",
+    "..........................RRR...........................",
+    "..........................RRR...........................",
+    "..........................RRR...........................",
+    "...........................UU...........................",
+    "...........................UU...........................",
+    "...........KKK.............UU.............KKK...........",
+    ".........KW...WK...........UU...........KW...WK.........",
+    ".........K.W.W.K...........UU...........K.W.W.K.........",
+    "........K..W.W..K..........UU..........K..W.W..K........",
+    "........KWWWGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGWWWK........",
+    "........K..W.W..K......................K..W.W..K........",
+    ".........K.W.W.K........................K.W.W.K.........",
+    ".........KW...WK........................KW...WK.........",
+    "...........KKK............................KKK...........",
+    "........................................................",
+};
+static const char *NE_RIDER_FRAME1[NE_RIDER_H] = {
+    "........................................................",
+    "........................................................",
+    "........................................................",
+    "........................................................",
+    "........................................................",
+    "..........................RRR...........................",
+    "..........................RRR...........................",
+    "..........................RRR...........................",
+    "...........................UU...........................",
+    "...........................UU...........................",
+    "...........KKK.............UU.............KKK...........",
+    ".........KKW..KK...........UU...........KKW..KK.........",
+    ".........K.W..WK...........UU...........K.W..WK.........",
+    "........KWW.WW..K..........UU..........KWW.WW..K........",
+    "........K..WGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGW..K........",
+    "........K..WW.WWK......................K..WW.WWK........",
+    ".........KW..W.K........................KW..W.K.........",
+    ".........KK..WKK........................KK..WKK.........",
+    "...........KKK............................KKK...........",
+    "........................................................",
+};
+static const char *NE_RIDER_FRAME2[NE_RIDER_H] = {
+    "........................................................",
+    "........................................................",
+    "........................................................",
+    "........................................................",
+    "........................................................",
+    "..........................RRR...........................",
+    "..........................RRR...........................",
+    "..........................RRR...........................",
+    "...........................UU...........................",
+    "...........................UU...........................",
+    "...........KKK.............UU.............KKK...........",
+    ".........KK..WKK...........UU...........KK..WKK.........",
+    ".........KW..W.K...........UU...........KW..W.K.........",
+    "........K..WW.WWK..........UU..........K..WW.WWK........",
+    "........K..WGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGW..K........",
+    "........KWW.WW..K......................KWW.WW..K........",
+    ".........K.W..WK........................K.W..WK.........",
+    ".........KKW..KK........................KKW..KK.........",
+    "...........KKK............................KKK...........",
+    "........................................................",
+};
+
+// 当前该画第几帧（0/1/2）。速度用 GPS 速度（km/h），speedFresh 为 NO
+// （5 秒内没新定位）就当停车。>2 开始骑，<1 停下，中间保持上次状态
+// （迟滞，避免在 1–2 之间抖）。骑得越快帧切换越快（0.45s→0.12s 下限）。
+// 叠加层最多 250ms 重画一次，所以实际动画帧率 ≤4fps，像素风够用。
+static int NERiderFrameIndex(double speedKmh, BOOL speedFresh, CFAbsoluteTime now) {
+    static BOOL moving = NO;
+    double speed = speedFresh ? speedKmh : 0;
+    if (speed > NE_RIDER_SPEED_START) moving = YES;
+    else if (speed < NE_RIDER_SPEED_STOP) moving = NO;
+    if (!moving) return 0;
+    double dur = 0.45 - speed * 0.006;
+    if (dur < 0.12) dur = 0.12;
+    if (dur > 0.45) dur = 0.45;
+    long long ticks = (long long)(now / dur);
+    return (int)(ticks % 3);
+}
+
+// 画小人框：黑 45% + 白 35% 边、圆角 12（跟 HUD 胶囊一样的底板），
+// 人物固定在框中间。ctx 是 y 朝上的 bitmap（跟 RenderOverlay 同一套坐标）。
+static void NEDrawRider(CGContextRef ctx, CGFloat w, CGFloat h, int frame) {
+    if (frame < 0 || frame > 2) frame = 0;
+    CGFloat sx = w / 848.0;
+    CGFloat sy = h / 480.0;
+    CGFloat boxW = NE_RIDER_BOX_W_FRAC * w;
+    CGFloat padX = NE_RIDER_PAD * sx;
+    CGFloat padY = NE_RIDER_PAD * sy;
+    CGFloat cell = (boxW - 2 * padX) / NE_RIDER_W;
+    CGFloat boxH = cell * NE_RIDER_H + 2 * padY;
+    CGFloat boxX = (w - boxW) / 2;
+    CGFloat boxTopFromTop = NE_RIDER_BOX_TOP_FRAC * h;
+    CGFloat boxY = h - boxTopFromTop - boxH; // y 朝上坐标：底边离底的距离
+
+    // 底板：跟 HUD 胶囊一样
+    CGPathRef panel = CGPathCreateWithRoundedRect(
+        CGRectMake(boxX, boxY, boxW, boxH), 12 * sx, 12 * sy, NULL);
+    CGContextSetRGBFillColor(ctx, 0, 0, 0, 0.45);
+    CGContextSetRGBStrokeColor(ctx, 1, 1, 1, 0.35);
+    CGContextSetLineWidth(ctx, MAX(1, 1 * sx));
+    CGContextAddPath(ctx, panel);
+    CGContextDrawPath(ctx, kCGPathFillStroke);
+    CGPathRelease(panel);
+
+    // 像素格：第 0 行在最上面（y 朝上坐标要倒过来算）
+    const char * const *rows = (frame == 1) ? NE_RIDER_FRAME1
+                             : (frame == 2) ? NE_RIDER_FRAME2 : NE_RIDER_FRAME0;
+    for (int r = 0; r < NE_RIDER_H; r++) {
+        const char *row = rows[r];
+        for (int c = 0; c < NE_RIDER_W; c++) {
+            char ch = row[c];
+            if (ch == '.' || ch == '\0') continue;
+            switch (ch) {
+                case 'K': CGContextSetRGBFillColor(ctx, 0.12, 0.12, 0.14); break;
+                case 'R': CGContextSetRGBFillColor(ctx, 0.95, 0.25, 0.25); break;
+                case 'S': CGContextSetRGBFillColor(ctx, 1.0, 0.80, 0.60); break;
+                case 'U': CGContextSetRGBFillColor(ctx, 0.25, 0.50, 1.0); break;
+                case 'W': CGContextSetRGBFillColor(ctx, 1.0, 1.0, 1.0); break;
+                case 'G': CGContextSetRGBFillColor(ctx, 0.55, 0.55, 0.60); break;
+                default: continue;
+            }
+            CGFloat x = boxX + padX + c * cell;
+            CGFloat y = boxY + padY + (NE_RIDER_H - 1 - r) * cell;
+            CGContextFillRect(ctx, CGRectMake(x, y, cell, cell));
+        }
+    }
+}
 
 static CGImageRef RenderOverlay(size_t w, size_t h,
                                 NSString *timeStr,
@@ -703,6 +875,7 @@ static CGImageRef RenderOverlay(size_t w, size_t h,
                                 int netKind, NSString * __unsafe_unretained netLabel,
                                 float volume, BOOL callActive,
                                 int speedKmh, BOOL overspeed,
+                                int riderFrame,
                                 NEHUDSettings st) {
     if (w == 0 || h == 0) return NULL;
     CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
@@ -914,6 +1087,11 @@ static CGImageRef RenderOverlay(size_t w, size_t h,
         for (int i = 0; i < rowCounts[r]; i++)
             if (rows[r][i].line) CFRelease(rows[r][i].line);
 
+    // 像素骑行小人（v0.2.0）：跟 HUD 一起出现/消失；就算胶囊各行全关也照画
+    if (st.showRider) {
+        NEDrawRider(ctx, (CGFloat)w, (CGFloat)h, riderFrame);
+    }
+
     out = CGBitmapContextCreateImage(ctx);
     CGContextRelease(ctx);
     CFRelease(font);
@@ -962,21 +1140,26 @@ static CGImageRef OverlayForSize(size_t w, size_t h) {
     st.showDate = NEHUDShowDate(); st.showWeather = NEHUDShowWeather();
     st.showSignal = NEHUDShowSignal(); st.showBattery = NEHUDShowBattery();
     st.showVolume = NEHUDShowVolume();
+    st.showRider = NEHUDShowRider();
     st.speedAlert = NEHUDSpeedAlert();
     st.position = NEHUDPosition(); st.fontRefPt = NEHUDFontRefPt();
 
-    NSString *key = [NSString stringWithFormat:@"%@|%.2f|%d|%d|%d|%d|%@|%.2f|%d|%d%d%d%d%d|%ld|%.0f|%d|%d",
+    // 骑行小人帧号（v0.2.0）：放进缓存 key，帧变了才重画
+    int riderFrame = 0;
+    if (st.showRider) riderFrame = NERiderFrameIndex(speedKmhD, speedFresh, now);
+
+    NSString *key = [NSString stringWithFormat:@"%@|%.2f|%d|%d|%d|%d|%@|%.2f|%d|%d%d%d%d%d|%ld|%.0f|%d|%d|%d",
                      timeStr, battLevel, battCharging, wxCode, wxTemp, netKind,
                      netLabel ?: @"", volume, callActive,
                      st.showDate, st.showWeather, st.showSignal,
                      st.showBattery, st.showVolume,
-                     (long)st.position, st.fontRefPt, speedKmh, overspeed];
+                     (long)st.position, st.fontRefPt, speedKmh, overspeed, riderFrame];
     if (!cache || cw != w || ch != h || ![key isEqualToString:cacheKey]) {
         if (cache) { CGImageRelease(cache); cache = NULL; }
         cache = RenderOverlay(w, h, timeStr, battLevel, battCharging,
                               wxCode, wxTemp, netKind, netLabel,
                               volume, callActive,
-                              speedKmh, overspeed, st);
+                              speedKmh, overspeed, riderFrame, st);
         cacheKey = [key copy];
         cw = w; ch = h;
     }
@@ -1238,6 +1421,7 @@ static void NECheckSettingsButton(void) {
     [stack addArrangedSubview:[self switchRow:@"信号（WiFi/5G）" key:@"NEHUDShowSignal" on:NEHUDShowSignal()]];
     [stack addArrangedSubview:[self switchRow:@"电量" key:@"NEHUDShowBattery" on:NEHUDShowBattery()]];
     [stack addArrangedSubview:[self switchRow:@"音量" key:@"NEHUDShowVolume" on:NEHUDShowVolume()]];
+    [stack addArrangedSubview:[self switchRow:@"骑行小人" key:@"NEHUDShowRider" on:NEHUDShowRider()]];
 
     [stack addArrangedSubview:[self sectionLabel:@"位置"]];
     UISegmentedControl *pos = [[UISegmentedControl alloc]
@@ -1303,8 +1487,9 @@ static void NECheckSettingsButton(void) {
     NSString *key = sw.accessibilityIdentifier;
     if (key.length > 0)
         [[NSUserDefaults standardUserDefaults] setBool:sw.isOn forKey:key];
-    // 超速提醒开关变化时，立刻切换定位模式（连续定位开/关）
-    if ([key isEqualToString:@"NEHUDSpeedAlert"]) NEApplySpeedLocationMode();
+    // 超速提醒或骑行小人开关变化时，立刻切换定位模式（连续定位开/关）
+    if ([key isEqualToString:@"NEHUDSpeedAlert"] ||
+        [key isEqualToString:@"NEHUDShowRider"]) NEApplySpeedLocationMode();
 }
 
 // 限速行：左边“限速”+ 中间值 + 右边步进器（30–120，每 5 一档）
@@ -1641,7 +1826,7 @@ static BOOL NEProbeAttempt(int attempt) {
                                          @"_TtC7Vehicle22BleCommandDebugManager",
                                          @"_TtC17NBBluetoothModule9DebugTool"];
     NSMutableDictionary *report = [NSMutableDictionary dictionary];
-    report[@"probe"] = @"NinebotEnhance iOS 0.1.9";
+    report[@"probe"] = @"NinebotEnhance iOS 0.2.0";
     report[@"attempt"] = @(attempt);
     report[@"date"] = [[NSDate date] description];
     if (gProbeClassInfo) report[@"classes"] = gProbeClassInfo;
@@ -1829,7 +2014,7 @@ static void NEProbeStart(void) {
                hasSel ? "YES" : "NO");
     }
 
-    os_log(gLog, "NinebotEnhance iOS 0.1.9 已加载（小胶囊 HUD：日期/天气/信号/音量/电量/来电/超速 + 车辆数据探测）");
+    os_log(gLog, "NinebotEnhance iOS 0.2.0 已加载（小胶囊 HUD：日期/天气/信号/音量/电量/来电/超速 + 像素骑行小人 + 车辆数据探测）");
 
     // 电量监听 + 定位 + 来电观察，全部在主队列 / 后台队列做，不阻塞加载
     dispatch_async(dispatch_get_main_queue(), ^{
