@@ -857,7 +857,7 @@ static void NEDrawRider(CGContextRef ctx, CGFloat w, CGFloat h, int frame) {
     CGFloat centerOff = (availH - boxH) / 2;
     if (centerOff > 0) boxTopFromTop += centerOff; // 垂直居中
     CGFloat boxW = boxH * (NE_RIDER_IMG_W / NE_RIDER_IMG_H);
-    CGFloat boxX = (w - boxW) / 2;
+    CGFloat boxX = 12 * sx; // 左对齐：贴左边，落在左上仪表区下面，避开中间的指南针
     CGFloat boxY = h - boxTopFromTop - boxH; // y 朝上坐标：底边离底的距离
 
     // 底板：跟 HUD 胶囊一样
