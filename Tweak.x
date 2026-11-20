@@ -859,7 +859,6 @@ static const CGFloat NE_SLOT_IMG_H = 473.0;   // 机身图原高
 static const CGFloat NE_SLOT_PANEL_W = 281.0; // 面板宽（参考点）
 static const CGFloat NE_SLOT_PANEL_H = 108.0; // 面板高（参考点）
 static const double  NE_SLOT_SPEED_START = 2.0; // >2 km/h 开始转
-static const double  NE_SLOT_SPEED_STOP  = 1.0; // <1 km/h 停下
 
 // RenderOverlay 每次重画时把日期天气胶囊的顶边（离顶距离）写到这里，
 // 供 NEDrawSlot 定面板高度：面板底边必须在胶囊上面，留 12*sy 空隙。
