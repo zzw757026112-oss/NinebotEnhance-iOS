@@ -1,6 +1,6 @@
-// NinebotEnhance iOS v0.3.2 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
+// NinebotEnhance iOS v0.3.3 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
 //
-// v0.3.2 改动：老虎机紧贴 P 表盘底沿（顶边 222），和 App 1.3.14 同款。
+// v0.3.3 改动：老虎机三格不同转速（1.0 / 1.5 / 0.7），骑行时三格显示不同数字，和 App 1.3.15 同款。
 //  用户 2026-11-21 03:41 定名：不叫卡通人物了，叫动态图片。
 //  位置跟 App 一样：P 表盘下面，x 375–656（宽 281）、高 108，紧贴表盘底沿
 //  （顶边 222，离底沿 214 只差 8px）。机身是用户参考图抠出来的（白机身、黑色
@@ -936,10 +936,13 @@ static BOOL NESlotTick(CFAbsoluteTime now, double speedKmh, BOOL speedFresh, BOO
             gNESlotStopAt[0] = gNESlotStopAt[1] = gNESlotStopAt[2] = 0;
             gNESlotHasSettle[0] = gNESlotHasSettle[1] = gNESlotHasSettle[2] = NO;
         }
-        // 滚动速度随车速：每秒 2 + 车速/10 格；偏移对 360 取余防越滚越大。
-        double rate = NE_SLOT_PITCH * (2 + speed / 10);
+        // 滚动速度随车速：每秒 2 + 车速/10 格；三格转速不同（1.0 / 1.5 / 0.7），
+        // 骑行时三格显示不同数字（真老虎机三格是独立转的），停下仍各滑到 888。
+        // 偏移对 360 取余防越滚越大。
+        static const double kSlotRateMul[3] = { 1.0, 1.5, 0.7 };
+        double baseRate = NE_SLOT_PITCH * (2 + speed / 10);
         for (int i = 0; i < 3; i++) {
-            gNESlotOffsets[i] += rate * dtC;
+            gNESlotOffsets[i] += baseRate * kSlotRateMul[i] * dtC;
             gNESlotOffsets[i] = fmod(gNESlotOffsets[i], 9 * NE_SLOT_PITCH);
         }
     } else {
@@ -2258,7 +2261,7 @@ static void NEProbeStart(void) {
                hasSel ? "YES" : "NO");
     }
 
-    os_log(gLog, "NinebotEnhance iOS 0.3.2 已加载（小胶囊 HUD：日期/天气/信号/音量/电量/来电/超速 + 动态图片（老虎机） + 车辆数据探测）");
+    os_log(gLog, "NinebotEnhance iOS 0.3.3 已加载（小胶囊 HUD：日期/天气/信号/音量/电量/来电/超速 + 动态图片（老虎机） + 车辆数据探测）");
 
     // 电量监听 + 定位 + 来电观察，全部在主队列 / 后台队列做，不阻塞加载
     dispatch_async(dispatch_get_main_queue(), ^{
