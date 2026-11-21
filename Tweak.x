@@ -1,9 +1,9 @@
-// NinebotEnhance iOS v0.3.4 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
+// NinebotEnhance iOS v0.3.5 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
 //
-// v0.3.4 改动：老虎机移到右边（X=555，右对齐，贴到 P 表盘下面）；v0.3.3 改动：老虎机三格不同转速（1.0 / 1.5 / 0.7），骑行时三格显示不同数字，和 App 1.3.15 同款。
+// v0.3.5 改动：老虎机往下移（顶边 222→265，表盘和胶囊两边间隙各约 30px）+ 面板收窄（281→245，黑底不再比表盘/胶囊宽）；v0.3.4 改动：老虎机移到右边（X=555，右对齐，贴到 P 表盘下面）；v0.3.3 改动：老虎机三格不同转速（1.0 / 1.5 / 0.7），骑行时三格显示不同数字，和 App 1.3.15 同款。
 //  用户 2026-11-21 03:41 定名：不叫卡通人物了，叫动态图片。
-//  位置跟 App 一样：P 表盘下面，x 375–656（宽 281）、高 108，紧贴表盘底沿
-//  （顶边 222，离底沿 214 只差 8px）。机身是用户参考图抠出来的（白机身、黑色
+//  位置跟 App 一样：P 表盘下面，x 591–836（宽 245）、高 108，顶边 265。
+//  （顶边 265，表盘底沿约 234、胶囊顶约 403，两边间隙各约 30px）。机身是用户参考图抠出来的（白机身、黑色
 //  格子、横向拉长 1.4 倍、摇杆已去掉），base64 嵌在 Tweak.x 里；数字是运行
 //  时画的文字（1–9 上下滚动，停下变 888）；摇杆也是运行时画的，骑行开始
 //  朝前方下面扳（透视缩短，0→80°，球直直往下掉），车停下三格依次停成 888。
@@ -740,7 +740,7 @@ typedef struct {
 // ---------- 动态图片（v0.3.0）：老虎机，和 App 1.3.12 同款 ----------
 // 用户 2026-11-21 03:41 定名：不叫卡通人物了，叫动态图片。像素骑行小人
 // （v0.2.0）已拿掉，换成老虎机，位置/对齐跟 App 一样：P 表盘下面，
-// x 375–656（宽 281）、高 108，紧贴表盘底沿（顶边 222）。
+// x 591–836（宽 245）、高 108，顶边 265（两边间隙各约 30px）。
 // 机身图是用户参考图抠出来的（白机身、黑色格子、摇杆已去掉），base64 嵌
 // 在下面（kSlotMachineB64，724x473 PNG，7.7KB），运行时解码一次缓存。
 // 数字是运行时画的文字：1–9 上下滚动，停下变 888；摇杆也是运行时画的，
@@ -856,7 +856,7 @@ static const char *kSlotMachineB64 =
 static const CGFloat NE_SLOT_PITCH = 40.0;    // 数字格距（参考点）
 static const CGFloat NE_SLOT_IMG_W = 724.0;   // 机身图原宽
 static const CGFloat NE_SLOT_IMG_H = 473.0;   // 机身图原高
-static const CGFloat NE_SLOT_PANEL_W = 281.0; // 面板宽（参考点）
+static const CGFloat NE_SLOT_PANEL_W = 245.0; // 面板宽（参考点）// 0.3.5：收窄（281→245），黑底不再比表盘/胶囊宽；机身图 223 宽，两边各留 11px
 static const CGFloat NE_SLOT_PANEL_H = 108.0; // 面板高（参考点）
 static const double  NE_SLOT_SPEED_START = 2.0; // >2 km/h 开始转
 
@@ -983,8 +983,8 @@ static BOOL NESlotTick(CFAbsoluteTime now, double speedKmh, BOOL speedFresh, BOO
     return moving;
 }
 
-// 画老虎机：面板 281x108（参考点），x 375–656，紧贴 P 表盘底沿
-// （顶边 222，离底沿 214 只差 8px）。ctx 是 y 朝上的 bitmap，
+// 画老虎机：面板 245x108（参考点），x 591–836，顶边 265
+// （顶边 265，表盘底沿约 234、胶囊顶约 403，两边间隙各约 30px）。ctx 是 y 朝上的 bitmap，
 // 跟 RenderOverlay 同一套坐标，不翻转；文字用 CTLineDraw + Identity
 // 矩阵，跟 HUD 文字同一画法。
 static void NEDrawSlot(CGContextRef ctx, CGFloat w, CGFloat h) {
@@ -995,10 +995,10 @@ static void NEDrawSlot(CGContextRef ctx, CGFloat w, CGFloat h) {
     CGFloat H = h;
     CGFloat slotW = NE_SLOT_PANEL_W;
     CGFloat slotH = NE_SLOT_PANEL_H;
-    // 位置（0.3.2）：紧贴 P 表盘底沿（顶边 222），跟 App 1.3.14 同一算法。
-    // 之前是在表盘底沿和胶囊顶之间垂直居中，结果跑到屏幕中部、压住地图/画面（用户 2026-11-21 照片反馈）。
-    CGFloat slotTopFromTop = 222 * sy;
-    CGFloat slotX = (848 - 12 - NE_SLOT_PANEL_W) * sx;  // 0.3.4：右对齐，贴到 P 表盘下面（之前 375 偏左，不在表盘下面）
+    // 位置（0.3.5）：顶边 265（222→265，往下 43px）。表盘底沿约 234（照片实测，旧 214 是朋友车的数）、胶囊顶约 403，
+    // 两边间隙各约 30px（之前顶边 222 直接压住表盘底沿，照片上老虎机顶边比表盘底沿高约 12px）。
+    CGFloat slotTopFromTop = 265 * sy;
+    CGFloat slotX = (848 - 12 - NE_SLOT_PANEL_W) * sx;  // 0.3.5：右对齐，X=591（848-12-245）
     CGFloat slotY = H - slotTopFromTop - slotH * sy; // y 朝上：面板底边离底的距离
     // 底板（0.3.1，方案 A）：黑透磨砂底板，衬白机身——导航地图是白的，
     // 白机身直接画在上面看不清；跟 App 1.3.13 同一套黑半透明 + 细亮边。
@@ -1018,10 +1018,11 @@ static void NEDrawSlot(CGContextRef ctx, CGFloat w, CGFloat h) {
                                        slotY + (slotH - 2 - imgH) * sy,
                                        imgW * sx, imgH * sy), tmpl);
     // 三格数字：格子窗口（面板局部、y 朝下、参考点），跟 App 同一套数。
+    // 0.3.5：面板收窄 36px，机身图跟着左移 18px（imgX 29→11），格子同步左移 18px，仍对准模板里的黑格子。
     CGFloat reels[3][4] = {
-        { 65.67, 38.33, 42.33, 61.67 },
-        { 116.67, 38.33, 42.33, 61.67 },
-        { 165.67, 38.33, 42.67, 61.67 },
+        { 47.67, 38.33, 42.33, 61.67 },
+        { 98.67, 38.33, 42.33, 61.67 },
+        { 147.67, 38.33, 42.67, 61.67 },
     };
     CTFontRef digitFont = CTFontCreateWithName(CFSTR("Helvetica-Bold"), 32 * sy, NULL);
     if (!digitFont) digitFont = HUDFont(32 * sy);
@@ -1062,9 +1063,10 @@ static void NEDrawSlot(CGContextRef ctx, CGFloat w, CGFloat h) {
     }
     CFRelease(digitFont);
     CGColorRelease(white);
-    // 摇杆：从支点（236, 56.1）出发；扳动是向前下方（透视缩短），
+    // 摇杆：从支点（218, 56.1）出发；扳动是向前下方（透视缩短），
     // 球直直往下掉、杆变短、球微微变大，不是往右下甩。
-    CGFloat pivotX = 236, pivotY = 56.1;
+    // 0.3.5：支点 x 跟机身图同步左移 18px（236→218）。
+    CGFloat pivotX = 218, pivotY = 56.1;
     double th = gNESlotLever * M_PI / 180.0;
     double proj = 47 * cos(th);
     CGFloat ballX = pivotX + 10 * sin(th);
@@ -2261,7 +2263,7 @@ static void NEProbeStart(void) {
                hasSel ? "YES" : "NO");
     }
 
-    os_log(gLog, "NinebotEnhance iOS 0.3.4 已加载（小胶囊 HUD：日期/天气/信号/音量/电量/来电/超速 + 动态图片（老虎机） + 车辆数据探测）");
+    os_log(gLog, "NinebotEnhance iOS 0.3.5 已加载（小胶囊 HUD：日期/天气/信号/音量/电量/来电/超速 + 动态图片（老虎机） + 车辆数据探测）");
 
     // 电量监听 + 定位 + 来电观察，全部在主队列 / 后台队列做，不阻塞加载
     dispatch_async(dispatch_get_main_queue(), ^{
