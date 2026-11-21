@@ -1,5 +1,6 @@
-// NinebotEnhance iOS v0.3.6 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
+// NinebotEnhance iOS v0.3.7 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
 //
+// v0.3.7 改动：设置页“日期时间”改叫“日期”（时间只在翻页时钟里显示）；和 App 1.3.19 同款。
 // v0.3.6 改动：老虎机换成翻页时钟（用户创意，和 App 1.3.18 同款）。显示当前时间 HH:MM:SS，六张灰卡片，
 //  白数字纵向拉长 1.9 倍，数字变了就翻页（0.35s）；无黑色底板，卡片直接浮在地图上。面板 204x108，
 //  顶边 265，右对齐 X=632，跟车子自带 P 表盘、底下胶囊严格同宽对齐（都是 204）。胶囊：时间删掉
@@ -49,7 +50,7 @@
 //         +[NBPixelBufferConverter pixelBufferFromCGImage_Mjpeg:]（MJPEG 备用路径）
 //         以及对应的实例方法版本（与参考实现一致，四者都挂）。
 // 做法：不在编码器输入端整帧替换，而是把 App 自己的画面画到底层，
-// 再把 HUD 叠加层（小胶囊：日期时间 / 天气 / 信号 / 音量 / 电量，
+// 再把 HUD 叠加层（小胶囊：日期 / 天气 / 信号 / 音量 / 电量，
 // 超速时再加一行红色超速；来电提示）画在上面，
 // 合成后交给原实现编码发送。App 自己的 H.264/RTP/RTCP/UDP 链路不动。
 //
@@ -91,7 +92,7 @@
 //     所以本版：RenderOverlay 不再翻转，CompositeWithOverlay 也不翻转，
 //     原图和叠加层都直接画。
 //  2. HUD 改成小胶囊样式（照 Ninebot Pro+ 1.0.8+）：右下角两行胶囊，
-//     黑底 45% + 白边 35% 1pt + 圆角 12；上行时钟图标 + 日期时间；
+//     黑底 45% + 白边 35% 1pt + 圆角 12；上行时钟图标 + 日期；
 //     下行天气图标 + 温度、联网方式（WiFi 图标 / 5G/4G/3G）、
 //     音量、电量图标 + 百分比（低于 20% 变红）；有音乐在放时再加
 //     一行音符 + 歌名。来电还是左下角红色药丸，不变。
@@ -1494,7 +1495,7 @@ static void NECheckSettingsButton(void) {
     hint.numberOfLines = 0;
     [stack addArrangedSubview:hint];
 
-    [stack addArrangedSubview:[self switchRow:@"日期时间" key:@"NEHUDShowDate" on:NEHUDShowDate()]];
+    [stack addArrangedSubview:[self switchRow:@"日期" key:@"NEHUDShowDate" on:NEHUDShowDate()]];
     [stack addArrangedSubview:[self switchRow:@"天气温度" key:@"NEHUDShowWeather" on:NEHUDShowWeather()]];
     [stack addArrangedSubview:[self switchRow:@"信号（WiFi/5G）" key:@"NEHUDShowSignal" on:NEHUDShowSignal()]];
     [stack addArrangedSubview:[self switchRow:@"电量" key:@"NEHUDShowBattery" on:NEHUDShowBattery()]];
@@ -2110,7 +2111,7 @@ static void NEProbeStart(void) {
                hasSel ? "YES" : "NO");
     }
 
-    os_log(gLog, "NinebotEnhance iOS 0.3.6 已加载（小胶囊 HUD：日期/天气/信号/音量/电量/来电/超速 + 翻页时钟 + 车辆数据探测）");
+    os_log(gLog, "NinebotEnhance iOS 0.3.7 已加载（小胶囊 HUD：日期/天气/信号/音量/电量/来电/超速 + 翻页时钟 + 车辆数据探测）");
 
     // 电量监听 + 定位 + 来电观察，全部在主队列 / 后台队列做，不阻塞加载
     dispatch_async(dispatch_get_main_queue(), ^{
