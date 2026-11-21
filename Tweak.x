@@ -1,6 +1,6 @@
-// NinebotEnhance iOS v0.3.3 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
+// NinebotEnhance iOS v0.3.4 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
 //
-// v0.3.3 改动：老虎机三格不同转速（1.0 / 1.5 / 0.7），骑行时三格显示不同数字，和 App 1.3.15 同款。
+// v0.3.4 改动：老虎机移到右边（X=555，右对齐，贴到 P 表盘下面）；v0.3.3 改动：老虎机三格不同转速（1.0 / 1.5 / 0.7），骑行时三格显示不同数字，和 App 1.3.15 同款。
 //  用户 2026-11-21 03:41 定名：不叫卡通人物了，叫动态图片。
 //  位置跟 App 一样：P 表盘下面，x 375–656（宽 281）、高 108，紧贴表盘底沿
 //  （顶边 222，离底沿 214 只差 8px）。机身是用户参考图抠出来的（白机身、黑色
@@ -998,7 +998,7 @@ static void NEDrawSlot(CGContextRef ctx, CGFloat w, CGFloat h) {
     // 位置（0.3.2）：紧贴 P 表盘底沿（顶边 222），跟 App 1.3.14 同一算法。
     // 之前是在表盘底沿和胶囊顶之间垂直居中，结果跑到屏幕中部、压住地图/画面（用户 2026-11-21 照片反馈）。
     CGFloat slotTopFromTop = 222 * sy;
-    CGFloat slotX = 375 * sx;
+    CGFloat slotX = (848 - 12 - NE_SLOT_PANEL_W) * sx;  // 0.3.4：右对齐，贴到 P 表盘下面（之前 375 偏左，不在表盘下面）
     CGFloat slotY = H - slotTopFromTop - slotH * sy; // y 朝上：面板底边离底的距离
     // 底板（0.3.1，方案 A）：黑透磨砂底板，衬白机身——导航地图是白的，
     // 白机身直接画在上面看不清；跟 App 1.3.13 同一套黑半透明 + 细亮边。
@@ -2261,7 +2261,7 @@ static void NEProbeStart(void) {
                hasSel ? "YES" : "NO");
     }
 
-    os_log(gLog, "NinebotEnhance iOS 0.3.3 已加载（小胶囊 HUD：日期/天气/信号/音量/电量/来电/超速 + 动态图片（老虎机） + 车辆数据探测）");
+    os_log(gLog, "NinebotEnhance iOS 0.3.4 已加载（小胶囊 HUD：日期/天气/信号/音量/电量/来电/超速 + 动态图片（老虎机） + 车辆数据探测）");
 
     // 电量监听 + 定位 + 来电观察，全部在主队列 / 后台队列做，不阻塞加载
     dispatch_async(dispatch_get_main_queue(), ^{
