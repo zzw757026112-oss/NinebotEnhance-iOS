@@ -1,5 +1,7 @@
-// NinebotEnhance iOS v0.3.7 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
+// NinebotEnhance iOS v0.3.8 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
 //
+// v0.3.8 改动：超速红行改成“请勿超速行驶！”，字比普通行大但绝不超胶囊边框；
+//  超速那一刻中文语音读一次“您已超速行驶，请注意安全”（跟着超速提醒开关走，不另设开关）。
 // v0.3.7 改动：设置页“日期时间”改叫“日期”（时间只在翻页时钟里显示）；和 App 1.3.19 同款。
 // v0.3.6 改动：老虎机换成翻页时钟（用户创意，和 App 1.3.18 同款）。显示当前时间 HH:MM:SS，六张灰卡片，
 //  白数字纵向拉长 1.9 倍，数字变了就翻页（0.35s）；无黑色底板，卡片直接浮在地图上。面板 204x108，
@@ -161,6 +163,10 @@ static NELocationDelegate *gLocDelegate = nil;
 static double         gSpeedKmh     = 0;
 static CFAbsoluteTime gSpeedAt      = 0;
 static BOOL           gWasOverspeed = NO;
+
+// 超速语音朗读（0.3.8）：合成器 static 持有，边沿触发时读一次；
+//  局部变量说到一半会被释放、没声——所以必须长期持有。
+static AVSpeechSynthesizer *gSpeechSynth = nil;
 
 static BOOL OverlayEnabled(void) {
     id v = [[NSUserDefaults standardUserDefaults] objectForKey:@"NBProjectionOverride"];
@@ -350,6 +356,14 @@ static void RefreshWeatherIfNeeded(void) {
                     [gen notificationOccurred:UINotificationFeedbackTypeWarning];
                     AudioServicesPlaySystemSound(1005);
                     os_log(gLog, "[SPD] 超速 %d km/h（限速 %d）", (int)kmh, (int)limit);
+                    // 语音朗读（0.3.8）：超速那一刻中文读一次；正在读就截断重读，
+                    //  不排队。跟着超速提醒开关走（这里本来就只在开关开着时进）。
+                    if (!gSpeechSynth) gSpeechSynth = [AVSpeechSynthesizer new];
+                    [gSpeechSynth stopSpeakingAtBoundary:AVSpeechBoundaryImmediate];
+                    AVSpeechUtterance *utt = [AVSpeechUtterance speechUtteranceWithString:@"您已超速行驶，请注意安全"];
+                    utt.voice = [AVSpeechSynthesisVoice voiceWithLanguage:@"zh-CN"];
+                    utt.rate = AVSpeechUtteranceDefaultSpeechRate;
+                    [gSpeechSynth speakUtterance:utt];
                 }
             } else {
                 gWasOverspeed = NO;
@@ -931,6 +945,7 @@ static CGImageRef RenderOverlay(size_t w, size_t h,
                                 int speedKmh, BOOL overspeed,
                                 NEHUDSettings st) {
     if (w == 0 || h == 0) return NULL;
+    (void)speedKmh; // 0.3.8：红行文案不再显示速度数字；参数保留（签名/调用方不动，速度仍进缓存 key）
     CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
     CGContextRef ctx = CGBitmapContextCreate(NULL, w, h, 8, 0, cs,
         kCGImageAlphaPremultipliedFirst | kCGBitmapByteOrder32Little);
@@ -985,6 +1000,34 @@ static CGImageRef RenderOverlay(size_t w, size_t h,
         }
     }
 
+    // 超速红行（0.3.8）：字比普通行大，但绝不超胶囊边框。
+    //  从 1.5 倍起步，量“请勿超速行驶！”的宽度，超了就往下缩到正好塞进
+    //  胶囊内宽（204 - 左右 padX）；缩完仍比普通字号大（7 个全角字，
+    //  1.5 倍在中/大字号下会缩到约 25.7，小字号下直接 24，都比普通字大）。
+    //  行高跟着抬：超速行字更大，行高不够会上下裁字。
+    CTFontRef overFont = NULL;
+    CGFloat overAscent = 0, overDescent = 0;
+    if (st.speedAlert && overspeed) {
+        CGFloat overSize = fontSize * 1.5;
+        CTFontRef f = HUDFont(overSize);
+        CTLineRef l = NETextLine(@"请勿超速行驶！", f, red);
+        CGFloat w = NETextWidth(l);
+        CGFloat avail = 204 * sx - padX * 2;
+        if (w > avail && w > 0) {
+            CGFloat scale = avail / w;
+            CGFloat newSize = overSize * scale;
+            if (newSize < fontSize) newSize = fontSize; // 兜底：绝不比普通字小
+            CFRelease(l); CFRelease(f);
+            f = HUDFont(newSize);
+            l = NETextLine(@"请勿超速行驶！", f, red);
+        }
+        overFont = f;
+        overAscent = (CGFloat)CTFontGetAscent(f);
+        overDescent = (CGFloat)CTFontGetDescent(f);
+        CFRelease(l);
+        if (overAscent + overDescent > rowHeight) rowHeight = overAscent + overDescent;
+    }
+
     // ---- 组行 ----
     NESeg rows[NE_MAX_ROWS][NE_MAX_SEGS];
     int rowCounts[NE_MAX_ROWS] = { 0, 0, 0 };
@@ -1023,11 +1066,12 @@ static CGImageRef RenderOverlay(size_t w, size_t h,
         s->text = battLevel < 0 ? @"--%" : [NSString stringWithFormat:@"%d%%", (int)(battLevel * 100)];
         s->color = lowBatt ? red : white;
     }
-    // 第三行：超速（只在超速时画，红色文字，不用图标）
+    // 第三行：超速（只在超速时画，红色文字，不用图标；0.3.8：文案改成
+    //  “请勿超速行驶！”，不带速度数字；字号见上面的 overFont）
     if (st.speedAlert && overspeed) {
         NESeg *s = &rows[2][rowCounts[2]++];
         s->kind = 0;
-        s->text = [NSString stringWithFormat:@"超速 %d km/h", speedKmh];
+        s->text = @"请勿超速行驶！";
         s->color = red;
     }
 
@@ -1043,7 +1087,9 @@ static CGImageRef RenderOverlay(size_t w, size_t h,
                 total += (NEIsIconSeg(&rows[r][i - 1]) && !NEIsIconSeg(s)) ? iconTextGap : groupGap;
             }
             if (s->kind == 0) {
-                s->line = NETextLine(s->text, font, s->color);
+                // 超速行（rows[2]）用自己的大字号，其余行用普通字号
+                CTFontRef segFont = (r == 2 && overFont) ? overFont : font;
+                s->line = NETextLine(s->text, segFont, s->color);
                 s->w = NETextWidth(s->line);
             } else {
                 s->w = iconSize;
@@ -1097,8 +1143,11 @@ static CGImageRef RenderOverlay(size_t w, size_t h,
             for (int ri = 0; ri < nonEmptyRows; ri++) {
                 int r = rowOrder[ri];
                 CGFloat rowTop = pillTopFromTop + padY + ri * (rowHeight + rowGap);
-                CGFloat baseline = H - rowTop - ascent;
-                CGFloat textCenterY = baseline + (ascent - descent) / 2;
+                // 超速行用自己的上伸/下伸算基线，字在行里垂直居中，不裁字
+                CGFloat rowAscent = (r == 2 && overFont) ? overAscent : ascent;
+                CGFloat rowDescent = (r == 2 && overFont) ? overDescent : descent;
+                CGFloat baseline = H - rowTop - rowAscent;
+                CGFloat textCenterY = baseline + (rowAscent - rowDescent) / 2;
                 CGFloat x = pillX + padX;
                 for (int i = 0; i < rowCounts[r]; i++) {
                     NESeg *s = &rows[r][i];
@@ -1170,6 +1219,7 @@ static CGImageRef RenderOverlay(size_t w, size_t h,
     out = CGBitmapContextCreateImage(ctx);
     CGContextRelease(ctx);
     CFRelease(font);
+    if (overFont) CFRelease(overFont);
     CGColorRelease(white);
     CGColorRelease(red);
     return out;
@@ -2111,7 +2161,7 @@ static void NEProbeStart(void) {
                hasSel ? "YES" : "NO");
     }
 
-    os_log(gLog, "NinebotEnhance iOS 0.3.7 已加载（小胶囊 HUD：日期/天气/信号/音量/电量/来电/超速 + 翻页时钟 + 车辆数据探测）");
+    os_log(gLog, "NinebotEnhance iOS 0.3.8 已加载（小胶囊 HUD：日期/天气/信号/音量/电量/来电/超速 + 翻页时钟 + 车辆数据探测）");
 
     // 电量监听 + 定位 + 来电观察，全部在主队列 / 后台队列做，不阻塞加载
     dispatch_async(dispatch_get_main_queue(), ^{
