@@ -464,7 +464,9 @@ static UIImage *gBgImage = nil;
 static NSString *gBgImageLoadedPath = nil;
 
 // 路径没变就用缓存；路径变了/文件没了就重读（失败返回 nil，不崩）
-static UIImage *NELoadCustomImage(NSString *path, UIImage **cacheSlot, NSString **pathSlot) {
+// 注意：cacheSlot/pathSlot 指向的是全局 strong 变量，形参必须标 __strong，
+// 否则 ARC 默认 __autoreleasing 写回参数会报“passing address of non-local object”编译错。
+static UIImage *NELoadCustomImage(NSString *path, UIImage * __strong *cacheSlot, NSString * __strong *pathSlot) {
     if (!path.length) return nil;
     [gImageLock lock];
     UIImage *img = nil;
