@@ -23,6 +23,14 @@
 //  + 设置页分两组折叠（“美化娱乐”：9999/换图/五个自定义项；“导航增强”：以前的
 //  HUD/翻页时钟/超速等；进设置页默认两组都折叠，折叠状态不持久化）
 //  + 入口按钮“HUD设置”改叫“Ninebot pro+”（只改标题，位置和出现逻辑不动）。
+// v0.3.9 修复（实测新功能全不生效后修）：只拦 setText: 且要求数字+单位在同一串文本里，
+//  匹配不上（数字和单位分属不同 label，或走 setAttributedText: 富文本），且页面启动时
+//  已设好文本、改设置后 App 不再重设，钩子拦不到。修：setText: + setAttributedText: 都拦，
+//  共用同一套匹配；匹配不到时看附近 label（窗口坐标判定相邻）配对才换；开关/值/选图改完
+//  强制把 key window 的 UILabel 和设备 tab 的 UIImageView 重设一遍，立刻生效；
+//  裸数字必须有明确描述才换，旁边有 % 就是电量，绝不换（之前电量被误换成 9999%）。
+//  图片刷新不用 NEIsDeviceTabSelected()（设置页 modal 盖着时它永远返回 NO），改直接取根 tab bar。
+//  启动 3 秒后也强制刷新一次（页面可能在钩子装好前已加载）。
 // v0.3.8 改动：超速红行改成“请勿超速行驶！”，字比普通行大但绝不超胶囊边框；
 //  超速那一刻中文语音读一次“您已超速行驶，请注意安全”（跟着超速提醒开关走，不另设开关）。
 // v0.3.7 改动：设置页“日期时间”改叫“日期”（时间只在翻页时钟里显示）；和 App 1.3.19 同款。
@@ -294,82 +302,176 @@ static void NESyncCustomDisplayCache(void) {
     gSignDaysValue = [d stringForKey:@"NESignDaysValue"];
 }
 
-// N币是单独一个数字（如 124），最难认：要求兄弟视图里有“N币”label，
-// 且它在数字 label 正下方相邻（同一列）、横向重叠；frame 还没布局出来时
-// （都是 CGRectZero）退回数一数：父视图里只有这一个纯数字 label 才认。
-// 认不出就返回 NO，宁可不换，绝不能把别处数字（创作/关注/粉丝）换了。
-static BOOL NEIsNCoinsNumberLabel(UILabel *label) {
-    NSString *t = label.text;
+// v0.3.9 修复：文字替换根因——App 的数字和单位/描述经常不在同一个 label 里
+// （数字一个 label，单位“km”/“N币”/“服务有效期”在旁边另一个 label），
+// 或者走 setAttributedText:（富文本，大数字+小单位），所以只拦 setText: 且
+// 要求“同一串文本里既有数字又有单位”永远匹配不上。另外页面启动时已设好
+// 文本，改设置后 App 不再重设，钩子也拦不到。因此：
+//  ① setText: 和 setAttributedText: 都拦，共用同一套匹配；
+//  ② 匹配不到时看附近 label（窗口坐标判定相邻），数字+描述配对才换；
+//  ③ 开关/值改完强制把 key window 里所有 UILabel 重设一遍，立刻生效；
+//  ④ 裸数字必须有明确的描述才换，旁边有 % 就是电量，绝不换（之前电量被误换成 9999%）。
+// 替换过的 label 记一个 associatedObject（字段 key + 是不是分开 label），
+// 刷新时按当前值直接重设——换过的文本里原来的匹配特征可能已消失
+// （如里程 "35624.6 km" 换成 "9999" 后文本里就没了 km）。
+
+static const char NEAppliedFieldKey = 0;    // 之前被替换过的 label：字段 key
+static const char NEAppliedSeparateKey = 0; // 同上：是不是“分开 label”式替换
+
+// label 的纯文本：有富文本就取富文本的字符串，否则取 text
+static NSString *NEPlainTextOfLabel(UILabel *label) {
+    if (!label) return nil;
+    if (label.attributedText) return label.attributedText.string;
+    return label.text;
+}
+
+// 纯数字（可带千分位逗号/小数），如 124、35624.6
+static BOOL NEIsPureNumberString(NSString *t) {
     if (!t.length) return NO;
     static NSRegularExpression *sNumRe = nil;
     static dispatch_once_t sOnce;
     dispatch_once(&sOnce, ^{
-        sNumRe = [NSRegularExpression regularExpressionWithPattern:@"^[\\d,]+$"
+        sNumRe = [NSRegularExpression regularExpressionWithPattern:@"^[\\d,]+(\\.\\d+)?$"
                                                            options:0 error:nil];
     });
-    if (!sNumRe ||
-        [sNumRe numberOfMatchesInString:t options:0 range:NSMakeRange(0, t.length)] == 0)
-        return NO;
-    UIView *sup = label.superview;
-    if (!sup) return NO;
-    UILabel *ncoin = nil;
-    NSInteger numCount = 0;
-    for (UIView *sib in sup.subviews) {
-        if (![sib isKindOfClass:[UILabel class]]) continue;
-        UILabel *sl = (UILabel *)sib;
-        if (sl == label) { numCount++; continue; }
-        if ([sl.text rangeOfString:@"N币"].location != NSNotFound) ncoin = sl;
-        else if (sl.text.length &&
-                 [sNumRe numberOfMatchesInString:sl.text options:0
-                                           range:NSMakeRange(0, sl.text.length)] > 0)
-            numCount++;
-    }
-    if (!ncoin) return NO;
-    BOOL framesLaidOut = !CGRectIsEmpty(label.frame) && !CGRectIsEmpty(ncoin.frame);
-    if (framesLaidOut) {
-        // “N币”在数字正下方相邻，横向重叠过半
-        CGFloat top = CGRectGetMinY(ncoin.frame);
-        CGFloat bottom = CGRectGetMaxY(label.frame);
-        if (top < bottom - 4 || top > bottom + 60) return NO;
-        CGFloat ox = MIN(CGRectGetMaxX(ncoin.frame), CGRectGetMaxX(label.frame))
-                   - MAX(CGRectGetMinX(ncoin.frame), CGRectGetMinX(label.frame));
-        CGFloat w = MIN(CGRectGetWidth(ncoin.frame), CGRectGetWidth(label.frame));
-        return w > 0 && ox > w * 0.5;
-    }
-    return numCount <= 1; // 还没布局：父视图里只有这一个纯数字 label 才认
+    return sNumRe &&
+        [sNumRe numberOfMatchesInString:t options:0 range:NSMakeRange(0, t.length)] > 0;
 }
 
-static void NE_UILabel_setText(id self, SEL _cmd, NSString *text) {
-    if (text.length > 0) {
-        // 1. 服务有效期 9999
-        if (gValidity9999) {
-            // 快筛：只有含“服务有效期”的 label 才往下走，其余直接原实现
-            NSRange keyRange = [text rangeOfString:@"服务有效期"];
-            if (keyRange.location != NSNotFound) {
-                // 日期只在“服务有效期”后面找，避免换到同一行里别的日期
-                static NSRegularExpression *sDateRe = nil;
-                static dispatch_once_t sOnce;
-                dispatch_once(&sOnce, ^{
-                    sDateRe = [NSRegularExpression regularExpressionWithPattern:
-                               @"\\d{4}[.\\-/年]\\d{1,2}[.\\-/月]\\d{1,2}日?"
-                               options:0 error:nil];
-                });
-                if (sDateRe) {
-                    NSRange search = NSMakeRange(keyRange.location, text.length - keyRange.location);
-                    NSRange m = [sDateRe rangeOfFirstMatchInString:text options:0 range:search];
-                    if (m.location != NSNotFound) {
-                        NSString *fixed = [text stringByReplacingCharactersInRange:m
-                                                                        withString:@"9999.12.31"];
-                        orig_UILabel_setText(self, _cmd, fixed);
-                        return;
-                    }
+// 视图在窗口里的 frame（跨容器比较位置用；失败返回 CGRectZero）
+static CGRect NEFrameInWindow(UIView *v, UIWindow *w) {
+    if (!v || !w) return CGRectZero;
+    @try { return [v convertRect:v.bounds toView:w]; } @catch (...) { return CGRectZero; }
+}
+
+// 描述在数字正下方相邻：上沿在数字下沿附近（-4~+60），横向重叠过半
+static BOOL NEFramesVerticallyAdjacent(CGRect lf, CGRect cf) {
+    CGFloat top = CGRectGetMinY(cf), bottom = CGRectGetMaxY(lf);
+    if (top < bottom - 4 || top > bottom + 60) return NO;
+    CGFloat ox = MIN(CGRectGetMaxX(cf), CGRectGetMaxX(lf))
+               - MAX(CGRectGetMinX(cf), CGRectGetMinX(lf));
+    CGFloat w = MIN(CGRectGetWidth(cf), CGRectGetWidth(lf));
+    return w > 0 && ox > w * 0.5;
+}
+
+// 描述在数字右侧相邻：左沿在数字右沿附近（-4~+40），纵向重叠过半
+static BOOL NEFramesHorizontallyAdjacent(CGRect lf, CGRect cf) {
+    CGFloat left = CGRectGetMinX(cf), right = CGRectGetMaxX(lf);
+    if (left < right - 4 || left > right + 40) return NO;
+    CGFloat oy = MIN(CGRectGetMaxY(cf), CGRectGetMaxY(lf))
+               - MAX(CGRectGetMinY(cf), CGRectGetMinY(lf));
+    CGFloat h = MIN(CGRectGetHeight(cf), CGRectGetHeight(lf));
+    return h > 0 && oy > h * 0.5;
+}
+
+// 收集 view 子树里的所有 UILabel（跳过 exclude 这棵子树）
+static void NECollectLabelsExcept(UIView *view, UIView *exclude, NSMutableArray<UILabel *> *out) {
+    for (UIView *sub in view.subviews) {
+        if (sub == exclude) continue;
+        if ([sub isKindOfClass:[UILabel class]]) [out addObject:(UILabel *)sub];
+        NECollectLabelsExcept(sub, exclude, out);
+    }
+}
+
+// label 附近（下方或右侧相邻）的所有 label。帧还没布局出来时返回空——
+// 那时不认，宁可不换，等刷新时（已布局好）再认。
+static NSArray<UILabel *> *NEAdjacentLabels(UILabel *label) {
+    UIWindow *w = NEKeyWindow();
+    NSMutableArray<UILabel *> *out = [NSMutableArray array];
+    if (!w || !label) return out;
+    CGRect lf = NEFrameInWindow(label, w);
+    if (CGRectIsEmpty(lf)) return out;
+    NSMutableArray<UILabel *> *cands = [NSMutableArray array];
+    UIView *sup = label.superview;
+    if (!sup) return out;
+    NECollectLabelsExcept(sup, label, cands);
+    UIView *sup2 = sup.superview;
+    if (sup2) NECollectLabelsExcept(sup2, sup, cands);
+    for (UILabel *cand in cands) {
+        CGRect cf = NEFrameInWindow(cand, w);
+        if (CGRectIsEmpty(cf)) continue;
+        if (NEFramesVerticallyAdjacent(lf, cf) || NEFramesHorizontallyAdjacent(lf, cf))
+            [out addObject:cand];
+    }
+    return out;
+}
+
+// 附近 label 里含关键字的那一个（找不到返回 nil）
+static UILabel *NEAdjacentLabelContaining(UILabel *label, NSString *keyword) {
+    if (!keyword.length) return nil;
+    for (UILabel *cand in NEAdjacentLabels(label)) {
+        NSString *t = NEPlainTextOfLabel(cand);
+        if (t.length && [t rangeOfString:keyword].location != NSNotFound) return cand;
+    }
+    return nil;
+}
+
+// 数字旁边有个 "%" label → 这是百分比（电量），绝不能当 N币/里程换
+static BOOL NEHasAdjacentPercentLabel(UILabel *label) {
+    for (UILabel *cand in NEAdjacentLabels(label)) {
+        NSString *t = [NEPlainTextOfLabel(cand) stringByTrimmingCharactersInSet:
+                       [NSCharacterSet whitespaceCharacterSet]];
+        if (t.length && [t rangeOfString:@"%"].location != NSNotFound) return YES;
+    }
+    return NO;
+}
+
+// 所有文字替换共用：输入 label 的纯文本（setText: 的 text 或 attributedText.string），
+// 返回替换后的字符串；没有可换的返回 nil。
+// fieldOut/separateOut（可为 NULL）返回命中的字段 key 和是不是“分开 label”式替换。
+static NSString *NEFixedLabelString(NSString *text, UILabel *label,
+                                    NSString **fieldOut, BOOL *separateOut) {
+    if (fieldOut) *fieldOut = nil;
+    if (separateOut) *separateOut = NO;
+    if (!text.length || !label) return nil;
+    // 按钮的标题 label（如我们自己的“Ninebot pro+”按钮）不碰
+    if ([label.superview isKindOfClass:[UIButton class]]) return nil;
+    // 1. 服务有效期 9999
+    if (gValidity9999) {
+        NSRange keyRange = [text rangeOfString:@"服务有效期"];
+        static NSRegularExpression *sDateRe = nil;
+        static dispatch_once_t sOnce;
+        dispatch_once(&sOnce, ^{
+            sDateRe = [NSRegularExpression regularExpressionWithPattern:
+                       @"\\d{4}[.\\-/年]\\d{1,2}[.\\-/月]\\d{1,2}日?"
+                       options:0 error:nil];
+        });
+        if (keyRange.location != NSNotFound) {
+            // 同 label：日期在“服务有效期”后面找，只换它
+            if (sDateRe) {
+                NSRange search = NSMakeRange(keyRange.location, text.length - keyRange.location);
+                NSRange m = [sDateRe rangeOfFirstMatchInString:text options:0 range:search];
+                if (m.location != NSNotFound) {
+                    if (fieldOut) *fieldOut = @"NEValidity9999";
+                    return [text stringByReplacingCharactersInRange:m withString:@"9999.12.31"];
                 }
             }
+        } else {
+            // 分开 label：纯日期 + 旁边有“服务有效期”
+            static NSRegularExpression *sDateOnlyRe = nil;
+            static dispatch_once_t sDateOnlyOnce;
+            dispatch_once(&sDateOnlyOnce, ^{
+                sDateOnlyRe = [NSRegularExpression regularExpressionWithPattern:
+                               @"^\\s*\\d{4}[.\\-/年]\\d{1,2}[.\\-/月]\\d{1,2}日?\\s*$"
+                               options:0 error:nil];
+            });
+            if (sDateOnlyRe &&
+                [sDateOnlyRe numberOfMatchesInString:text options:0
+                                               range:NSMakeRange(0, text.length)] > 0 &&
+                NEAdjacentLabelContaining(label, @"服务有效期")) {
+                if (fieldOut) *fieldOut = @"NEValidity9999";
+                if (separateOut) *separateOut = YES;
+                return @"9999.12.31";
+            }
         }
-        // 2. 总里程：整行就是数字+km（如 35624.6 km）→ 整行换成用户填的值（含单位一起填）。
+    }
+    // 纯数字才走“分开 label”匹配；先算一次，后面复用
+    BOOL isNum = NEIsPureNumberString(text);
+    // 2. 总里程
+    if (gMileage && gMileageValue.length > 0) {
+        // 同 label：整行就是数字+km（如 35624.6 km）→ 整行换成用户填的值。
         // “60 km/h”这种带 /h 的不匹配（正则要求行尾就是 km），不会误换。
-        if (gMileage && gMileageValue.length > 0 &&
-            [text rangeOfString:@"km"].location != NSNotFound) {
+        if ([text rangeOfString:@"km"].location != NSNotFound) {
             static NSRegularExpression *sMileRe = nil;
             static dispatch_once_t sMileOnce;
             dispatch_once(&sMileOnce, ^{
@@ -380,23 +482,61 @@ static void NE_UILabel_setText(id self, SEL _cmd, NSString *text) {
             if (sMileRe &&
                 [sMileRe numberOfMatchesInString:text options:0
                                            range:NSMakeRange(0, text.length)] > 0) {
-                orig_UILabel_setText(self, _cmd, gMileageValue);
-                return;
+                if (fieldOut) *fieldOut = @"NEMileage";
+                return gMileageValue;
             }
         }
-        // 3. 等级：Lv. 开头（如 Lv.8）→ 整行换成用户填的值（如 Lv.99）
-        if (gLevel && gLevelValue.length > 0 && [text hasPrefix:@"Lv."]) {
-            orig_UILabel_setText(self, _cmd, gLevelValue);
-            return;
+        // 分开 label：纯数字 + 旁边有“km”（不是 km/h）；旁边有 % 就是电量，不换
+        if (isNum && !NEHasAdjacentPercentLabel(label)) {
+            for (UILabel *cand in NEAdjacentLabels(label)) {
+                NSString *kt = NEPlainTextOfLabel(cand);
+                if (!kt.length || [kt rangeOfString:@"km"].location == NSNotFound) continue;
+                if ([kt rangeOfString:@"km/h"].location != NSNotFound) continue;
+                if (fieldOut) *fieldOut = @"NEMileage";
+                if (separateOut) *separateOut = YES;
+                return gMileageValue;
+            }
         }
-        // 4. 称号：正好是“暂无称号”→ 换成用户填的值
-        if (gTitle && gTitleValue.length > 0 && [text isEqualToString:@"暂无称号"]) {
-            orig_UILabel_setText(self, _cmd, gTitleValue);
-            return;
+    }
+    // 3. 等级
+    if (gLevel && gLevelValue.length > 0) {
+        if ([text hasPrefix:@"Lv."] || [text hasPrefix:@"lv."]) {
+            if (fieldOut) *fieldOut = @"NELevel";
+            return gLevelValue;
         }
-        // 5. 连续签到天数：含“连续签到”且带天数（如 已连续签到3天）→ 只换其中的数字，保留句式
-        if (gSignDays && gSignDaysValue.length > 0 &&
-            [text rangeOfString:@"连续签到"].location != NSNotFound) {
+        // 分开 label：纯数字 + 旁边有“Lv”
+        if (isNum) {
+            for (UILabel *cand in NEAdjacentLabels(label)) {
+                NSString *ct = NEPlainTextOfLabel(cand);
+                if (ct.length && ([ct rangeOfString:@"Lv"].location != NSNotFound ||
+                                  [ct rangeOfString:@"lv"].location != NSNotFound)) {
+                    if (fieldOut) *fieldOut = @"NELevel";
+                    if (separateOut) *separateOut = YES;
+                    NSString *v = gLevelValue;
+                    if ([v hasPrefix:@"Lv."] || [v hasPrefix:@"lv."])
+                        v = [v substringFromIndex:3];
+                    return v;
+                }
+            }
+        }
+    }
+    // 4. 称号
+    if (gTitle && gTitleValue.length > 0) {
+        if ([text isEqualToString:@"暂无称号"]) {
+            if (fieldOut) *fieldOut = @"NETitle";
+            return gTitleValue;
+        }
+        // 分开 label：短文本 + 旁边有“称号”（且自己不含“称号”、不是数字）
+        if (text.length <= 16 && [text rangeOfString:@"称号"].location == NSNotFound &&
+            !isNum && NEAdjacentLabelContaining(label, @"称号")) {
+            if (fieldOut) *fieldOut = @"NETitle";
+            if (separateOut) *separateOut = YES;
+            return gTitleValue;
+        }
+    }
+    // 5. 连续签到天数
+    if (gSignDays && gSignDaysValue.length > 0) {
+        if ([text rangeOfString:@"连续签到"].location != NSNotFound) {
             static NSRegularExpression *sDayRe = nil;
             static dispatch_once_t sDayOnce;
             dispatch_once(&sDayOnce, ^{
@@ -408,25 +548,97 @@ static void NE_UILabel_setText(id self, SEL _cmd, NSString *text) {
                 NSTextCheckingResult *m = [sDayRe firstMatchInString:text options:0
                                                                 range:NSMakeRange(0, text.length)];
                 if (m && m.numberOfRanges > 1) {
-                    NSString *fixed = [text stringByReplacingCharactersInRange:[m rangeAtIndex:1]
-                                                                    withString:gSignDaysValue];
-                    orig_UILabel_setText(self, _cmd, fixed);
-                    return;
+                    if (fieldOut) *fieldOut = @"NESignDays";
+                    return [text stringByReplacingCharactersInRange:[m rangeAtIndex:1]
+                                                         withString:gSignDaysValue];
                 }
             }
         }
-        // 6. N币余额：单独数字，兄弟视图确认，认不出不换
-        if (gNCoins && gNCoinsValue.length > 0 &&
-            [self isKindOfClass:[UILabel class]] &&
-            NEIsNCoinsNumberLabel((UILabel *)self)) {
-            orig_UILabel_setText(self, _cmd, gNCoinsValue);
+        // 分开 label：纯数字 + 旁边有“连续签到”
+        if (isNum && NEAdjacentLabelContaining(label, @"连续签到")) {
+            if (fieldOut) *fieldOut = @"NESignDays";
+            if (separateOut) *separateOut = YES;
+            return gSignDaysValue;
+        }
+    }
+    // 6. N币余额：单独数字，旁边有“N币”label（窗口坐标相邻才认，帧没布局时不认）；
+    // 旁边有 % 就是电量，不换。认不出宁可不换，绝不能把创作/关注/粉丝的数字换了。
+    if (gNCoins && gNCoinsValue.length > 0 && isNum &&
+        !NEHasAdjacentPercentLabel(label) &&
+        NEAdjacentLabelContaining(label, @"N币")) {
+        if (fieldOut) *fieldOut = @"NENCoins";
+        if (separateOut) *separateOut = YES;
+        return gNCoinsValue;
+    }
+    return nil;
+}
+
+// 富文本替换：只换 plain 和 fixed 不同的那一段，保留原属性；
+// 整串都换时插入的文本取被换掉那段首字符的属性。算不准就整串重建（首字符属性），绝不崩。
+static NSAttributedString *NEAttributedStringByReplacing(NSAttributedString *orig,
+                                                         NSString *plain, NSString *fixed) {
+    if (!orig || orig.length == 0)
+        return [[NSAttributedString alloc] initWithString:fixed ?: @""];
+    if (!plain) plain = orig.string;
+    if (!fixed) fixed = plain;
+    NSUInteger n = MIN(plain.length, fixed.length);
+    NSUInteger start = 0;
+    while (start < n && [plain characterAtIndex:start] == [fixed characterAtIndex:start]) start++;
+    NSUInteger endP = plain.length, endF = fixed.length;
+    while (endP > start && endF > start &&
+           [plain characterAtIndex:endP - 1] == [fixed characterAtIndex:endF - 1]) { endP--; endF--; }
+    NSMutableAttributedString *m = [[NSMutableAttributedString alloc] initWithAttributedString:orig];
+    @try {
+        [m replaceCharactersInRange:NSMakeRange(start, endP - start)
+                         withString:[fixed substringWithRange:NSMakeRange(start, endF - start)]];
+    } @catch (...) {
+        NSDictionary *attrs = orig.length > 0 ?
+            [orig attributesAtIndex:0 effectiveRange:NULL] : nil;
+        m = [[NSMutableAttributedString alloc] initWithString:fixed attributes:attrs];
+    }
+    return m;
+}
+
+static void (*orig_UILabel_setAttributedText)(id, SEL, NSAttributedString *);
+
+static void NE_UILabel_setText(id self, SEL _cmd, NSString *text) {
+    if (text.length > 0 && [self isKindOfClass:[UILabel class]]) {
+        NSString *field = nil; BOOL separate = NO;
+        NSString *fixed = NEFixedLabelString(text, (UILabel *)self, &field, &separate);
+        if (fixed) {
+            if (field.length) {
+                objc_setAssociatedObject(self, &NEAppliedFieldKey, field,
+                                         OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                objc_setAssociatedObject(self, &NEAppliedSeparateKey, @(separate),
+                                         OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            }
+            orig_UILabel_setText(self, _cmd, fixed);
             return;
         }
     }
     orig_UILabel_setText(self, _cmd, text);
 }
 
-// UILabel setText 钩子由 9999 有效期和五个自定义项共用，只装一次。
+static void NE_UILabel_setAttributedText(id self, SEL _cmd, NSAttributedString *attr) {
+    if (attr.length > 0 && [self isKindOfClass:[UILabel class]]) {
+        NSString *field = nil; BOOL separate = NO;
+        NSString *fixed = NEFixedLabelString(attr.string, (UILabel *)self, &field, &separate);
+        if (fixed) {
+            if (field.length) {
+                objc_setAssociatedObject(self, &NEAppliedFieldKey, field,
+                                         OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                objc_setAssociatedObject(self, &NEAppliedSeparateKey, @(separate),
+                                         OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            }
+            orig_UILabel_setAttributedText(self, _cmd,
+                NEAttributedStringByReplacing(attr, attr.string, fixed));
+            return;
+        }
+    }
+    orig_UILabel_setAttributedText(self, _cmd, attr);
+}
+
+// UILabel 文字钩子（setText: + setAttributedText:）由 9999 有效期和五个自定义项共用，只装一次。
 static BOOL gLabelHookInstalled = NO;
 static void NEInstallLabelHookIfNeeded(void) {
     if (gLabelHookInstalled) return;
@@ -442,8 +654,84 @@ static void NEInstallLabelHookIfNeeded(void) {
         os_log(gLog, "[LBL] UILabel setText 钩子安装失败");
         return;
     }
+    if (class_getInstanceMethod(cls, @selector(setAttributedText:))) {
+        MSHookMessageEx(cls, @selector(setAttributedText:),
+                        (IMP)NE_UILabel_setAttributedText,
+                        (IMP *)&orig_UILabel_setAttributedText);
+        if (orig_UILabel_setAttributedText)
+            os_log(gLog, "[LBL] UILabel setAttributedText: 钩子已装");
+        else
+            os_log(gLog, "[LBL] UILabel setAttributedText: 钩子安装失败（只用 setText:）");
+    }
     gLabelHookInstalled = YES;
     os_log(gLog, "[LBL] UILabel setText 钩子已装");
+}
+
+// 之前被替换过的 label 按当前值重设（开关还开着且值非空才换）。
+// 有效期/签到天数不走这里——它们换完还保留原句式，正常重设就能再匹配上。
+static NSString *NEFieldCurrentValue(NSString *field, BOOL separate) {
+    if ([field isEqualToString:@"NEMileage"])
+        return (gMileage && gMileageValue.length > 0) ? gMileageValue : nil;
+    if ([field isEqualToString:@"NENCoins"])
+        return (gNCoins && gNCoinsValue.length > 0) ? gNCoinsValue : nil;
+    if ([field isEqualToString:@"NETitle"])
+        return (gTitle && gTitleValue.length > 0) ? gTitleValue : nil;
+    if ([field isEqualToString:@"NELevel"]) {
+        if (!gLevel || gLevelValue.length == 0) return nil;
+        if (!separate) return gLevelValue;
+        // 分开 label 时只换数字部分：用户填 "Lv.99" 就取 "99"
+        NSString *v = gLevelValue;
+        if ([v hasPrefix:@"Lv."] || [v hasPrefix:@"lv."]) return [v substringFromIndex:3];
+        return v;
+    }
+    return nil;
+}
+
+// 按 label 当前的文本/富文本形式，把新文本写回去（富文本保留原属性）
+static void NESetLabelPlainText(UILabel *label, NSString *newText) {
+    if (!label || !newText) return;
+    if (label.attributedText) {
+        label.attributedText = NEAttributedStringByReplacing(label.attributedText,
+                                                             label.attributedText.string, newText);
+    } else {
+        label.text = newText;
+    }
+}
+
+// 强制刷新：把 view 子树里所有 UILabel 的当前文本重设一遍，让它们走一遍钩子。
+// 解决“页面启动时已设好文本，改设置后 App 不再重设”的问题。
+// 注意：开关关掉后换过的 label 恢复不了原值（原值已被换掉），只能等下次进 App——
+// 钩子关了就不再换，App 自己重设时就显示真值。
+static void NEForceRefreshLabelsInView(UIView *view) {
+    for (UIView *sub in view.subviews) {
+        if ([sub isKindOfClass:[UILabel class]]) {
+            UILabel *label = (UILabel *)sub;
+            // 按钮的标题 label（如我们自己的“Ninebot pro+”按钮）不碰
+            if ([label.superview isKindOfClass:[UIButton class]]) continue;
+            @try {
+                NSString *field = objc_getAssociatedObject(label, &NEAppliedFieldKey);
+                if (field.length) {
+                    NSNumber *sep = objc_getAssociatedObject(label, &NEAppliedSeparateKey);
+                    NSString *val = NEFieldCurrentValue(field, sep.boolValue);
+                    if (val) { NESetLabelPlainText(label, val); continue; }
+                }
+                if (label.attributedText) {
+                    NSAttributedString *a = label.attributedText;
+                    if (a.length) label.attributedText = a;
+                } else if (label.text.length) {
+                    label.text = label.text;
+                }
+            } @catch (...) {}
+        }
+        NEForceRefreshLabelsInView(sub);
+    }
+}
+
+static void NEForceRefreshLabels(void) {
+    if (!gLabelHookInstalled) return;
+    UIWindow *w = NEKeyWindow();
+    if (!w) return;
+    NEForceRefreshLabelsInView(w);
 }
 
 // --- 主页车辆图 / 背景图自定义 ---
@@ -660,6 +948,55 @@ static void NEInstallImageHooksIfNeeded(void) {
             os_log(gLog, "[IMG] UIImage imageNamed: 钩子已装（本地 asset 兜底）");
     }
     gImageHooksInstalled = YES;
+}
+
+// v0.3.9 修复：图片强制刷新——主题图/车图在 App 启动时已加载好，改设置后
+// App 不再重设，钩子拦不到。选图后把设备 tab 里所有 UIImageView 按尺寸重算一次。
+// 注意：不能用 NEIsDeviceTabSelected() 判定——设置页正以 modal 盖在上面，
+// 它跟 presentedViewController 会走到设置页 nav，永远返回 NO；
+// 这里直接从根控制器取 tab bar（不跟 presented 链），再看当前选中的是不是设备 tab。
+// 主题图若不是 UIImageView 的 image（而是 view 背景色/图层内容），这招换不上，
+// 那时只能看日志里的 imageNamed 名字再收紧——先按 UIImageView 处理。
+static UITabBarController *NEAppTabBarController(void) {
+    UIWindow *w = NEKeyWindow();
+    UIViewController *root = w.rootViewController;
+    if ([root isKindOfClass:[UITabBarController class]]) return (UITabBarController *)root;
+    return nil;
+}
+
+static void NEForceRefreshImagesInView(UIView *view) {
+    for (UIView *sub in view.subviews) {
+        if ([sub isKindOfClass:[UIImageView class]]) {
+            UIImageView *iv = (UIImageView *)sub;
+            UIImage *img = iv.image;
+            if (img) {
+                @try {
+                    CGSize sz = img.size;
+                    CGFloat sw = [UIScreen mainScreen].bounds.size.width;
+                    CGFloat sh = [UIScreen mainScreen].bounds.size.height;
+                    UIImage *custom = nil;
+                    if (sz.width >= sw * 0.9 && sz.height >= sh * 0.5)
+                        custom = NECustomBackgroundImage(); // 满屏大图 → 背景
+                    else if (sz.width >= 200)
+                        custom = NECustomVehicleImage();    // 大图 → 车辆图；小图不碰
+                    // 直接赋值：SDWebImage 路径下 setImage: 没钩子，赋值就是替换；
+                    // setImage: 兜底钩子装着时，走钩子再算一次也是同一张图，不会循环。
+                    if (custom && custom != img) iv.image = custom;
+                } @catch (...) {}
+            }
+        }
+        NEForceRefreshImagesInView(sub);
+    }
+}
+
+static void NEForceRefreshImages(void) {
+    if (!gHasVehicleImage && !gHasBgImage) return;
+    UITabBarController *tab = NEAppTabBarController();
+    if (!tab) return;
+    UIViewController *sel = tab.selectedViewController;
+    BOOL isDevice = [sel.tabBarItem.title isEqualToString:@"设备"] || tab.selectedIndex == 0;
+    if (!isDevice || !sel.view) return;
+    NEForceRefreshImagesInView(sel.view);
 }
 
 // ---------------- 天气（Open-Meteo，免费、无 key）----------------
@@ -2148,6 +2485,7 @@ static void NECheckSettingsButton(void) {
     // 空值时开关开也不换（避免显示空白），所以值改完同步一次缓存
     NESyncCustomDisplayCache();
     NEInstallLabelHookIfNeeded();
+    NEForceRefreshLabels(); // v0.3.9 修复：值改了，已显示的 label 不会自动重设，强制刷新立刻生效
 }
 
 - (void)dismissKeyboard {
@@ -2190,6 +2528,7 @@ static void NECheckSettingsButton(void) {
     if ([key isEqualToString:@"NEValidity9999"]) {
         gValidity9999 = sw.isOn;
         if (sw.isOn) NEInstallLabelHookIfNeeded();
+        NEForceRefreshLabels(); // v0.3.9 修复：开关变了，已显示的 label 不会自动重设，强制刷新
     }
     // v0.3.9 追加：五个自定义显示项开关——同步缓存并按需装钩子
     if ([key isEqualToString:@"NENCoins"] || [key isEqualToString:@"NEMileage"] ||
@@ -2197,6 +2536,7 @@ static void NECheckSettingsButton(void) {
         [key isEqualToString:@"NESignDays"]) {
         NESyncCustomDisplayCache();
         if (sw.isOn) NEInstallLabelHookIfNeeded();
+        NEForceRefreshLabels(); // v0.3.9 修复：同上
     }
 }
 
@@ -2386,7 +2726,8 @@ static void NECheckSettingsButton(void) {
     NEClearImageCache();
     NEInstallImageHooksIfNeeded();
     [self refreshImageStatus];
-    os_log(gLog, "[IMG] 已保存自定义%{public}@（%ldx%ld），回设备页可见",
+    NEForceRefreshImages(); // v0.3.9 修复：选完图立刻把设备 tab 的图重算一遍，不用等切 tab/重启
+    os_log(gLog, "[IMG] 已保存自定义%{public}@（%ldx%ld），已应用到设备页",
            kind == 0 ? @"车辆图" : @"背景图",
            (long)img.size.width, (long)img.size.height);
 }
@@ -2937,6 +3278,14 @@ static void NEProbeStart(void) {
         gLocMgr.delegate = gLocDelegate;
         NEApplySpeedLocationMode(); // 提醒开着 → 连续定位；关着 → 单次定位（只够天气用）
 
+        // v0.3.9 修复：启动 3 秒后强制刷新一次文字+图片——页面可能在钩子装好前已加载，
+        // 或主题图走 imageNamed 时名字没命中关键字，靠尺寸启发式再补一次。
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            NEForceRefreshLabels();
+            NEForceRefreshImages();
+        });
+
         // 音量：每秒一刷（主线程）
         NERefreshVolume();
         gVolumeTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0,
@@ -2967,3 +3316,4 @@ static void NEProbeStart(void) {
     // 车辆数据探测（只读侦察，见上文 NEProbeStart）
     NEProbeStart();
 }
+
