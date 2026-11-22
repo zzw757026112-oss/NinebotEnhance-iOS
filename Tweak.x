@@ -104,6 +104,19 @@
 //     拦住，不丢覆盖）；同级顺序只在满屏 view 之间找“最后一个”，且父容
 //     器里满屏 view 不足 2 个时不判、等刷新时再判（图先设、view 后加的
 //     竞态会把背景 view 暂时当成“最后一个”错换成车辆图）。
+// v0.3.9 第七修（用户实测 cf438018：RN 数字、背景、卡片、仪表页全好了，
+//  唯独车辆图一直没变化）：新诊断（ne-diag-34ae638d.txt，七次设备导出）
+//  证明“最后一个是车辆”是错的——三张满屏图里只有中间那张是可见的
+//  （750x908 主题合成图，狗+车画在一张图里），第一张和第三张一直是 hidden；
+//  旧规则把车辆图换到隐藏的第三张（375x385）上，用户永远看不到，
+//  而真正显示的中间那张永远换不上。改：主信号改成“可见”——同级满屏 view
+//  里唯一可见的那张就是用户看到的车辆/主图 → 车辆图，其余（隐藏的背景层）
+//  → 背景图；一张都不可见时不判（等它显示出来再判）。另三处加固：① key
+//  为空但 Documents 里文件还在时直接用文件（key 可能丢了）并自愈 key，
+//  启动时 gHas 标志也按文件存在性补；② 刷新时 iv.image 已是自定义图也
+//  要重查 layer.contents（App 可能把它覆盖回主题图）；③ 新装 CALayer
+//  setContents: 钩子（只对设备根页面满屏 UIImageView 的图层生效），
+//  App 绕开 setImage: 直接写图层内容时在写入时就换掉。
 // v0.3.8 改动：超速红行改成“请勿超速行驶！”，字比普通行大但绝不超胶囊边框；
 //  超速那一刻中文语音读一次“您已超速行驶，请注意安全”（跟着超速提醒开关走，不另设开关）。
 // v0.3.7 改动：设置页“日期时间”改叫“日期”（时间只在翻页时钟里显示）；和 App 1.3.19 同款。
@@ -1682,10 +1695,39 @@ static UIImage *NELoadCustomImage(NSString *path, NSString *defaultsKey, UIImage
     return img;
 }
 static UIImage *NECustomVehicleImage(void) {
-    return NELoadCustomImage(NEVehicleImagePath(), @"NEVehicleImagePath", &gVehicleImage, &gVehicleImageLoadedPath);
+    NSString *path = NEVehicleImagePath();
+    if (!path.length) {
+        // key 为空但文件可能还在（key 丢了/被清掉）：直接试 Documents/ne-vehicle.png，
+        // 找到就用它并把 key 修好。恢复原图时会删文件，所以文件在 = 用户没恢复。
+        NSString *doc = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory,
+                                                            NSUserDomainMask, YES).firstObject;
+        if (doc.length) {
+            NSString *fb = [doc stringByAppendingPathComponent:@"ne-vehicle.png"];
+            if ([[NSFileManager defaultManager] fileExistsAtPath:fb]) {
+                path = fb;
+                [[NSUserDefaults standardUserDefaults] setObject:fb forKey:@"NEVehicleImagePath"];
+                gHasVehicleImage = YES;
+            }
+        }
+    }
+    return NELoadCustomImage(path, @"NEVehicleImagePath", &gVehicleImage, &gVehicleImageLoadedPath);
 }
 static UIImage *NECustomBackgroundImage(void) {
-    return NELoadCustomImage(NEBackgroundImagePath(), @"NEBackgroundImagePath", &gBgImage, &gBgImageLoadedPath);
+    NSString *path = NEBackgroundImagePath();
+    if (!path.length) {
+        // 同上：key 为空但文件还在时直接试 Documents/ne-bg.png。
+        NSString *doc = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory,
+                                                            NSUserDomainMask, YES).firstObject;
+        if (doc.length) {
+            NSString *fb = [doc stringByAppendingPathComponent:@"ne-bg.png"];
+            if ([[NSFileManager defaultManager] fileExistsAtPath:fb]) {
+                path = fb;
+                [[NSUserDefaults standardUserDefaults] setObject:fb forKey:@"NEBackgroundImagePath"];
+                gHasBgImage = YES;
+            }
+        }
+    }
+    return NELoadCustomImage(path, @"NEBackgroundImagePath", &gBgImage, &gBgImageLoadedPath);
 }
 static void NEClearImageCache(void) {
     [gImageLock lock];
@@ -1715,6 +1757,21 @@ static BOOL NEViewIsOnDeviceRootPage(UIView *v);
 // 顺序拿不到时（view 还没挂进层级）才退到纵横比，且只认“近似正方形 → 背景”
 // （主题背景 1440x1440 正好是正方形）；非正方形的不换，等刷新时再按顺序换。
 // 返回要换成的自定义图；nil = 不换。
+// 这个 view 是不是实际显示出来的（自己和所有祖先都没藏、alpha>0）。
+// 诊断（ne-diag-34ae638d.txt，七次设备导出）证明：设备页三张满屏图里
+// 只有中间那张是可见的（750x908 主题合成图，狗+车画在一张图里），
+// 第一张和第三张一直是 hidden——按“最后一个是车辆”分，会把车辆图换到
+// 隐藏的第三张（375x385）上，用户永远看不到，而真正显示的中间那张
+// 永远换不上——车辆图一直没变化的根因。
+static BOOL NEIsViewEffectivelyVisible(UIView *v) {
+    UIView *p = v;
+    while (p) {
+        if (p.hidden || p.alpha <= 0.01) return NO;
+        p = p.superview;
+    }
+    return YES;
+}
+
 static UIImage *NEImageBySiblingOrder(UIImageView *iv, UIImage *bg, UIImage *veh) {
     UIView *parent = iv.superview;
     if (!parent) return nil;
@@ -1724,21 +1781,32 @@ static UIImage *NEImageBySiblingOrder(UIImageView *iv, UIImage *bg, UIImage *veh
     CGFloat sw = [UIScreen mainScreen].bounds.size.width;
     CGFloat sh = [UIScreen mainScreen].bounds.size.height;
     if (bs.width < sw * 0.9 || bs.height < sh * 0.5) return nil;
-    // “最后一个”只在满屏 view 之间找：同级里可能还有小图标 view，按全部
-    // UIImageView 找最后一个会错。父容器里满屏 view 不足 2 个时不判、等
-    // 刷新时再判——图先设、view 后加的竞态下，背景 view 会暂时成为
-    // “最后一个”而被错换成车辆图（顶部背景显示车辆图的另一可能根因）。
+    // 主信号改成“可见”，不再只看“最后一个”：同级满屏 view 里，
+    // 唯一可见的那张就是用户看到的车辆/主图 → 车辆图；其余（隐藏的背景层）
+    // → 背景图（它们显示出来时再按可见重判，刷新会兜底）。一张都不可见时
+    // 不判（等它显示出来再判，别把车辆图换到隐藏的 view 上）。
+    // 多张可见时，在可见的里面按顺序分（最后一张可见的 → 车辆）。
+    // 父容器里满屏 view 不足 2 个时不判、等刷新时再判——图先设、view 后加
+    // 的竞态下，背景 view 会暂时成为“最后一个”而被错换成车辆图。
     UIImageView *last = nil;
+    UIImageView *lastVisible = nil;
     NSInteger fullCount = 0;
+    NSInteger visibleCount = 0;
     for (UIView *sub in parent.subviews) {
         if (![sub isKindOfClass:[UIImageView class]]) continue;
         CGSize s = sub.bounds.size;
         if (s.width < sw * 0.9 || s.height < sh * 0.5) continue;
         fullCount++;
         last = (UIImageView *)sub;
+        if (NEIsViewEffectivelyVisible(sub)) {
+            visibleCount++;
+            lastVisible = (UIImageView *)sub;
+        }
     }
     if (!last || fullCount < 2) return nil;
-    return (last == iv) ? veh : bg;
+    if (visibleCount == 0) return nil;
+    if (visibleCount == 1) return (lastVisible == iv) ? veh : bg;
+    return (lastVisible == iv) ? veh : bg;
 }
 
 static UIImage *NEClassifyDeviceImage(UIImageView *iv, UIImage *image) {
@@ -1759,7 +1827,7 @@ static UIImage *NEClassifyDeviceImage(UIImageView *iv, UIImage *image) {
     CGFloat w = image.size.width, h = image.size.height;
     // 小图（图标/头像）一概不碰
     if (w < 200 && h < 200) return nil;
-    // 主信号：同级顺序
+    // 主信号：同级顺序（第七修：按“可见”分，唯一可见的满屏 view 是车辆）
     UIImage *byOrder = NEImageBySiblingOrder(iv, bg, veh);
     if (byOrder) return byOrder;
     // 拿不到顺序：只认近似正方形 → 背景；其余不换，等刷新时按顺序换。
@@ -1864,6 +1932,47 @@ static void NE_UIButton_setBackgroundImage(id self, SEL _cmd, UIImage *image, UI
 // 这类词时，全被错换成车辆图）。本地 asset 走 setImage: 时一样能被满屏
 // gate + 同级顺序拦住，不丢覆盖。
 
+// App 若绕开 UIImageView.image 直接写 layer.contents，setImage: 钩子拦不到，
+// 3 秒刷新又会被 App 的下一次写入盖掉——可见主图（750x908 主题合成图）
+// 一直换不上的另一可能原因。直接拦 CALayer setContents:，只对设备根页面
+// 满屏 UIImageView 的图层生效；其余图层直接放行，不碰。CALayer 很热，
+// 快筛放最前面：没自定义图、内容不是 CGImage、不是主线程时直接放行。
+static void (*orig_CALayer_setContents)(id, SEL, id);
+static void NE_CALayer_setContents(id self, SEL _cmd, id contents) {
+    if ((gHasVehicleImage || gHasBgImage) && contents &&
+        [NSThread isMainThread] &&
+        CFGetTypeID((CFTypeRef)contents) == CGImageGetTypeID()) {
+        @autoreleasepool {
+            @try {
+                id delegate = [(CALayer *)self delegate];
+                if ([delegate isKindOfClass:[UIImageView class]]) {
+                    UIImageView *iv = (UIImageView *)delegate;
+                    if (NEViewIsOnDeviceRootPage(iv)) {
+                        CGSize bs = iv.bounds.size;
+                        CGFloat sw = [UIScreen mainScreen].bounds.size.width;
+                        CGFloat sh = [UIScreen mainScreen].bounds.size.height;
+                        if (bs.width >= sw * 0.9 && bs.height >= sh * 0.5) {
+                            // 自己写的自定义图直接放行（别重复处理）。
+                            UIImage *bg = NECustomBackgroundImage();
+                            UIImage *veh = NECustomVehicleImage();
+                            if (!((bg && contents == (__bridge id)bg.CGImage) ||
+                                  (veh && contents == (__bridge id)veh.CGImage))) {
+                                UIImage *incoming = [UIImage imageWithCGImage:(CGImageRef)contents];
+                                UIImage *custom = incoming ? NEClassifyDeviceImage(iv, incoming) : nil;
+                                if (custom && custom.CGImage) {
+                                    orig_CALayer_setContents(self, _cmd, (__bridge id)custom.CGImage);
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                }
+            } @catch (...) {}
+        }
+    }
+    orig_CALayer_setContents(self, _cmd, contents);
+}
+
 static BOOL gImageHooksInstalled = NO;
 static void NEInstallImageHooksIfNeeded(void) {
     if (gImageHooksInstalled) return;
@@ -1908,6 +2017,15 @@ static void NEInstallImageHooksIfNeeded(void) {
                         (IMP *)&orig_UIButton_setBackgroundImage);
         if (orig_UIButton_setBackgroundImage)
             os_log(gLog, "[IMG] UIButton setBackgroundImage:forState: 钩子已装");
+    }
+    // CALayer setContents: 兜底：App 若直接写图层内容绕开 setImage:，这里在写入时就换掉。
+    Class layerCls = objc_getClass("CALayer");
+    if (layerCls && class_getInstanceMethod(layerCls, @selector(setContents:))) {
+        MSHookMessageEx(layerCls, @selector(setContents:),
+                        (IMP)NE_CALayer_setContents,
+                        (IMP *)&orig_CALayer_setContents);
+        if (orig_CALayer_setContents)
+            os_log(gLog, "[IMG] CALayer setContents: 钩子已装（图层直写兜底）");
     }
     gImageHooksInstalled = YES;
     // 页面显示时也要刷新图片（tab 懒加载，切过去才加载）
@@ -2033,7 +2151,7 @@ static void NEForceRefreshImagesInView(UIView *view) {
             UIImage *img = iv.image;
             if (img) {
                 @try {
-                    // 背景/车辆按 NEClassifyDeviceImage 区分（主信号是同级顺序，
+                    // 背景/车辆按 NEClassifyDeviceImage 区分（主信号是可见+同级顺序，
                     // 不按尺寸——车辆画在满屏画布上，按尺寸分会错换成背景图）。
                     // 顺序判定不依赖当前图片的纵横比，所以换图后刷新（缓存已清、
                     // 当前图是旧自定义图）也能分对；已是当前自定义图的直接放行。
@@ -2045,6 +2163,22 @@ static void NEForceRefreshImagesInView(UIView *view) {
                         // 会盖过 UIImageView.image），只换 iv.image 显示换不上；
                         // 把图层内容也同步成自定义图。CGImage 为 nil 时不碰。
                         @try { if (custom.CGImage) iv.layer.contents = (__bridge id)custom.CGImage; } @catch (...) {}
+                    } else {
+                        // iv.image 已经是自定义图（custom 为 nil 是放行），但
+                        // layer.contents 可能被 App 覆盖回主题图——图层内容会盖过
+                        // image 显示，刷新时只看 iv.image 就发现不了。若图层内容
+                        // 不是当前自定义图，重新同步一次。
+                        UIImage *expected = nil;
+                        UIImage *bgNow = NECustomBackgroundImage();
+                        UIImage *vehNow = NECustomVehicleImage();
+                        if (bgNow && img == bgNow) expected = bgNow;
+                        else if (vehNow && img == vehNow) expected = vehNow;
+                        if (expected && expected.CGImage) {
+                            @try {
+                                if (iv.layer.contents != (__bridge id)expected.CGImage)
+                                    iv.layer.contents = (__bridge id)expected.CGImage;
+                            } @catch (...) {}
+                        }
                     }
                 } @catch (...) {}
             }
@@ -4414,6 +4548,15 @@ static void NEProbeStart(void) {
         NEInstallRNTextHookIfNeeded();
     gHasVehicleImage = NEVehicleImagePath().length > 0;
     gHasBgImage = NEBackgroundImagePath().length > 0;
+    // key 为空但文件还在时也算有图（key 可能丢了），否则图片钩子不装、刷新不跑。
+    {
+        NSString *doc = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
+        NSFileManager *fm = [NSFileManager defaultManager];
+        if (!gHasVehicleImage && doc.length && [fm fileExistsAtPath:[doc stringByAppendingPathComponent:@"ne-vehicle.png"]])
+            gHasVehicleImage = YES;
+        if (!gHasBgImage && doc.length && [fm fileExistsAtPath:[doc stringByAppendingPathComponent:@"ne-bg.png"]])
+            gHasBgImage = YES;
+    }
     if (gHasVehicleImage || gHasBgImage) NEInstallImageHooksIfNeeded();
     // PHPicker（PhotosUI）运行时加载：dlopen 失败也不影响，回退 UIImagePickerController
     dlopen("/System/Library/Frameworks/PhotosUI.framework/PhotosUI", RTLD_NOW | RTLD_LOCAL);
