@@ -31,6 +31,14 @@
 //  裸数字必须有明确描述才换，旁边有 % 就是电量，绝不换（之前电量被误换成 9999%）。
 //  图片刷新不用 NEIsDeviceTabSelected()（设置页 modal 盖着时它永远返回 NO），改直接取根 tab bar。
 //  启动 3 秒后也强制刷新一次（页面可能在钩子装好前已加载）。
+// v0.3.9 再修（7d1117ef 构建实测：里程误换到续航/最近骑行，我的/服务页仍不变）：
+//  ① 里程只换总里程：有 km 的数先排除附近含续航/最近骑行/骑行/剩余/续航里程/本次/单次，
+//     再肯定附近（放宽范围）有“总里程”或“我的数据”，认不出就不换；相邻判定改双向
+//     （续航在数字左侧、最近骑行在数字上方、总里程在数字左侧，原先只认下方/右侧，漏了）。
+//  ② 页面显示时刷新：hook -[UIViewController viewDidAppear:]，每 VC 节流 1 秒，
+//     设置页本身不刷；tab 懒加载，切过去才加载，显示时重算文字+图片。
+//  ③ 等级/称号药丸可能是 UIButton 标题：再 hook -[UIButton setTitle:forState:]，
+//     只换 Lv. 开头和“暂无称号”，刷新时按钮标题也重设。
 // v0.3.8 改动：超速红行改成“请勿超速行驶！”，字比普通行大但绝不超胶囊边框；
 //  超速那一刻中文语音读一次“您已超速行驶，请注意安全”（跟着超速提醒开关走，不另设开关）。
 // v0.3.7 改动：设置页“日期时间”改叫“日期”（时间只在翻页时钟里显示）；和 App 1.3.19 同款。
@@ -344,20 +352,27 @@ static CGRect NEFrameInWindow(UIView *v, UIWindow *w) {
     @try { return [v convertRect:v.bounds toView:w]; } @catch (...) { return CGRectZero; }
 }
 
-// 描述在数字正下方相邻：上沿在数字下沿附近（-4~+60），横向重叠过半
+// 描述在数字正下方或正上方相邻：上沿在数字下沿附近（-4~+60），或下沿在数字上沿附近；横向重叠过半。
+// 双向：续航在数字左侧、最近骑行在数字上方、总里程在数字左侧，这些都要能认出来。
 static BOOL NEFramesVerticallyAdjacent(CGRect lf, CGRect cf) {
     CGFloat top = CGRectGetMinY(cf), bottom = CGRectGetMaxY(lf);
-    if (top < bottom - 4 || top > bottom + 60) return NO;
+    CGFloat topL = CGRectGetMinY(lf), bottomC = CGRectGetMaxY(cf);
+    BOOL below = (top >= bottom - 4 && top <= bottom + 60);
+    BOOL above = (bottomC >= topL - 60 && bottomC <= topL + 4);
+    if (!below && !above) return NO;
     CGFloat ox = MIN(CGRectGetMaxX(cf), CGRectGetMaxX(lf))
                - MAX(CGRectGetMinX(cf), CGRectGetMinX(lf));
     CGFloat w = MIN(CGRectGetWidth(cf), CGRectGetWidth(lf));
     return w > 0 && ox > w * 0.5;
 }
 
-// 描述在数字右侧相邻：左沿在数字右沿附近（-4~+40），纵向重叠过半
+// 描述在数字右侧或左侧相邻：左沿在数字右沿附近（-4~+40），或右沿在数字左沿附近；纵向重叠过半
 static BOOL NEFramesHorizontallyAdjacent(CGRect lf, CGRect cf) {
     CGFloat left = CGRectGetMinX(cf), right = CGRectGetMaxX(lf);
-    if (left < right - 4 || left > right + 40) return NO;
+    CGFloat leftL = CGRectGetMinX(lf), rightC = CGRectGetMaxX(cf);
+    BOOL rightSide = (left >= right - 4 && left <= right + 40);
+    BOOL leftSide = (rightC >= leftL - 40 && rightC <= leftL + 4);
+    if (!rightSide && !leftSide) return NO;
     CGFloat oy = MIN(CGRectGetMaxY(cf), CGRectGetMaxY(lf))
                - MAX(CGRectGetMinY(cf), CGRectGetMinY(lf));
     CGFloat h = MIN(CGRectGetHeight(cf), CGRectGetHeight(lf));
@@ -416,6 +431,32 @@ static BOOL NEHasAdjacentPercentLabel(UILabel *label) {
     return NO;
 }
 
+// 在 label 附近（放宽范围）找含关键字的 label：同一容器内，候选框与 label 框
+// 上下 120px / 左右 300px 内相交。用于里程的“总里程/我的数据”肯定判定——
+// “我的数据”卡片头离数值可能比严格相邻远一点；“总里程”在数值左侧同一行。
+static BOOL NENearbyLabelContainsWide(UILabel *label, NSString *keyword) {
+    if (!label || !keyword.length) return NO;
+    UIWindow *w = NEKeyWindow();
+    if (!w) return NO;
+    CGRect lf = NEFrameInWindow(label, w);
+    if (CGRectIsEmpty(lf)) return NO;
+    CGRect expanded = CGRectInset(lf, -300, -120);
+    NSMutableArray<UILabel *> *cands = [NSMutableArray array];
+    UIView *sup = label.superview;
+    if (!sup) return NO;
+    NECollectLabelsExcept(sup, label, cands);
+    UIView *sup2 = sup.superview;
+    if (sup2) NECollectLabelsExcept(sup2, sup, cands);
+    for (UILabel *cand in cands) {
+        CGRect cf = NEFrameInWindow(cand, w);
+        if (CGRectIsEmpty(cf)) continue;
+        if (!CGRectIntersectsRect(expanded, cf)) continue;
+        NSString *t = NEPlainTextOfLabel(cand);
+        if (t.length && [t rangeOfString:keyword].location != NSNotFound) return YES;
+    }
+    return NO;
+}
+
 // 所有文字替换共用：输入 label 的纯文本（setText: 的 text 或 attributedText.string），
 // 返回替换后的字符串；没有可换的返回 nil。
 // fieldOut/separateOut（可为 NULL）返回命中的字段 key 和是不是“分开 label”式替换。
@@ -467,10 +508,12 @@ static NSString *NEFixedLabelString(NSString *text, UILabel *label,
     }
     // 纯数字才走“分开 label”匹配；先算一次，后面复用
     BOOL isNum = NEIsPureNumberString(text);
-    // 2. 总里程
+    // 2. 总里程 — 只换总里程，绝不换续航/最近骑行。
+    // 有 km 的数才可能是里程：先排除（文本自己或附近 label 含续航/最近骑行/
+    // 骑行/剩余/续航里程/本次/单次），再肯定（附近放宽范围有“总里程”或“我的数据”）。
+    // 认不出是总里程就不换。
     if (gMileage && gMileageValue.length > 0) {
-        // 同 label：整行就是数字+km（如 35624.6 km）→ 整行换成用户填的值。
-        // “60 km/h”这种带 /h 的不匹配（正则要求行尾就是 km），不会误换。
+        BOOL sameKm = NO;
         if ([text rangeOfString:@"km"].location != NSNotFound) {
             static NSRegularExpression *sMileRe = nil;
             static dispatch_once_t sMileOnce;
@@ -479,21 +522,52 @@ static NSString *NEFixedLabelString(NSString *text, UILabel *label,
                            @"^\\s*[\\d,]+(\\.\\d+)?\\s*km\\s*$"
                            options:0 error:nil];
             });
-            if (sMileRe &&
+            sameKm = sMileRe &&
                 [sMileRe numberOfMatchesInString:text options:0
-                                           range:NSMakeRange(0, text.length)] > 0) {
-                if (fieldOut) *fieldOut = @"NEMileage";
-                return gMileageValue;
-            }
+                                           range:NSMakeRange(0, text.length)] > 0;
         }
         // 分开 label：纯数字 + 旁边有“km”（不是 km/h）；旁边有 % 就是电量，不换
-        if (isNum && !NEHasAdjacentPercentLabel(label)) {
-            for (UILabel *cand in NEAdjacentLabels(label)) {
+        BOOL sepKm = NO;
+        NSArray<UILabel *> *adj = nil;
+        if (!sameKm && isNum && !NEHasAdjacentPercentLabel(label)) {
+            adj = NEAdjacentLabels(label);
+            for (UILabel *cand in adj) {
                 NSString *kt = NEPlainTextOfLabel(cand);
                 if (!kt.length || [kt rangeOfString:@"km"].location == NSNotFound) continue;
                 if ([kt rangeOfString:@"km/h"].location != NSNotFound) continue;
+                sepKm = YES;
+                break;
+            }
+        }
+        if (sameKm || sepKm) {
+            static NSArray<NSString *> *sMileSkip = nil;
+            static dispatch_once_t sMileSkipOnce;
+            dispatch_once(&sMileSkipOnce, ^{
+                sMileSkip = @[@"续航", @"最近骑行", @"骑行", @"剩余", @"续航里程", @"本次", @"单次"];
+            });
+            BOOL skip = NO;
+            for (NSString *kw in sMileSkip) {
+                if ([text rangeOfString:kw].location != NSNotFound) { skip = YES; break; }
+            }
+            if (!skip) {
+                if (!adj) adj = NEAdjacentLabels(label);
+                for (UILabel *cand in adj) {
+                    NSString *kt = NEPlainTextOfLabel(cand);
+                    if (!kt.length) continue;
+                    for (NSString *kw in sMileSkip) {
+                        if ([kt rangeOfString:kw].location != NSNotFound) { skip = YES; break; }
+                    }
+                    if (skip) break;
+                }
+            }
+            BOOL isTotal = NO;
+            if (!skip) {
+                isTotal = NENearbyLabelContainsWide(label, @"总里程") ||
+                          NENearbyLabelContainsWide(label, @"我的数据");
+            }
+            if (!skip && isTotal) {
                 if (fieldOut) *fieldOut = @"NEMileage";
-                if (separateOut) *separateOut = YES;
+                if (separateOut) *separateOut = sepKm;
                 return gMileageValue;
             }
         }
@@ -638,6 +712,45 @@ static void NE_UILabel_setAttributedText(id self, SEL _cmd, NSAttributedString *
     orig_UILabel_setAttributedText(self, _cmd, attr);
 }
 
+// 按钮标题钩子：等级/称号那两个药丸可能是 UIButton 的标题（走 setTitle:forState:，
+// 不是 UILabel setText:），label 钩子拦不到。只换 Lv. 开头和“暂无称号”这两个，
+// 别的按钮标题一概不碰。
+static NSString *NEFixedButtonTitleForField(NSString *title, NSString **fieldOut) {
+    if (fieldOut) *fieldOut = nil;
+    if (!title.length) return nil;
+    if (gLevel && gLevelValue.length > 0 &&
+        ([title hasPrefix:@"Lv."] || [title hasPrefix:@"lv."])) {
+        if (fieldOut) *fieldOut = @"NELevel";
+        return gLevelValue;
+    }
+    if (gTitle && gTitleValue.length > 0 &&
+        [title isEqualToString:@"暂无称号"]) {
+        if (fieldOut) *fieldOut = @"NETitle";
+        return gTitleValue;
+    }
+    return nil;
+}
+
+static void (*orig_UIButton_setTitle)(id, SEL, NSString *, UIControlState);
+static void NE_UIButton_setTitle(id self, SEL _cmd, NSString *title, UIControlState state) {
+    if (title.length > 0 && [self isKindOfClass:[UIButton class]]) {
+        NSString *field = nil;
+        NSString *fixed = NEFixedButtonTitleForField(title, &field);
+        if (fixed) {
+            if (field.length)
+                objc_setAssociatedObject(self, &NEAppliedFieldKey, field,
+                                         OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            orig_UIButton_setTitle(self, _cmd, fixed, state);
+            return;
+        }
+    }
+    orig_UIButton_setTitle(self, _cmd, title, state);
+}
+
+// 页面显示刷新钩子（viewDidAppear）的前置声明：定义在图片刷新函数之后，
+// 那里 NEForceRefreshLabels/NEForceRefreshImages 才可见。
+static void NEInstallAppearHookIfNeeded(void);
+
 // UILabel 文字钩子（setText: + setAttributedText:）由 9999 有效期和五个自定义项共用，只装一次。
 static BOOL gLabelHookInstalled = NO;
 static void NEInstallLabelHookIfNeeded(void) {
@@ -663,8 +776,20 @@ static void NEInstallLabelHookIfNeeded(void) {
         else
             os_log(gLog, "[LBL] UILabel setAttributedText: 钩子安装失败（只用 setText:）");
     }
+    // 按钮标题钩子（等级/称号药丸可能是 UIButton）
+    Class btnCls = objc_getClass("UIButton");
+    if (btnCls && class_getInstanceMethod(btnCls, @selector(setTitle:forState:))) {
+        MSHookMessageEx(btnCls, @selector(setTitle:forState:),
+                        (IMP)NE_UIButton_setTitle, (IMP *)&orig_UIButton_setTitle);
+        if (orig_UIButton_setTitle)
+            os_log(gLog, "[LBL] UIButton setTitle:forState: 钩子已装");
+        else
+            os_log(gLog, "[LBL] UIButton setTitle:forState: 钩子安装失败（只用 label 钩子）");
+    }
     gLabelHookInstalled = YES;
     os_log(gLog, "[LBL] UILabel setText 钩子已装");
+    // 页面显示时也要刷新（tab 懒加载，切过去才加载）
+    NEInstallAppearHookIfNeeded();
 }
 
 // 之前被替换过的 label 按当前值重设（开关还开着且值非空才换）。
@@ -721,6 +846,19 @@ static void NEForceRefreshLabelsInView(UIView *view) {
                 } else if (label.text.length) {
                     label.text = label.text;
                 }
+            } @catch (...) {}
+        }
+        // 按钮标题（等级/称号药丸可能是 UIButton）：按当前值重设，走 setTitle: 钩子
+        if ([sub isKindOfClass:[UIButton class]]) {
+            UIButton *btn = (UIButton *)sub;
+            @try {
+                NSString *field = objc_getAssociatedObject(btn, &NEAppliedFieldKey);
+                NSString *val = field.length ? NEFieldCurrentValue(field, NO) : nil;
+                if (!val) {
+                    NSString *t = [btn titleForState:UIControlStateNormal];
+                    if (t.length) val = NEFixedButtonTitleForField(t, NULL);
+                }
+                if (val) [btn setTitle:val forState:UIControlStateNormal];
             } @catch (...) {}
         }
         NEForceRefreshLabelsInView(sub);
@@ -948,6 +1086,8 @@ static void NEInstallImageHooksIfNeeded(void) {
             os_log(gLog, "[IMG] UIImage imageNamed: 钩子已装（本地 asset 兜底）");
     }
     gImageHooksInstalled = YES;
+    // 页面显示时也要刷新图片（tab 懒加载，切过去才加载）
+    NEInstallAppearHookIfNeeded();
 }
 
 // v0.3.9 修复：图片强制刷新——主题图/车图在 App 启动时已加载好，改设置后
@@ -997,6 +1137,55 @@ static void NEForceRefreshImages(void) {
     BOOL isDevice = [sel.tabBarItem.title isEqualToString:@"设备"] || tab.selectedIndex == 0;
     if (!isDevice || !sel.view) return;
     NEForceRefreshImagesInView(sel.view);
+}
+
+// v0.3.9 修复：页面显示时刷新——tab 懒加载，启动 +3 秒刷新时我的/服务页
+// 还没加载，切过去时 label 已设好不再重设，钩子拦不到。viewDidAppear 时
+// 把当前页的文字和图片重算一次（图片只在设备 tab 生效，内部已判断）。
+// 每 VC 节流 1 秒；我们自己的设置页出现时不刷（它没有要换的 App 文字）。
+static NSMutableDictionary<NSString *, NSNumber *> *gAppearThrottle = nil;
+static void (*orig_UIViewController_viewDidAppear)(id, SEL, BOOL);
+static void NE_UIViewController_viewDidAppear(id self, SEL _cmd, BOOL animated) {
+    orig_UIViewController_viewDidAppear(self, _cmd, animated);
+    if (!gLabelHookInstalled && !gHasVehicleImage && !gHasBgImage) return;
+    NSString *clsName = NSStringFromClass([self class]);
+    if ([clsName rangeOfString:@"NEHUDSettings"].location != NSNotFound) return;
+    NSString *key = [NSString stringWithFormat:@"%p", self];
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (!gAppearThrottle) gAppearThrottle = [NSMutableDictionary dictionary];
+    NSNumber *last = gAppearThrottle[key];
+    if (last && now - last.doubleValue < 1.0) return;
+    gAppearThrottle[key] = @(now);
+    if (gAppearThrottle.count > 100) {
+        NSMutableArray<NSString *> *stale = [NSMutableArray array];
+        for (NSString *k in gAppearThrottle) {
+            if (now - [gAppearThrottle[k] doubleValue] > 10.0) [stale addObject:k];
+        }
+        [gAppearThrottle removeObjectsForKeys:stale];
+    }
+    @try {
+        NEForceRefreshLabels();
+        NEForceRefreshImages();
+    } @catch (...) {}
+}
+
+static BOOL gAppearHookInstalled = NO;
+static void NEInstallAppearHookIfNeeded(void) {
+    if (gAppearHookInstalled) return;
+    Class cls = objc_getClass("UIViewController");
+    if (!cls || !class_getInstanceMethod(cls, @selector(viewDidAppear:))) {
+        os_log(gLog, "[LBL] UIViewController/viewDidAppear: 不存在，不装钩子");
+        return;
+    }
+    MSHookMessageEx(cls, @selector(viewDidAppear:),
+                    (IMP)NE_UIViewController_viewDidAppear,
+                    (IMP *)&orig_UIViewController_viewDidAppear);
+    if (!orig_UIViewController_viewDidAppear) {
+        os_log(gLog, "[LBL] UIViewController viewDidAppear: 钩子安装失败");
+        return;
+    }
+    gAppearHookInstalled = YES;
+    os_log(gLog, "[LBL] UIViewController viewDidAppear: 钩子已装");
 }
 
 // ---------------- 天气（Open-Meteo，免费、无 key）----------------
