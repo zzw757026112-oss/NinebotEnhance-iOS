@@ -3662,6 +3662,7 @@ static void NECheckSettingsButton(void) {
     beautyStack.hidden = YES;
     objc_setAssociatedObject(self, &NEBeautyGroupKey, beautyStack,
                              OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    NSUserDefaults *defs = [NSUserDefaults standardUserDefaults];
     [beautyStack addArrangedSubview:[self customDisplayRow:@"服务有效期" toggleKey:@"NEValidity9999" valueKey:@"NEValidityValue" on:NEValidity9999() value:[defs stringForKey:@"NEValidityValue"] placeholder:@"留空显示真实日期"]];
     [beautyStack addArrangedSubview:[self sectionLabel:@"主页车辆图"]];
     [beautyStack addArrangedSubview:[self imagePickRow:@"更换车辆图" kind:0]];
@@ -3676,7 +3677,6 @@ static void NECheckSettingsButton(void) {
     imgNote.numberOfLines = 0;
     [beautyStack addArrangedSubview:imgNote];
     // v0.3.9 追加：五个自定义显示项（开关 + 输入框，自己填想显示的值）
-    NSUserDefaults *defs = [NSUserDefaults standardUserDefaults];
     [beautyStack addArrangedSubview:[self customDisplayRow:@"N币余额" toggleKey:@"NENCoins" valueKey:@"NENCoinsValue" on:NEBoolDefault(@"NENCoins") value:[defs stringForKey:@"NENCoinsValue"] placeholder:@"如 99999"]];
     [beautyStack addArrangedSubview:[self customDisplayRow:@"总里程" toggleKey:@"NEMileage" valueKey:@"NEMileageValue" on:NEBoolDefault(@"NEMileage") value:[defs stringForKey:@"NEMileageValue"] placeholder:@"如 99999.9 km"]];
     [beautyStack addArrangedSubview:[self customDisplayRow:@"等级" toggleKey:@"NELevel" valueKey:@"NELevelValue" on:NEBoolDefault(@"NELevel") value:[defs stringForKey:@"NELevelValue"] placeholder:@"如 Lv.99"]];
