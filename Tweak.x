@@ -108,7 +108,8 @@
 // v0.3.9 第七修（用户实测 cf438018：RN 数字、背景、卡片、仪表页全好了，
 //  唯独车辆图一直没变化）：新诊断（ne-diag-34ae638d.txt，七次设备导出）
 //  证明“最后一个是车辆”是错的——三张满屏图里只有中间那张是可见的
-//  （750x908 主题合成图，狗+车画在一张图里），第一张和第三张一直是 hidden；
+//  （750x908 是用户当时选的狗车辆图，当时误以为是狗+车画在一张图里的主题合成图，
+//  第十一修已纠正），第一张和第三张一直是 hidden；
 //  旧规则把车辆图换到隐藏的第三张（375x385）上，用户永远看不到，
 //  而真正显示的中间那张永远换不上。改：主信号改成“可见”——同级满屏 view
 //  里唯一可见的那张就是用户看到的车辆/主图 → 车辆图，其余（隐藏的背景层）
@@ -160,12 +161,29 @@
 //  要求选中设备 tab，设备根页面 view 一旦加载就常驻层级，在哪个 tab
 //  都能刷（仍只刷 rootPage.view，仪表/骑行子页面不受影响）。
 //  ③ 没有持续重断言：车辆主图只在创建时设一次（那时 view 还没挂载/布局，
-//  分类返回 nil、钩子拦不到），之后 App 再也不重设，所以第二张永远是
-//  750x908 默认图；而 App 会在主题重载时主动重写这些 view（第一张图的
+//  分类返回 nil、钩子拦不到），之后 App 再也不重设，所以旧规则下第二张换不上用户车辆图；而 App 会在主题重载时主动重写这些 view（第一张图的
 //  尺寸每次导出都在变就是证据），一次性刷新拦不住事后重写。改：3 秒定时
 //  器跑一次 NEForceRefreshImages（幂等，已是自定义图的不动），选完图后
 //  1 秒再补刷一次。背景层（第一张，隐藏）仍换背景图，阴影层（第三张，
 //  隐藏）不动逻辑；卡片/仪表页/标题/RN/有效期/HUD 开关一律不动。
+// （第十一修纠正：第十修“中间一张是车辆”是错的，三张全是背景层；见下。）
+// v0.3.9 第十一修（用户实测 f7e1e35b + 新诊断 ne-diag-11500666.txt，
+// 2026-11-22 18:16）：第十修的模型是错的——三张满屏图全是主题/背景层，
+// 中间可见那张是主题画层，不是车辆。证据：18:16:37 导出，中间那张被换成
+// 用户车辆图（蜘蛛侠 1080x1927）后，用户看到的是蜘蛛侠铺满整块背景区、
+// 踏板车本体根本没变；750x908 是用户自己上传的狗车辆图（不是默认主题图，
+// 狗不见了是因为用户把它换成了蜘蛛侠，是预期的），1892x4088 是动漫女孩
+// 车辆图。用户说的“车辆”就是踏板车本体那个小图，“背景”是它后面整块
+// 主题画区。改：① 满屏 view 一律只换背景图（NEImageBySiblingOrder 不再
+// 分车辆，NEIsViewEffectivelyVisible 删掉）；② 车辆图改换踏板车本体——
+// 它是 UITableView 里（header 或首 cell）一个单独的非满屏 UIImageView，
+// 按“view 够大 + 图片够大 + 落在顶部图区”识别（NEVehicleImageForScooterView），
+// set-time 钩子、CALayer 钩子、3 秒定时刷新三处共用同一分类器；
+// ③ 诊断递归深度 8 → 12 层（UITableView 本身已在第 8 层，
+// 它的 header/cell 一直被截掉，踏板车视图从没出现在导出里）。
+// 1290x1562（18:08:27 一三张）约是主题画 @3x（430x3=1290），
+// 不是插件的背景裁切输出（ne-bg.png 裁后是 2160x2617pt）。
+// 标题守卫、背景裁切、RN、有效期、HUD 开关、卡片/仪表页范围一律不动。
 // v0.3.8 改动：超速红行改成“请勿超速行驶！”，字比普通行大但绝不超胶囊边框；
 //  超速那一刻中文语音读一次“您已超速行驶，请注意安全”（跟着超速提醒开关走，不另设开关）。
 // v0.3.7 改动：设置页“日期时间”改叫“日期”（时间只在翻页时钟里显示）；和 App 1.3.19 同款。
@@ -1580,7 +1598,9 @@ static NSString *NERNTextOfView(UIView *v) {
     return nil;
 }
 
-// 递归走子树：深度最多 8 层、总视图数最多 2000，超了就停（文件别太大）。
+// 递归走子树：深度最多 12 层、总视图数最多 2000，超了就停（文件别太大）。
+// （第十一修：UITableView 本身已在第 8 层，8 层会把它的 header/cell 全截掉，
+// 踏板车视图一直在表里，从没出现在导出里；提到 12 层。）
 // 每个 label 多记一列“匹配器会怎么换”——直接跑 NEFixedLabelString（纯读，
 // 无副作用），一眼看出哪个没认出来、为什么。RN 文本也跑同一匹配器
 // （它只用 label.superview/frame 等 UIView 层面的东西，不调 UILabel 专有
@@ -1588,7 +1608,7 @@ static NSString *NERNTextOfView(UIView *v) {
 // 不是 UILabel，所以 RN 的 verdict 只含同 label 规则，纯数字需看 frame 人工判断。
 static void NEDumpDiagViewRec(UIView *v, UIView *root, NSMutableString *out,
                               int depth, int *count) {
-    if (!v || depth > 8 || *count >= 2000) return;
+    if (!v || depth > 12 || *count >= 2000) return;
     (*count)++;
     NSMutableString *indent = [NSMutableString string];
     for (int i = 0; i < depth; i++) [indent appendString:@"  "];
@@ -1866,89 +1886,64 @@ static BOOL NEViewIsOnDeviceTab(UIView *v);
 // 只认“设备”tab 的根页面（不含 push 出去的子页面，如仪表/骑行页）：
 // 换图管太宽会把自定义车辆图错换到仪表页背景上。定义在后面，这里先声明。
 static BOOL NEViewIsOnDeviceRootPage(UIView *v);
+// 踏板车识别要换算到根页面坐标，NEDeviceRootPageVC 定义在后面，这里先声明。
+static UIViewController *NEDeviceRootPageVC(void);
 
-// 背景 vs 车辆：主信号是 view 在同级里的顺序，不是图片尺寸。
-// 诊断（ne-diag.txt，两次）证明：设备页容器里有三张满屏 UIImageView，
-// 车辆图画在满屏透明画布上，frame 和背景图一模一样（0,0,430,521），
-// 按 frame/尺寸分，车辆永远被当成背景——车辆槽位显示背景图的根因
-// （用户实测：背景和车辆选了不同的图，车辆处却显示背景图；换背景图后
-// 三张 view 全跟着变，全是背景图尺寸）。
-// 而且用户自选背景是竖图（2458x4096、2160x4790），车图也可能是竖图，
-// 按纵横比分也不稳。所以：容器里最后一个 UIImageView 是车辆层
-// （两个 UIViews 之后、UITableView 之前），之前的 UIImageView 都是背景层。
-// 顺序拿不到时（view 还没挂进层级）才退到纵横比，且只认“近似正方形 → 背景”
-// （主题背景 1440x1440 正好是正方形）；非正方形的不换，等刷新时再按顺序换。
-// 返回要换成的自定义图；nil = 不换。
-// 这个 view 是不是实际显示出来的（自己和所有祖先都没藏、alpha>0）。
-// 诊断（ne-diag-34ae638d.txt，七次设备导出）证明：设备页三张满屏图里
-// 只有中间那张是可见的（750x908 主题合成图，狗+车画在一张图里），
-// 第一张和第三张一直是 hidden——按“最后一个是车辆”分，会把车辆图换到
-// 隐藏的第三张（375x385）上，用户永远看不到，而真正显示的中间那张
-// 永远换不上——车辆图一直没变化的根因。
-// （第十修更新：三张时不再按可见分，直接认中间一张是车辆，见
-// NEImageBySiblingOrder；可见判定只在不是三张时作退路。）
-static BOOL NEIsViewEffectivelyVisible(UIView *v) {
-    UIView *p = v;
-    while (p) {
-        if (p.hidden || p.alpha <= 0.01) return NO;
-        p = p.superview;
-    }
-    return YES;
+// 背景 vs 车辆（第十一修，模型纠正）：设备页容器里三张满屏 UIImageView
+// （0,0,430,521）全是主题/背景层，中间可见那张是主题画层——用户车辆图
+// （狗 750x908、蜘蛛侠 1080x1927、动漫女孩 1892x4088）都曾落在这里，
+// 用户看到的是它们铺满整块背景区、踏板车本体根本没变，这就是一直报的
+// “改车辆图却换了背景图”。第十修“中间一张是车辆”是错的（750x908 不是
+// 默认主题图，是用户自己上传的狗车辆图；狗不见了是因为用户把它换成了
+// 蜘蛛侠，是预期的）。所以：满屏 view 一律只换背景图（按 view 纵横比裁
+// 显示版，第八修），再也不分车辆；没有自定义背景时不换，主题画保持原样。
+// 踏板车是 UITableView 里（header 或首 cell）一个单独的非满屏
+// UIImageView，见 NEVehicleImageForScooterView；诊断递归深度上限 8 层、
+// UITableView 本身已在第 8 层，所以它从没出现在导出里（第十一修把深度
+// 提到 12）。返回要换成的自定义图；nil = 不换。
+
+// 第十一修：踏板车视图识别。只认同时满足以下四条的非满屏 UIImageView：
+// ① view 够大（宽 ≥150、高 ≥50，卡片缩略图/图标进不来）；
+// ② 图片够大（宽 ≥150、高 ≥50）；③ 换算到设备根页面坐标后落在顶部图区
+// （与 0..560pt 相交，卡片都在图区下面）；④ 有自定义车辆图。
+// 未布局（bounds/换算 frame 为空）时不判，等 3 秒定时刷新布局好后再换。
+// 只给车辆图（不裁剪，原图直设）；满屏三张仍走 NEImageBySiblingOrder
+// 给背景图，两者不再交叉。
+static UIImage *NEVehicleImageForScooterView(UIImageView *iv, UIImage *image) {
+    if (!iv || !image) return nil;
+    if (![NSThread isMainThread]) return nil;
+    UIImage *veh = NECustomVehicleImage();
+    if (!veh) return nil;
+    CGSize bs = iv.bounds.size;
+    if (bs.width < 150 || bs.height < 50) return nil;
+    CGFloat w = image.size.width, h = image.size.height;
+    if (w < 150 || h < 50) return nil;
+    UIViewController *rootPage = NEDeviceRootPageVC();
+    if (!rootPage || !rootPage.view) return nil;
+    CGRect f = [iv convertRect:iv.bounds toView:rootPage.view];
+    if (CGRectIsEmpty(f) || f.size.width <= 0 || f.size.height <= 0) return nil;
+    if (f.origin.y >= 560 || f.origin.y + f.size.height <= 0) return nil;
+    return veh;
 }
 
+// 满屏大 view 只换背景图（第十一修）：不再按同级顺序/可见分车辆——
+// 三张满屏图全是背景层，车辆（踏板车本体）不在其中，见上。
+// veh 参数保留只为兼容调用点（NEClassifyDeviceImage / NEImageForSDURL）。
 static UIImage *NEImageBySiblingOrder(UIImageView *iv, UIImage *bg, UIImage *veh) {
-    UIView *parent = iv.superview;
-    if (!parent) return nil;
-    // 只对满屏大 view 用顺序判定：宽 >= 屏宽 0.9 且高 >= 屏高 0.5
+    (void)veh;
+    // 只对满屏大 view：宽 >= 屏宽 0.9 且高 >= 屏高 0.5
     // （诊断里三张图都是 430x521）；小图走不到这里。
     CGSize bs = iv.bounds.size;
     CGFloat sw = [UIScreen mainScreen].bounds.size.width;
     CGFloat sh = [UIScreen mainScreen].bounds.size.height;
     if (bs.width < sw * 0.9 || bs.height < sh * 0.5) return nil;
-    // 收集同级满屏 view（保持 subviews 顺序）。
-    UIImageView *full[16];
-    NSInteger fullCount = 0;
-    for (UIView *sub in parent.subviews) {
-        if (![sub isKindOfClass:[UIImageView class]]) continue;
-        CGSize s = sub.bounds.size;
-        if (s.width < sw * 0.9 || s.height < sh * 0.5) continue;
-        if (fullCount < 16) full[fullCount] = (UIImageView *)sub;
-        fullCount++;
-    }
-    if (fullCount < 2) return nil;
-    // 主信号：同级顺序（第十修）。诊断（ne-diag-807ae3b2.txt，十一次设备导出）
-    // 证明三张满屏图顺序恒定：第一张是隐藏的背景层、中间一张是可见的车辆主图
-    // （750x908 主题合成图，狗+车画在一张图里）、第三张是隐藏的阴影层
-    // （375x385）。第七修按“可见”分是错的——主题重载瞬间可见状态是过渡态，
-    // 14:56 那次导出：可见的第二张被当成背景换上了 2160x4790 背景图，就是
-    // 用户说的“改车辆图却换了背景图”。所以三张时直接认中间一张是车辆，
-    // 其余是背景，完全不看可见状态；不是三张时退回“最后一个可见是车辆”
-    // 的老规则（一张都不可见时不判，等显示出来再判）。
-    UIImageView *vehicleView = nil;
-    if (fullCount == 3) {
-        vehicleView = full[1];
-    } else {
-        for (NSInteger i = 0; i < fullCount && i < 16; i++) {
-            if (NEIsViewEffectivelyVisible(full[i])) vehicleView = full[i];
-        }
-        if (!vehicleView) return nil;
-    }
-    UIImage *result = (vehicleView == iv) ? veh : bg;
-    // 背景图返回前按 view 纵横比裁好显示版（第八修）；车辆图不动。
-    if (result == bg) result = NEBackgroundDisplayImage(bg, iv.bounds.size);
-    return result;
+    if (!bg) return nil;
+    // 背景图返回前按 view 纵横比裁好显示版（第八修）。
+    return NEBackgroundDisplayImage(bg, iv.bounds.size);
 }
 
 static UIImage *NEClassifyDeviceImage(UIImageView *iv, UIImage *image) {
     if (!image || !iv) return nil;
-    // 只换满屏大视图：卡片缩略图/图标的 view 很小，哪怕素材本身是高清图
-    // 也不换（新手任务卡片就是这么被换掉的：素材高清，view 只有一百多像素，
-    // 旧代码只按图片像素尺寸跳过小图，根本拦不住）。view 还没布局好
-    // （bounds 还是 0）时也不换，等刷新时 bounds 正常了再判。
-    CGSize bs = iv.bounds.size;
-    CGFloat sw = [UIScreen mainScreen].bounds.size.width;
-    CGFloat sh = [UIScreen mainScreen].bounds.size.height;
-    if (bs.width < sw * 0.9 || bs.height < sh * 0.5) return nil;
     UIImage *bg = NECustomBackgroundImage();
     UIImage *veh = NECustomVehicleImage();
     if (!bg && !veh) return nil;
@@ -1958,18 +1953,20 @@ static UIImage *NEClassifyDeviceImage(UIImageView *iv, UIImage *image) {
     CGFloat w = image.size.width, h = image.size.height;
     // 小图（图标/头像）一概不碰
     if (w < 200 && h < 200) return nil;
-    // 主信号：同级顺序（第七修：按“可见”分，唯一可见的满屏 view 是车辆）
-    UIImage *byOrder = NEImageBySiblingOrder(iv, bg, veh);
-    if (byOrder) return byOrder;
-    // 拿不到顺序：只认近似正方形 → 背景；其余不换，等刷新时按顺序换。
-    if (w > 0 && h > 0) {
-        CGFloat ratio = w / h;
-        if (ratio >= 0.98 && ratio <= 1.02) return NEBackgroundDisplayImage(bg, iv.bounds.size);
+    CGSize bs = iv.bounds.size;
+    CGFloat sw = [UIScreen mainScreen].bounds.size.width;
+    CGFloat sh = [UIScreen mainScreen].bounds.size.height;
+    if (bs.width >= sw * 0.9 && bs.height >= sh * 0.5) {
+        // 满屏大视图：三张主题/背景层（第十一修：全是背景层，中间可见那张
+        // 是主题画层，车辆不在其中）→ 背景图；没有自定义背景时不换。
+        return NEImageBySiblingOrder(iv, bg, veh);
     }
-    return nil;
+    // 非满屏：踏板车视图（第十一修）——见 NEVehicleImageForScooterView。
+    // 卡片缩略图进不来：view 小（~100px）或在图区下面，都被那里的 gate 拦住。
+    return NEVehicleImageForScooterView(iv, image);
 }
 
-// SDWebImage 的 URL 判定：只按同级顺序，不再按 URL 关键字分背景/车辆。
+// SDWebImage 的 URL 判定：满屏 view 只换背景图，不再按 URL 关键字分背景/车辆。
 // 关键字误伤太多——新手任务卡片的图 URL 里就有 vehicle/car 这类词，
 // 顶部背景图的 URL 也可能含 vehicle，都会被错换成车辆图。
 // 小 view（卡片缩略图）直接放行；判定不出就返回 nil，等图片下完走
@@ -2287,9 +2284,9 @@ static void NEForceRefreshImagesInView(UIView *view) {
             UIImage *img = iv.image;
             if (img) {
                 @try {
-                    // 背景/车辆按 NEClassifyDeviceImage 区分（主信号是可见+同级顺序，
-                    // 不按尺寸——车辆画在满屏画布上，按尺寸分会错换成背景图）。
-                    // 顺序判定不依赖当前图片的纵横比，所以换图后刷新（缓存已清、
+                    // 背景/车辆按 NEClassifyDeviceImage 区分（第十一修：满屏三张
+                    // 是背景层→背景图，踏板车本体（表头里非满屏 view）→车辆图）。
+                    // 分类不依赖当前图片的纵横比，所以换图后刷新（缓存已清、
                     // 当前图是旧自定义图）也能分对；已是当前自定义图的直接放行。
                     // 直接赋值走 setImage: 钩子再算一次也是同一张图，不会循环。
                     UIImage *custom = NEClassifyDeviceImage(iv, img);
@@ -2344,8 +2341,8 @@ static void NEForceRefreshImages(void) {
 // 导出都在变：942x1672、2160x4790、1206x2674、375x454、750x908、1892x4088，
 // 证明 App 在主动重写它们），而一次性刷新（选完图/切 tab 时）拦不住事后
 // 重写；set-time 钩子又只在 view 已挂载且已布局时才分得清，创建时预设的
-// 那一次拦不到——车辆主图只在创建时设一次、之后再也不重设，所以钩子永远
-// 没机会，第二张永远是 750x908 默认图。3 秒跑一次强制刷新，幂等（已是
+// 那一次拦不到——踏板车本体图和主题图只在创建时设一次，之后 App 会主动
+// 重写，钩子永远没机会。3 秒跑一次强制刷新，幂等（已是
 // 自定义图的不动，只是指针比较），把被 App 盖回去的图再换回来。
 static NSTimer *gImageRefreshTimer = nil;
 static void NEStartImageRefreshTimerIfNeeded(void) {
