@@ -184,6 +184,18 @@
 // 1290x1562（18:08:27 一三张）约是主题画 @3x（430x3=1290），
 // 不是插件的背景裁切输出（ne-bg.png 裁后是 2160x2617pt）。
 // 标题守卫、背景裁切、RN、有效期、HUD 开关、卡片/仪表页范围一律不动。
+// v0.3.9 第十二修（用户实测 60a60261 + 视频，2026-11-22 19:57）：换车辆图
+// 已修好（踏板车本体能换），但点“恢复原图”后设备页还显示自定义图，只有
+// 划掉 App 重开才还原。根因：恢复只删文件/清 key/清缓存，从没把原图设回去；
+// NEForceRefreshImages 还在“没自定义图”时直接 return，刷新只会贴自定义图，
+// 不会贴回原图。改：① 换图时把 App 的原图按（车辆/背景）暂存到 view 上
+// （associated object，@[原图, 当时换上去的自定义图]；SD 直下原 URL 的
+// 改存原 URL）；② 恢复时 clearImageTapped 立刻刷一次 + 1 秒再刷一次，
+// NEForceRefreshImages 不再因“没自定义图”跳过，刷新走过、当前图还是我们
+// 那张旧自定义图时就把暂存的原图设回去（按种类 + 几何再验，防止 cell 复用
+// 还错 view；App 已自己换了别的图时只清过期暂存、不动当前图）；③ 设置页
+// “重启九号 App”的提示删掉，恢复现在是立即生效。UIButton 背景图那条路没
+// 暂存（只见过 UIImageView 的满屏图），恢复不到它的话再补。
 // v0.3.8 改动：超速红行改成“请勿超速行驶！”，字比普通行大但绝不超胶囊边框；
 //  超速那一刻中文语音读一次“您已超速行驶，请注意安全”（跟着超速提醒开关走，不另设开关）。
 // v0.3.7 改动：设置页“日期时间”改叫“日期”（时间只在翻页时钟里显示）；和 App 1.3.19 同款。
@@ -1845,6 +1857,63 @@ static void NEClearImageCache(void) {
     [gImageLock unlock];
 }
 
+// v0.3.9 第十二修：恢复原图立即生效——还原用的原图暂存。换图时把 App 正在设
+// 的那张原图按（车辆/背景）分别挂在 view 上（associated object，view 释放
+// 时自动清），恢复原图时刷新走过就把原图设回去，不用等 App 重建 view /
+// 重启。只在原图被换掉的那个 view 上暂存，卡片/图标不进。暂存的是
+// @[原图, 当时换上去的自定义图] 这一对：恢复时只认“现在还显示着我们那张
+// 自定义图”的 view，App 已经自己换了别的图时只清掉过期的暂存、不动当前图。
+// SD 直下原 URL 的那条路没有原图可存，改存原 URL，恢复时重下一遍。
+// 注意：暂存和图片缓存是两套东西——NEClearImageCache 只清 gVehicleImage /
+// gBgImage，不清暂存（恢复正要用它）。
+static const char NEVehicleOriginalImageKey = 0;
+static const char NEBackgroundOriginalImageKey = 0;
+static const char NEOriginalImageURLKey = 0;
+static void NEStashOriginalImage(UIImageView *iv, UIImage *original, UIImage *custom, NSInteger kind) {
+    if (!iv || !original || !custom) return;
+    const char *key = (kind == 0) ? &NEVehicleOriginalImageKey : &NEBackgroundOriginalImageKey;
+    objc_setAssociatedObject(iv, key, @[original, custom], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+static NSArray *NEStashedOriginalPair(UIImageView *iv, NSInteger kind) {
+    if (!iv) return nil;
+    const char *key = (kind == 0) ? &NEVehicleOriginalImageKey : &NEBackgroundOriginalImageKey;
+    id v = objc_getAssociatedObject(iv, key);
+    return [v isKindOfClass:[NSArray class]] ? (NSArray *)v : nil;
+}
+static void NEClearStashedOriginalImage(UIImageView *iv, NSInteger kind) {
+    if (!iv) return;
+    const char *key = (kind == 0) ? &NEVehicleOriginalImageKey : &NEBackgroundOriginalImageKey;
+    objc_setAssociatedObject(iv, key, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+static void NEStashOriginalURL(UIImageView *iv, NSURL *url) {
+    if (!iv || !url) return;
+    objc_setAssociatedObject(iv, &NEOriginalImageURLKey, url, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+static NSURL *NEStashedOriginalURL(UIImageView *iv) {
+    if (!iv) return nil;
+    id v = objc_getAssociatedObject(iv, &NEOriginalImageURLKey);
+    return [v isKindOfClass:[NSURL class]] ? (NSURL *)v : nil;
+}
+static void NEClearStashedOriginalURL(UIImageView *iv) {
+    if (!iv) return;
+    objc_setAssociatedObject(iv, &NEOriginalImageURLKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+// 换上自定义图之前，先把要被盖掉的那张图暂存为“原图”。currentImg 是 view
+// 现在那张图（App 的图）；custom 是要换上的自定义图。例外：currentImg 如
+// 果就是上一次换上去的旧自定义图（用户又选了张新图），那它不是原图——只
+// 把暂存里的 applied 更新成新图，原图不动；如果这 view 的原图要靠 SD 重
+// 下（暂存了原 URL），也不从 currentImg 里取。
+static void NEStashOriginalBeforeReplace(UIImageView *iv, UIImage *currentImg, UIImage *custom, NSInteger kind) {
+    if (!iv || !currentImg || !custom) return;
+    NSArray *existing = NEStashedOriginalPair(iv, kind);
+    if (existing.count == 2 && currentImg == existing[1]) {
+        NEStashOriginalImage(iv, existing[0], custom, kind);
+        return;
+    }
+    if (NEStashedOriginalURL(iv)) return;
+    NEStashOriginalImage(iv, currentImg, custom, kind);
+}
+
 // 背景图显示版（第八修）：把用户竖图按目标 view 的纵横比从顶部裁成一张
 // 显示版再设上去。只裁不拉伸（CGImage 像素裁，不重采样，不丢清晰度）。
 // 原图比 view 更竖才裁（这时 aspectFill 会上下切）；纵横比已接近（±2%）
@@ -1909,20 +1978,28 @@ static UIViewController *NEDeviceRootPageVC(void);
 // 未布局（bounds/换算 frame 为空）时不判，等 3 秒定时刷新布局好后再换。
 // 只给车辆图（不裁剪，原图直设）；满屏三张仍走 NEImageBySiblingOrder
 // 给背景图，两者不再交叉。
+// 第十二修：踏板车视图的几何判定（不含“有没有自定义图”），供换图和恢复原图共用。
+static BOOL NEIsScooterViewGeometry(UIImageView *iv, UIImage *image) {
+    if (!iv || !image) return NO;
+    if (![NSThread isMainThread]) return NO;
+    CGSize bs = iv.bounds.size;
+    if (bs.width < 150 || bs.height < 50) return NO;
+    CGFloat w = image.size.width, h = image.size.height;
+    if (w < 150 || h < 50) return NO;
+    UIViewController *rootPage = NEDeviceRootPageVC();
+    if (!rootPage || !rootPage.view) return NO;
+    CGRect f = [iv convertRect:iv.bounds toView:rootPage.view];
+    if (CGRectIsEmpty(f) || f.size.width <= 0 || f.size.height <= 0) return NO;
+    if (f.origin.y >= 560 || f.origin.y + f.size.height <= 0) return NO;
+    return YES;
+}
+
 static UIImage *NEVehicleImageForScooterView(UIImageView *iv, UIImage *image) {
     if (!iv || !image) return nil;
     if (![NSThread isMainThread]) return nil;
     UIImage *veh = NECustomVehicleImage();
     if (!veh) return nil;
-    CGSize bs = iv.bounds.size;
-    if (bs.width < 150 || bs.height < 50) return nil;
-    CGFloat w = image.size.width, h = image.size.height;
-    if (w < 150 || h < 50) return nil;
-    UIViewController *rootPage = NEDeviceRootPageVC();
-    if (!rootPage || !rootPage.view) return nil;
-    CGRect f = [iv convertRect:iv.bounds toView:rootPage.view];
-    if (CGRectIsEmpty(f) || f.size.width <= 0 || f.size.height <= 0) return nil;
-    if (f.origin.y >= 560 || f.origin.y + f.size.height <= 0) return nil;
+    if (!NEIsScooterViewGeometry(iv, image)) return nil;
     return veh;
 }
 
@@ -1987,7 +2064,10 @@ static void NE_sd_setImageWithURL(id self, SEL _cmd, NSURL *url) {
     if (url && (gHasVehicleImage || gHasBgImage)) {
         UIImage *custom = NEImageForSDURL((UIImageView *)self, url);
         if (custom) {
-            // setImage: 兜底钩子与 SDWebImage 钩子互斥安装，这里直接调不会递归
+            // 第十二修：这条路不走 setImage:（原图根本没下下来），改存原 URL，
+            // 恢复原图时重下一遍。setImage: 兜底钩子与 SDWebImage 钩子互斥安装，
+            // 这里直接调不会递归
+            NEStashOriginalURL((UIImageView *)self, url);
             [(UIImageView *)self setImage:custom];
             return;
         }
@@ -2002,6 +2082,8 @@ static void NE_sd_setImageWithURL_ctx(id self, SEL _cmd, NSURL *url, id placehol
     if (url && (gHasVehicleImage || gHasBgImage)) {
         UIImage *custom = NEImageForSDURL((UIImageView *)self, url);
         if (custom) {
+            // 第十二修：同上，存原 URL 供恢复时重下。
+            NEStashOriginalURL((UIImageView *)self, url);
             [(UIImageView *)self setImage:custom];
             if (completed) {
                 void (^cb)(id, id, NSInteger, id) = completed;
@@ -2024,6 +2106,11 @@ static void NE_UIImageView_setImage(id self, SEL _cmd, UIImage *image) {
     if (image && (gHasVehicleImage || gHasBgImage) && NEViewIsOnDeviceRootPage((UIImageView *)self)) {
         UIImage *custom = NEClassifyDeviceImage((UIImageView *)self, image);
         if (custom) {
+            // 第十二修：先把 App 的原图暂存（恢复原图时设回去）；每次都覆盖，
+            // App 重载主题后暂存的也是最新原图。custom 是车辆图就是 0，否则是背景图。
+            UIImage *veh = NECustomVehicleImage();
+            NSInteger kind = (veh && custom == veh) ? 0 : 1;
+            NEStashOriginalBeforeReplace((UIImageView *)self, image, custom, kind);
             orig_UIImageView_setImage(self, _cmd, custom);
             return;
         }
@@ -2091,6 +2178,8 @@ static void NE_CALayer_setContents(id self, SEL _cmd, id contents) {
                                 UIImage *incoming = [UIImage imageWithCGImage:(CGImageRef)contents];
                                 UIImage *custom = incoming ? NEClassifyDeviceImage(iv, incoming) : nil;
                                 if (custom && custom.CGImage) {
+                                    // 第十二修：暂存 App 要写的原图（图层直写的满屏 view 都是背景层）。
+                                    NEStashOriginalBeforeReplace(iv, incoming, custom, 1);
                                     orig_CALayer_setContents(self, _cmd, (__bridge id)custom.CGImage);
                                     return;
                                 }
@@ -2277,6 +2366,67 @@ static BOOL NEViewIsOnDeviceRootPage(UIView *v) {
     return YES;
 }
 
+// 第十二修：把一个 view 恢复成暂存的原图。只在它现在还显示着我们换上去的
+// 那张自定义图（iv.image 或 layer.contents 还是当时那张）时才还；App 已经
+// 自己换了别的图时只清掉过期的暂存、不动当前图。按种类 + 几何再验一次，
+// 防止 UITableView cell 复用后把原图还到别的 view 上。SD 直下的原图没有
+// 图片暂存，改重下原 URL（SDWebImage 读缓存，不用等网）。
+static void NERestoreOriginalImageIfNeeded(UIImageView *iv, UIImage *currentImg) {
+    if (!iv || ![NSThread isMainThread]) return;
+    BOOL hadImageStash = NO;
+    // 车辆原图
+    NSArray *pairV = NEStashedOriginalPair(iv, 0);
+    if (pairV.count == 2) {
+        hadImageStash = YES;
+        UIImage *orig = pairV[0]; UIImage *applied = pairV[1];
+        BOOL showingCustom = (currentImg == applied) ||
+            (iv.layer.contents && applied.CGImage &&
+             iv.layer.contents == (__bridge id)applied.CGImage);
+        if (showingCustom) {
+            if (NEIsScooterViewGeometry(iv, orig)) {
+                iv.image = orig;
+                @try { if (orig.CGImage) iv.layer.contents = (__bridge id)orig.CGImage; } @catch (...) {}
+                NEClearStashedOriginalImage(iv, 0);
+            }
+            // 几何还没就绪（未布局）→ 暂存留着，下次刷新再试
+        } else {
+            NEClearStashedOriginalImage(iv, 0);
+        }
+    }
+    // 背景原图
+    NSArray *pairB = NEStashedOriginalPair(iv, 1);
+    if (pairB.count == 2) {
+        hadImageStash = YES;
+        UIImage *orig = pairB[0]; UIImage *applied = pairB[1];
+        BOOL showingCustom = (currentImg == applied) ||
+            (iv.layer.contents && applied.CGImage &&
+             iv.layer.contents == (__bridge id)applied.CGImage);
+        if (showingCustom) {
+            CGSize bs = iv.bounds.size;
+            CGFloat sw = [UIScreen mainScreen].bounds.size.width;
+            CGFloat sh = [UIScreen mainScreen].bounds.size.height;
+            if (bs.width >= sw * 0.9 && bs.height >= sh * 0.5) {
+                iv.image = orig;
+                @try { if (orig.CGImage) iv.layer.contents = (__bridge id)orig.CGImage; } @catch (...) {}
+                NEClearStashedOriginalImage(iv, 1);
+            }
+        } else {
+            NEClearStashedOriginalImage(iv, 1);
+        }
+    }
+    // SD 直下的原图：没有图片暂存时重下原 URL（读 SD 缓存，很快）。
+    // 有图片暂存时不用它——原图已经从暂存还回去了。
+    NSURL *origURL = NEStashedOriginalURL(iv);
+    if (origURL && !hadImageStash) {
+        NEClearStashedOriginalURL(iv);
+        if (orig_sd_setImageWithURL) {
+            @try { orig_sd_setImageWithURL(iv, @selector(sd_setImageWithURL:), origURL); } @catch (...) {}
+        } else if (orig_sd_setImageWithURL_ctx) {
+            @try { orig_sd_setImageWithURL_ctx(iv, @selector(sd_setImageWithURL:placeholderImage:options:context:progress:completed:), origURL, nil, 0, nil, nil, nil); } @catch (...) {}
+        }
+    }
+}
+
 static void NEForceRefreshImagesInView(UIView *view) {
     for (UIView *sub in view.subviews) {
         if ([sub isKindOfClass:[UIImageView class]]) {
@@ -2291,27 +2441,37 @@ static void NEForceRefreshImagesInView(UIView *view) {
                     // 直接赋值走 setImage: 钩子再算一次也是同一张图，不会循环。
                     UIImage *custom = NEClassifyDeviceImage(iv, img);
                     if (custom && custom != img) {
+                        // 第十二修：先把 App 当前那张原图暂存（恢复原图时设回去），
+                        // 再换自定义图。见 NEStashOriginalBeforeReplace。
+                        UIImage *veh = NECustomVehicleImage();
+                        NSInteger kind = (veh && custom == veh) ? 0 : 1;
+                        NEStashOriginalBeforeReplace(iv, img, custom, kind);
                         iv.image = custom;
                         // 若 App 绕开 setImage: 直接写了 layer.contents（显示内容
                         // 会盖过 UIImageView.image），只换 iv.image 显示换不上；
                         // 把图层内容也同步成自定义图。CGImage 为 nil 时不碰。
                         @try { if (custom.CGImage) iv.layer.contents = (__bridge id)custom.CGImage; } @catch (...) {}
                     } else {
-                        // iv.image 已经是自定义图（custom 为 nil 是放行），但
+                        // 当前图已经是自定义图（custom 为 nil 是放行），但
                         // layer.contents 可能被 App 覆盖回主题图——图层内容会盖过
                         // image 显示，刷新时只看 iv.image 就发现不了。若图层内容
                         // 不是当前自定义图，重新同步一次。
-                        UIImage *expected = nil;
                         UIImage *bgNow = NECustomBackgroundImage();
                         UIImage *vehNow = NECustomVehicleImage();
                         // 显示版也是自定义图：当前图是显示版时，按显示版同步图层。
-                        if (bgNow && (img == bgNow || img == gBgDisplayImage)) expected = img;
-                        else if (vehNow && img == vehNow) expected = vehNow;
-                        if (expected && expected.CGImage) {
-                            @try {
-                                if (iv.layer.contents != (__bridge id)expected.CGImage)
-                                    iv.layer.contents = (__bridge id)expected.CGImage;
-                            } @catch (...) {}
+                        BOOL imgIsActiveCustom = (bgNow && (img == bgNow || img == gBgDisplayImage)) ||
+                                                 (vehNow && img == vehNow);
+                        if (imgIsActiveCustom) {
+                            if (img && img.CGImage) {
+                                @try {
+                                    if (iv.layer.contents != (__bridge id)img.CGImage)
+                                        iv.layer.contents = (__bridge id)img.CGImage;
+                                } @catch (...) {}
+                            }
+                        } else {
+                            // 第十二修：没有自定义图再管这个 view，但它以前被换过
+                            // （暂存了原图）——现在就是恢复原图的时机，把原图设回去。
+                            NERestoreOriginalImageIfNeeded(iv, img);
                         }
                     }
                 } @catch (...) {}
@@ -2322,7 +2482,9 @@ static void NEForceRefreshImagesInView(UIView *view) {
 }
 
 static void NEForceRefreshImages(void) {
-    if (!gHasVehicleImage && !gHasBgImage) return;
+    // 第十二修：不能再在“没自定义图”时直接 return——恢复原图后两个 flag 都
+    // 是 NO，但设备页上还留着旧自定义图，正要靠这一遍把它换回暂存的原图。
+    // 没自定义图也没暂存时这一遍只是空走（指针比较），开销可忽略。
     // 第十修：不再要求当前选中的是设备 tab——设置页是从“我的”tab 弹出的
     // modal，选完图那一刻 selectedViewController 是“我的”，旧的 isDevice
     // 判断直接 return，savePickedImage 里“选完图立刻刷新”等于没跑——这
@@ -3753,7 +3915,7 @@ static void NECheckSettingsButton(void) {
     [beautyStack addArrangedSubview:[self imagePickRow:@"更换背景图" kind:1]];
     [beautyStack addArrangedSubview:[self imageClearRow:@"恢复原背景" kind:1]];
     UILabel *imgNote = [UILabel new];
-    imgNote.text = @"换图只换“设备”主页上的显示，不改车辆数据。选完回设备页就能看到；如果还是原图，切换一下 tab 或重启九号 App（图片可能已被缓存）。";
+    imgNote.text = @"换图只换“设备”主页上的显示，不改车辆数据。选完、恢复完回设备页马上就能看到。";
     imgNote.font = [UIFont systemFontOfSize:13];
     imgNote.textColor = [UIColor secondaryLabelColor];
     imgNote.numberOfLines = 0;
@@ -4162,6 +4324,12 @@ static void NECheckSettingsButton(void) {
     if (kind == 0) gHasVehicleImage = NO; else gHasBgImage = NO;
     NEClearImageCache();
     [self refreshImageStatus];
+    // 第十二修：立刻把设备页的图恢复成暂存的原图，不用等切 tab / 重启
+    //（savePickedImage 同款：立刻刷一次 + 1 秒后再刷一次，防 App 异步重载）。
+    NEForceRefreshImages();
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        @try { NEForceRefreshImages(); } @catch (...) {}
+    });
     os_log(gLog, "[IMG] 已恢复原%{public}@", kind == 0 ? @"车辆图" : @"背景图");
 }
 
