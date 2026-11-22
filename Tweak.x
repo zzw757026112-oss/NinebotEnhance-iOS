@@ -73,6 +73,18 @@
 //  / NEImageBySiblingOrder）；已是自定义图的放行，不来回换；换图后刷新
 //  （缓存已清、当前图是旧自定义图）也能分对，因为顺序判定不依赖当前图片。
 //  我的/服务页（React Native）的值仍不动，是另一回事，不在这次改动里。
+// v0.3.9 第五修（用户视频实测：车辆图跑到仪表/骑行页背景上了）：
+//  根因不是分类，是页面范围——NEViewIsOnDeviceTab 对“设备”tab 导航栈里
+//  任何页面都返回 YES，仪表/骑行页是 push 出去的子页面，它的满屏背景
+//  也被当成“车辆层”，自定义车辆图就错换到仪表页背景上；设备页自己的
+//  车辆槽位反而没换上。改：图片替换只认“设备”tab 的根页面（导航栈第
+//  一个 VC；嵌在根页面里的子 VC 也算），push 出去的子页面一律不换；
+//  setImage: / SDWebImage / imageNamed / UIButton 背景图四处和强制刷新
+//  全部走同一套根页面判定（NEViewIsOnDeviceRootPage）。另两处顺带加固：
+//  存的绝对路径可能失效（App 重装/更新后沙盒 UUID 变了），读不到就回退
+//  到当前 Documents 目录下的同名文件并把存的路径修好；刷新换图时把
+//  layer.contents 也同步成自定义图（App 若绕开 setImage: 直接写了图层
+//  内容，只换 iv.image 显示换不上）。
 // v0.3.8 改动：超速红行改成“请勿超速行驶！”，字比普通行大但绝不超胶囊边框；
 //  超速那一刻中文语音读一次“您已超速行驶，请注意安全”（跟着超速提醒开关走，不另设开关）。
 // v0.3.7 改动：设置页“日期时间”改叫“日期”（时间只在翻页时钟里显示）；和 App 1.3.19 同款。
@@ -1209,7 +1221,9 @@ static NSString *gBgImageLoadedPath = nil;
 // 路径没变就用缓存；路径变了/文件没了就重读（失败返回 nil，不崩）
 // 注意：cacheSlot/pathSlot 指向的是全局 strong 变量，形参必须标 __strong，
 // 否则 ARC 默认 __autoreleasing 写回参数会报“passing address of non-local object”编译错。
-static UIImage *NELoadCustomImage(NSString *path, UIImage * __strong *cacheSlot, NSString * __strong *pathSlot) {
+// 存的绝对路径可能已失效（App 重装/更新后沙盒 UUID 变了）：读不到时回退到
+// 当前 Documents 目录下的同名文件，找到就用它，并把存的路径修好。
+static UIImage *NELoadCustomImage(NSString *path, NSString *defaultsKey, UIImage * __strong *cacheSlot, NSString * __strong *pathSlot) {
     if (!path.length) return nil;
     [gImageLock lock];
     UIImage *img = nil;
@@ -1217,6 +1231,22 @@ static UIImage *NELoadCustomImage(NSString *path, UIImage * __strong *cacheSlot,
         img = *cacheSlot;
     } else {
         @try { img = [UIImage imageWithContentsOfFile:path]; } @catch (...) { img = nil; }
+        if (!img) {
+            NSString *name = path.lastPathComponent;
+            NSString *doc = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory,
+                                                                NSUserDomainMask, YES).firstObject;
+            if (name.length && doc.length) {
+                NSString *fb = [doc stringByAppendingPathComponent:name];
+                if (![fb isEqualToString:path]) {
+                    @try { img = [UIImage imageWithContentsOfFile:fb]; } @catch (...) { img = nil; }
+                    if (img) {
+                        path = fb;
+                        if (defaultsKey.length)
+                            [[NSUserDefaults standardUserDefaults] setObject:fb forKey:defaultsKey];
+                    }
+                }
+            }
+        }
         *cacheSlot = img;
         *pathSlot = img ? path : nil;
     }
@@ -1224,29 +1254,16 @@ static UIImage *NELoadCustomImage(NSString *path, UIImage * __strong *cacheSlot,
     return img;
 }
 static UIImage *NECustomVehicleImage(void) {
-    return NELoadCustomImage(NEVehicleImagePath(), &gVehicleImage, &gVehicleImageLoadedPath);
+    return NELoadCustomImage(NEVehicleImagePath(), @"NEVehicleImagePath", &gVehicleImage, &gVehicleImageLoadedPath);
 }
 static UIImage *NECustomBackgroundImage(void) {
-    return NELoadCustomImage(NEBackgroundImagePath(), &gBgImage, &gBgImageLoadedPath);
+    return NELoadCustomImage(NEBackgroundImagePath(), @"NEBackgroundImagePath", &gBgImage, &gBgImageLoadedPath);
 }
 static void NEClearImageCache(void) {
     [gImageLock lock];
     gVehicleImage = nil; gVehicleImageLoadedPath = nil;
     gBgImage = nil; gBgImageLoadedPath = nil;
     [gImageLock unlock];
-}
-
-// 是不是“设备”tab（第一个 tab，标题“设备”）：图片只在设备主页换。
-// 只看选中的 tab，不要求是根页面——车辆图/背景图所在的页面就是该 tab 的根页面，
-// 而拦截发生时可能正有 modal（比如设置页）盖在上面。
-static BOOL NEIsDeviceTabSelected(void) {
-    UIWindow *keyWindow = NEKeyWindow();
-    UIViewController *root = keyWindow.rootViewController;
-    while (root.presentedViewController) root = root.presentedViewController;
-    if (![root isKindOfClass:[UITabBarController class]]) return NO;
-    UITabBarController *tab = (UITabBarController *)root;
-    UIViewController *sel = tab.selectedViewController;
-    return [sel.tabBarItem.title isEqualToString:@"设备"] || tab.selectedIndex == 0;
 }
 
 static BOOL NEStringHasAny(NSString *s, NSArray<NSString *> *keys) {
@@ -1261,6 +1278,11 @@ static BOOL NEStringHasAny(NSString *s, NSArray<NSString *> *keys) {
 // 时永远返回 NO，用在 set-time 拦截里是错的——图正在被设的时候，modal 可能正
 // 盖在上面。定义在 NEAppTabBarController 之后，这里先声明。
 static BOOL NEViewIsOnDeviceTab(UIView *v);
+// 只认“设备”tab 的根页面（不含 push 出去的子页面，如仪表/骑行页）：
+// 换图管太宽会把自定义车辆图错换到仪表页背景上。定义在后面，这里先声明。
+static BOOL NEViewIsOnDeviceRootPage(UIView *v);
+// imageNamed 没有 view 可查：只在设备根页面正显示在最上层时才换。
+static BOOL NEIsDeviceRootPageVisible(void);
 
 // 背景 vs 车辆：主信号是 view 在同级里的顺序，不是图片尺寸。
 // 诊断（ne-diag.txt，两次）证明：设备页容器里有三张满屏 UIImageView，
@@ -1316,7 +1338,7 @@ static UIImage *NEClassifyDeviceImage(UIImageView *iv, UIImage *image) {
 // 以前满屏 bounds 先判（车辆 view 的 bounds 也是满屏），车辆 URL 也会被当成背景。
 // 小图（图标）直接放行；判定不出就返回 nil，等图片下完走 setImage: 兜底再判。
 static UIImage *NEImageForSDURL(UIImageView *iv, NSURL *url) {
-    if (!NEViewIsOnDeviceTab(iv)) return nil;
+    if (!NEViewIsOnDeviceRootPage(iv)) return nil;
     NSString *u = [[url absoluteString] lowercaseString];
     if (!u.length) return nil;
     if (NEStringHasAny(u, @[@"vehicle", @"veh", @"car", @"bike", @"scooter",
@@ -1366,7 +1388,7 @@ static void NE_sd_setImageWithURL_ctx(id self, SEL _cmd, NSURL *url, id placehol
 // 小图（图标/头像）不碰；已是自定义图的放行，不来回换。
 static void (*orig_UIImageView_setImage)(id, SEL, UIImage *);
 static void NE_UIImageView_setImage(id self, SEL _cmd, UIImage *image) {
-    if (image && (gHasVehicleImage || gHasBgImage) && NEViewIsOnDeviceTab((UIImageView *)self)) {
+    if (image && (gHasVehicleImage || gHasBgImage) && NEViewIsOnDeviceRootPage((UIImageView *)self)) {
         UIImage *custom = NEClassifyDeviceImage((UIImageView *)self, image);
         if (custom) {
             orig_UIImageView_setImage(self, _cmd, custom);
@@ -1386,7 +1408,7 @@ static void NE_UIButton_setBackgroundImage(id self, SEL _cmd, UIImage *image, UI
         CGFloat sh = [UIScreen mainScreen].bounds.size.height;
         if (sz.width >= sw * 0.9 && sz.height >= sh * 0.5) {
             UIImage *custom = NECustomBackgroundImage();
-            if (custom && NEViewIsOnDeviceTab((UIView *)self)) {
+            if (custom && NEViewIsOnDeviceRootPage((UIView *)self)) {
                 orig_UIButton_setBackgroundImage(self, _cmd, custom, state);
                 return;
             }
@@ -1406,12 +1428,13 @@ static id NE_UIImage_imageNamed(id self, SEL _cmd, NSString *name) {
     BOOL isVeh = !isBg && NEStringHasAny(lower, @[@"vehicle", @"car", @"bike",
                                                   @"scooter", @"motor", @"m3"]);
     if (!isBg && !isVeh) return img;
-    // 只在设备 tab 换：imageNamed 可能在后台线程调，同步回主线程查 tab
+    // 只在设备根页面换：imageNamed 可能在后台线程调，同步回主线程查 tab；
+    // 仪表/骑行页 push 上来时不换（它的背景会被错当成车辆层）。
     __block BOOL onDeviceTab = YES;
     if ([NSThread isMainThread]) {
-        onDeviceTab = NEIsDeviceTabSelected();
+        onDeviceTab = NEIsDeviceRootPageVisible();
     } else {
-        dispatch_sync(dispatch_get_main_queue(), ^{ onDeviceTab = NEIsDeviceTabSelected(); });
+        dispatch_sync(dispatch_get_main_queue(), ^{ onDeviceTab = NEIsDeviceRootPageVisible(); });
     }
     if (!onDeviceTab) return img;
     UIImage *custom = isBg ? NECustomBackgroundImage() : NECustomVehicleImage();
@@ -1538,6 +1561,81 @@ static BOOL NEViewIsOnDeviceTab(UIView *v) {
            [tab.selectedViewController.tabBarItem.title isEqualToString:@"设备"];
 }
 
+// 设备 tab 在 tab bar 里的子 VC（通常是 UINavigationController）。
+static UIViewController *NEDeviceTabRoot(void) {
+    UITabBarController *tab = NEAppTabBarController();
+    if (!tab || tab.viewControllers.count == 0) return nil;
+    for (UIViewController *child in tab.viewControllers) {
+        if ([child.tabBarItem.title isEqualToString:@"设备"]) return child;
+    }
+    return tab.viewControllers.firstObject;
+}
+
+// 设备 tab 的根页面 VC（导航栈第一个；若设备 tab 不是导航控制器，就是它自己）。
+static UIViewController *NEDeviceRootPageVC(void) {
+    UIViewController *deviceRoot = NEDeviceTabRoot();
+    if (!deviceRoot) return nil;
+    if ([deviceRoot isKindOfClass:[UINavigationController class]])
+        return ((UINavigationController *)deviceRoot).viewControllers.firstObject;
+    return deviceRoot;
+}
+
+// 这个 view 是不是在“设备”tab 的根页面上（不含 push 出去的子页面）。
+// NEViewIsOnDeviceTab 对导航栈里任何页面都返回 YES，仪表/骑行页是 push
+// 出去的子页面，它的满屏背景也被当成“车辆层”，自定义车辆图就错换到
+// 仪表页背景上，设备页自己的车辆槽位反而没换上——这就是第五修的根因。
+// 根页面的子 VC（parent 链通向根页面）也算；push 出去的 VC（导航栈下标
+// > 0）及其子 VC 不算；modal 不算。
+static BOOL NEViewIsOnDeviceRootPage(UIView *v) {
+    if (!v) return NO;
+    if (!NEViewIsOnDeviceTab(v)) return NO;
+    UIViewController *rootPage = NEDeviceRootPageVC();
+    if (!rootPage) return NO;
+    UIResponder *r = v.nextResponder;
+    UIViewController *vc = nil;
+    while (r) {
+        if ([r isKindOfClass:[UIViewController class]]) { vc = (UIViewController *)r; break; }
+        r = r.nextResponder;
+    }
+    if (vc) {
+        // 沿 parent 链上溯到“直接挂在导航栈/ tab bar 里的那一级”，看它是不是根页面。
+        UIViewController *p = vc;
+        while (p.parentViewController &&
+               ![p.parentViewController isKindOfClass:[UINavigationController class]] &&
+               ![p.parentViewController isKindOfClass:[UITabBarController class]]) {
+            p = p.parentViewController;
+        }
+        return p == rootPage;
+    }
+    // view 还没挂进任何 VC（如刚创建正设图）：只在设备根页面正显示在
+    // 最上层时放行（导航栈顶就是根页面，且设备 tab 被选中）。
+    UITabBarController *tab = NEAppTabBarController();
+    if (!tab) return NO;
+    UIViewController *deviceRoot = NEDeviceTabRoot();
+    if (!deviceRoot) return NO;
+    if (tab.selectedViewController != deviceRoot) return NO;
+    if ([deviceRoot isKindOfClass:[UINavigationController class]]) {
+        UINavigationController *nav = (UINavigationController *)deviceRoot;
+        return nav.topViewController == rootPage;
+    }
+    return YES;
+}
+
+// imageNamed 没有 view 可查：只在设备根页面正显示在最上层时才换
+//（导航栈顶就是根页面；仪表/骑行页 push 上来时不换）。
+static BOOL NEIsDeviceRootPageVisible(void) {
+    UITabBarController *tab = NEAppTabBarController();
+    if (!tab) return NO;
+    UIViewController *deviceRoot = NEDeviceTabRoot();
+    if (!deviceRoot) return NO;
+    if (tab.selectedViewController != deviceRoot) return NO;
+    if ([deviceRoot isKindOfClass:[UINavigationController class]]) {
+        UINavigationController *nav = (UINavigationController *)deviceRoot;
+        return nav.topViewController == NEDeviceRootPageVC();
+    }
+    return YES;
+}
+
 static void NEForceRefreshImagesInView(UIView *view) {
     for (UIView *sub in view.subviews) {
         if ([sub isKindOfClass:[UIImageView class]]) {
@@ -1551,7 +1649,13 @@ static void NEForceRefreshImagesInView(UIView *view) {
                     // 当前图是旧自定义图）也能分对；已是当前自定义图的直接放行。
                     // 直接赋值走 setImage: 钩子再算一次也是同一张图，不会循环。
                     UIImage *custom = NEClassifyDeviceImage(iv, img);
-                    if (custom && custom != img) iv.image = custom;
+                    if (custom && custom != img) {
+                        iv.image = custom;
+                        // 若 App 绕开 setImage: 直接写了 layer.contents（显示内容
+                        // 会盖过 UIImageView.image），只换 iv.image 显示换不上；
+                        // 把图层内容也同步成自定义图。CGImage 为 nil 时不碰。
+                        @try { if (custom.CGImage) iv.layer.contents = (__bridge id)custom.CGImage; } @catch (...) {}
+                    }
                 } @catch (...) {}
             }
         }
@@ -1565,8 +1669,14 @@ static void NEForceRefreshImages(void) {
     if (!tab) return;
     UIViewController *sel = tab.selectedViewController;
     BOOL isDevice = [sel.tabBarItem.title isEqualToString:@"设备"] || tab.selectedIndex == 0;
-    if (!isDevice || !sel.view) return;
-    NEForceRefreshImagesInView(sel.view);
+    if (!isDevice) return;
+    // 只刷设备根页面的 view（不含 push 出去的子页面，如仪表/骑行页）；
+    // 根页面的 view 即便被子页面盖住也还在层级里，照常刷。根页面 view
+    // 还没加载出来时没东西可刷，直接返回（不要退回刷 sel.view，
+    // 那会把子页面也刷进去，正是车辆图跑到仪表页的另一条路）。
+    UIViewController *rootPage = NEDeviceRootPageVC();
+    if (!rootPage || !rootPage.isViewLoaded || !rootPage.view) return;
+    NEForceRefreshImagesInView(rootPage.view);
 }
 
 // v0.3.9 修复：页面显示时刷新——tab 懒加载，启动 +3 秒刷新时我的/服务页
