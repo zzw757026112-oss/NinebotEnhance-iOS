@@ -1,8 +1,9 @@
 // NinebotEnhance iOS v0.3.9 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
 //
 // v0.3.9 改动：三个只改显示、不改真数据的样子货（照搬安卓 ninebot-sign-lsp 的思路）：
-//  1. 服务有效期显示 9999：hook -[UILabel setText:]，文本含“服务有效期”且带日期时，
-//     只把日期部分换成 9999.12.31，其他日期不动。设置里加开关，默认关（key NEValidity9999）。
+//  1. 服务有效期自定义：hook -[UILabel setText:]，文本含“服务有效期”且带日期时，
+//     只把日期部分换成用户在设置里填的值；没填（空）就不换，显示真实有效期。
+//     设置里是开关 + 输入框，默认关（开关 key NEValidity9999，值 key NEValidityValue）。
 //  2. 主页车辆图自定义：九号 App“设备”主页那张车图是远端加载的，hook 图片加载换成用户自选的图。
 //     SDWebImage 存在就 hook UIImageView 的 sd_setImageWithURL:（+ 带 context 的全量变体），
 //     按 URL 特征只拦车辆图；不存在就退回 hook -[UIImageView setImage:]，只在“设备”主页、
@@ -244,7 +245,8 @@
 // 开关：NSUserDefaults 写 NBProjectionOverride = NO 立刻恢复原生画面。
 // HUD 设置键（defaults write cn.ninebot.segway <键> <值>）：
 //   NEHUDShowDate / NEHUDShowWeather / NEHUDShowSignal /
-//   NEHUDShowBattery / NEHUDShowVolume / NEHUDShowSlot（bool，默认 YES）
+//   NEHUDShowBattery / NEHUDShowVolume / NEHUDShowSlot（bool，默认 NO；
+//   NEHUDSpeedAlert 同样默认 NO。开过一次后存 NSUserDefaults，下次启动还保持）
 //   NEHUDPosition（int，默认 0：0 右下 1 左下 2 左上 3 右上）
 //   NEHUDFontSize（int，默认 1：0 小 1 中 2 大）
 // 日志：os_log subsystem "com.user.ninebotenhance"，只打加载、钩点检查、
@@ -310,32 +312,32 @@ static BOOL OverlayEnabled(void) {
 
 static BOOL NEHUDShowDate(void) {
     id v = [[NSUserDefaults standardUserDefaults] objectForKey:@"NEHUDShowDate"];
-    return v ? [v boolValue] : YES;
+    return v ? [v boolValue] : NO;
 }
 static BOOL NEHUDShowWeather(void) {
     id v = [[NSUserDefaults standardUserDefaults] objectForKey:@"NEHUDShowWeather"];
-    return v ? [v boolValue] : YES;
+    return v ? [v boolValue] : NO;
 }
 static BOOL NEHUDShowSignal(void) {
     id v = [[NSUserDefaults standardUserDefaults] objectForKey:@"NEHUDShowSignal"];
-    return v ? [v boolValue] : YES;
+    return v ? [v boolValue] : NO;
 }
 static BOOL NEHUDShowBattery(void) {
     id v = [[NSUserDefaults standardUserDefaults] objectForKey:@"NEHUDShowBattery"];
-    return v ? [v boolValue] : YES;
+    return v ? [v boolValue] : NO;
 }
 static BOOL NEHUDShowVolume(void) {
     id v = [[NSUserDefaults standardUserDefaults] objectForKey:@"NEHUDShowVolume"];
-    return v ? [v boolValue] : YES;
+    return v ? [v boolValue] : NO;
 }
-// 翻页时钟开关（v0.3.6，老虎机改成翻页时钟；默认 YES；内部 key NEHUDShowSlot 不变）
+// 翻页时钟开关（v0.3.6，老虎机改成翻页时钟；默认 NO；内部 key NEHUDShowSlot 不变）
 static BOOL NEHUDShowSlot(void) {
     id v = [[NSUserDefaults standardUserDefaults] objectForKey:@"NEHUDShowSlot"];
-    return v ? [v boolValue] : YES;
+    return v ? [v boolValue] : NO;
 }
 static BOOL NEHUDSpeedAlert(void) {
     id v = [[NSUserDefaults standardUserDefaults] objectForKey:@"NEHUDSpeedAlert"];
-    return v ? [v boolValue] : YES;
+    return v ? [v boolValue] : NO;
 }
 // 限速 km/h：默认 60，读出来 clamp 到 30–120
 static NSInteger NEHUDSpeedLimit(void) {
@@ -376,6 +378,7 @@ static BOOL NEValidity9999(void) {
 }
 // setText 高频调用：开关缓存一份，钩子里先查这个 BOOL 再做字符串匹配
 static BOOL gValidity9999 = NO;
+static NSString *gValidityValue = nil; // 用户填的自定义有效期；空 = 显示真实有效期
 
 static void (*orig_UILabel_setText)(id, SEL, NSString *);
 
@@ -400,6 +403,15 @@ static void NESyncCustomDisplayCache(void) {
     gLevelValue = [d stringForKey:@"NELevelValue"];
     gTitleValue = [d stringForKey:@"NETitleValue"];
     gSignDaysValue = [d stringForKey:@"NESignDaysValue"];
+    gValidityValue = [d stringForKey:@"NEValidityValue"];
+}
+
+// 服务有效期实际要显示的值：用户填的日期（去空白）；没填返回 nil，
+// 调用处就不替换，App 显示真实有效期。9999.12.31 不再是默认值。
+static NSString *NEValidityDisplayValue(void) {
+    NSString *v = [gValidityValue stringByTrimmingCharactersInSet:
+                   [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    return v.length ? v : nil;
 }
 
 // v0.3.9 修复：文字替换根因——App 的数字和单位/描述经常不在同一个 label 里
@@ -567,8 +579,9 @@ static NSString *NEFixedLabelString(NSString *text, UILabel *label,
     if (!text.length || !label) return nil;
     // 按钮的标题 label（如我们自己的“Ninebot pro+”按钮）不碰
     if ([label.superview isKindOfClass:[UIButton class]]) return nil;
-    // 1. 服务有效期 9999
-    if (gValidity9999) {
+    // 1. 服务有效期（自定义值；没填就不换，显示真实有效期）
+    NSString *validityValue = NEValidityDisplayValue();
+    if (gValidity9999 && validityValue.length > 0) {
         NSRange keyRange = [text rangeOfString:@"服务有效期"];
         static NSRegularExpression *sDateRe = nil;
         static dispatch_once_t sOnce;
@@ -584,7 +597,7 @@ static NSString *NEFixedLabelString(NSString *text, UILabel *label,
                 NSRange m = [sDateRe rangeOfFirstMatchInString:text options:0 range:search];
                 if (m.location != NSNotFound) {
                     if (fieldOut) *fieldOut = @"NEValidity9999";
-                    return [text stringByReplacingCharactersInRange:m withString:@"9999.12.31"];
+                    return [text stringByReplacingCharactersInRange:m withString:validityValue];
                 }
             }
         } else {
@@ -602,7 +615,7 @@ static NSString *NEFixedLabelString(NSString *text, UILabel *label,
                 NEAdjacentLabelContaining(label, @"服务有效期")) {
                 if (fieldOut) *fieldOut = @"NEValidity9999";
                 if (separateOut) *separateOut = YES;
-                return @"9999.12.31";
+                return validityValue;
             }
         }
     }
@@ -992,8 +1005,9 @@ static NSString *NEFixedRNText(NSString *text, UIView *view, NSString *page, NSS
     NSArray<NSString *> *sibs = nil;
     BOOL sibsDone = NO;
 
-    // 1. 服务有效期 9999（只在服务页）
-    if (gValidity9999 && isService) {
+    // 1. 服务有效期（自定义值；没填就不换，显示真实有效期；只在服务页）
+    NSString *validityValue = NEValidityDisplayValue();
+    if (gValidity9999 && isService && validityValue.length > 0) {
         static NSRegularExpression *sRNDateRe = nil;
         static dispatch_once_t sRNDateOnce;
         dispatch_once(&sRNDateOnce, ^{
@@ -1007,7 +1021,7 @@ static NSString *NEFixedRNText(NSString *text, UIView *view, NSString *page, NSS
             NSRange m = [sRNDateRe rangeOfFirstMatchInString:text options:0 range:search];
             if (m.location != NSNotFound) {
                 if (fieldOut) *fieldOut = @"NEValidity9999";
-                return [text stringByReplacingCharactersInRange:m withString:@"9999.12.31"];
+                return [text stringByReplacingCharactersInRange:m withString:validityValue];
             }
         } else if (sRNDateRe) {
             // 分开段落：整段就是一个日期。只换已知的当前有效期，或兄弟段落
@@ -1022,7 +1036,7 @@ static NSString *NEFixedRNText(NSString *text, UIView *view, NSString *page, NSS
                 }
                 if (known) {
                     if (fieldOut) *fieldOut = @"NEValidity9999";
-                    return @"9999.12.31";
+                    return validityValue;
                 }
             }
         }
@@ -3648,7 +3662,7 @@ static void NECheckSettingsButton(void) {
     beautyStack.hidden = YES;
     objc_setAssociatedObject(self, &NEBeautyGroupKey, beautyStack,
                              OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    [beautyStack addArrangedSubview:[self switchRow:@"服务有效期 9999" key:@"NEValidity9999" on:NEValidity9999()]];
+    [beautyStack addArrangedSubview:[self customDisplayRow:@"服务有效期" toggleKey:@"NEValidity9999" valueKey:@"NEValidityValue" on:NEValidity9999() value:[defs stringForKey:@"NEValidityValue"] placeholder:@"留空显示真实日期"]];
     [beautyStack addArrangedSubview:[self sectionLabel:@"主页车辆图"]];
     [beautyStack addArrangedSubview:[self imagePickRow:@"更换车辆图" kind:0]];
     [beautyStack addArrangedSubview:[self imageClearRow:@"恢复原图" kind:0]];
@@ -3846,6 +3860,7 @@ static void NECheckSettingsButton(void) {
     // v0.3.9：有效期 9999 开关——同步缓存并按需装钩子（关掉后钩子留着但直接走原实现）
     if ([key isEqualToString:@"NEValidity9999"]) {
         gValidity9999 = sw.isOn;
+        NESyncCustomDisplayCache(); // 值也同步一次（输入框改完已同步过，这里是兜底）
         if (sw.isOn) { NEInstallLabelHookIfNeeded(); NEInstallRNTextHookIfNeeded(); }
         NEForceRefreshLabels(); // v0.3.9 修复：开关变了，已显示的 label 不会自动重设，强制刷新
         NEForceRedrawRNText();
