@@ -3891,13 +3891,6 @@ static void NECheckSettingsButton(void) {
         [stack.trailingAnchor constraintEqualToAnchor:frame.trailingAnchor constant:-16]
     ]];
 
-    UILabel *hint = [UILabel new];
-    hint.text = @"改完立即生效，下次投屏帧就用新设置。";
-    hint.font = [UIFont systemFontOfSize:13];
-    hint.textColor = [UIColor secondaryLabelColor];
-    hint.numberOfLines = 0;
-    [stack addArrangedSubview:hint];
-
     // 点空白处收起输入框键盘（不拦截其他控件的点击）
     UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc]
         initWithTarget:self action:@selector(dismissKeyboard)];
@@ -3928,8 +3921,6 @@ static void NECheckSettingsButton(void) {
     [beautyStack addArrangedSubview:[self customDisplayRow:@"等级（1-9）" toggleKey:@"NELevel" valueKey:@"NELevelValue" on:NEBoolDefault(@"NELevel") value:[defs stringForKey:@"NELevelValue"] placeholder:@"如 Lv.99"]];
     [beautyStack addArrangedSubview:[self customDisplayRow:@"称号" toggleKey:@"NETitle" valueKey:@"NETitleValue" on:NEBoolDefault(@"NETitle") value:[defs stringForKey:@"NETitleValue"] placeholder:@"如 车神"]];
     [beautyStack addArrangedSubview:[self customDisplayRow:@"签到天数" toggleKey:@"NESignDays" valueKey:@"NESignDaysValue" on:NEBoolDefault(@"NESignDays") value:[defs stringForKey:@"NESignDaysValue"] placeholder:@"如 365"]];
-    // v0.3.9 诊断：手动导出当前页的界面结构（设置页底下的那个 tab 页面）
-    [beautyStack addArrangedSubview:[self diagExportRow]];
     [self ne_styleSeparatorsInStack:beautyStack];
     UIView *beautyCard = [self ne_cardWrappingStack:beautyStack];
     beautyCard.hidden = YES; // 默认折叠，折叠状态存在卡片上
@@ -3942,6 +3933,12 @@ static void NECheckSettingsButton(void) {
     UIStackView *navStack = [UIStackView new];
     navStack.axis = UILayoutConstraintAxisVertical;
     navStack.spacing = 0; // 卡片内行与行直接贴合，中间用底部分隔线分开
+    UILabel *navHint = [UILabel new];
+    navHint.text = @"改完立即生效，下次投屏帧就用新设置。";
+    navHint.font = [UIFont systemFontOfSize:13];
+    navHint.textColor = [UIColor secondaryLabelColor];
+    navHint.numberOfLines = 0;
+    [navStack addArrangedSubview:[self ne_footnoteView:navHint]];
     [navStack addArrangedSubview:[self switchRow:@"日期" key:@"NEHUDShowDate" on:NEHUDShowDate()]];
     [navStack addArrangedSubview:[self switchRow:@"天气温度" key:@"NEHUDShowWeather" on:NEHUDShowWeather()]];
     [navStack addArrangedSubview:[self switchRow:@"信号（WiFi/5G）" key:@"NEHUDShowSignal" on:NEHUDShowSignal()]];
@@ -4007,6 +4004,16 @@ static void NECheckSettingsButton(void) {
     aboutDesc.textColor = [UIColor secondaryLabelColor];
     aboutDesc.numberOfLines = 0;
     [aboutStack addArrangedSubview:aboutDesc];
+    // 诊断入口（原美化娱乐组里的“导出界面诊断”，移到这里，平时不显眼，
+    // 出图/布局问题时点一下就能导出 ne-diag.txt）
+    UIButton *aboutDiagBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+    [aboutDiagBtn setTitle:@"导出界面诊断" forState:UIControlStateNormal];
+    aboutDiagBtn.titleLabel.font = [UIFont systemFontOfSize:13];
+    [aboutDiagBtn setTitleColor:[UIColor secondaryLabelColor] forState:UIControlStateNormal];
+    aboutDiagBtn.contentHorizontalAlignment = UIControlContentHorizontalAlignmentLeft;
+    [aboutDiagBtn addTarget:self action:@selector(exportDiagTapped:)
+        forControlEvents:UIControlEventTouchUpInside];
+    [aboutStack addArrangedSubview:aboutDiagBtn];
     [stack addArrangedSubview:[self ne_cardWrappingStack:aboutStack]];
 
     // ---- 使用提示卡 ----
@@ -4015,10 +4022,10 @@ static void NECheckSettingsButton(void) {
     tipsStack.spacing = 6;
     [tipsStack addArrangedSubview:[self sectionLabel:@"使用提示"]];
     NSArray<NSString *> *neFooterTips = @[
-        @"翻页时钟和 BMS 面板互斥，只能开一个。",
         @"恢复原图立即生效，不用重启 App。",
         @"HUD 开关打开后会一直保持，重启也不丢。",
-        @"等级最高 9 级，填 10 以上不显示。"
+        @"等级最高 9 级，填 10 以上不显示。",
+        @"导航增强功能只能在APP投屏导航的时候生效。"
     ];
     for (NSString *tip in neFooterTips) {
         UILabel *tipLabel = [UILabel new];
