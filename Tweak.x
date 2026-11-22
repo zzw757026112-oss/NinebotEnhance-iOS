@@ -1,4 +1,12 @@
-// NinebotEnhance iOS v0.4.6 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
+// NinebotEnhance iOS v0.4.7 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
+//
+// v0.4.7 清理（0.4.6 实测签到已通：状态 0、签到 540004 已签、记录“今天已签到”）：
+//  设置页自动签到卡去掉灰色诊断行（token 来源、设备、上次检查时间、code、
+//  模板状态不再在设置页显示），只留开关行、记录行与说明文字；诊断文案生成
+//  代码保留，ne-diag.txt 导出里仍有 [自动签到] 行，出问题时可导出来看。
+//  说明文字改成“打开 App 时自动签到，每天签一次；今天已签过就什么也不做。”，
+//  不再提快捷指令。签到逻辑本身不动（四个 H5 头、六组合 token 轮试、赢家
+//  记忆、模板抓取、重试）。记录行今天已签过时显示日期：今天已签到（YYYY-MM-DD）。
 //
 // v0.4.6 修复（0.4.5 实测：6 个 token 组合（三个来源 × Bearer 有/无）全在
 //  查状态那步回 code 2 “Params error”，签到 POST 一次都没跑——token 来源
@@ -3830,7 +3838,7 @@ static void NoteFrame(size_t w, size_t h) {
 // 找不到 token 或 deviceId 就静默跳过（只记一行不含敏感值的日志），绝不猜、
 // 绝不写死、绝不问用户要。整个过程无 UI、无弹窗，后台跑、不阻塞。
 // 签到记录（NEAutoSignInLastDate，YYYY-MM-DD）存 NSUserDefaults，设置页开关
-// 下面显示：今天已签到 / 上次签到：YYYY-MM-DD / 暂无签到记录。
+// 下面显示：今天已签到（YYYY-MM-DD） / 上次签到：YYYY-MM-DD / 暂无签到记录。
 // v0.4.2 修复：0.4.1 实测 token 已抓到，但签到接口回 code 2。最可能是
 //  deviceId 不对（0.4.1 扫任意含 device 的键取第一个值，可能拿到设备名）。
 //  deviceId 改按 App 自己的值取（请求头/URL 参数 > AsyncStorage > 精确键
@@ -3861,11 +3869,11 @@ static NSString *NEAutoSignInTodayString(void) {
     return [fmt stringFromDate:[NSDate date]];
 }
 
-// 签到记录显示文案：今天已签过 → 今天已签到；有旧日期 → 上次签到：日期；无 → 暂无签到记录
+// 签到记录显示文案：今天已签过 → 今天已签到（日期）；有旧日期 → 上次签到：日期；无 → 暂无签到记录
 static NSString *NEAutoSignInRecordText(void) {
     NSString *last = [[NSUserDefaults standardUserDefaults] stringForKey:@"NEAutoSignInLastDate"];
     if (last.length == 0) return @"暂无签到记录";
-    if ([last isEqualToString:NEAutoSignInTodayString()]) return @"今天已签到";
+    if ([last isEqualToString:NEAutoSignInTodayString()]) return [NSString stringWithFormat:@"今天已签到（%@）", last];
     return [NSString stringWithFormat:@"上次签到：%@", last];
 }
 
@@ -4999,7 +5007,6 @@ static const char NEHUDButtonKey = 0;
 static const char NEBeautyGroupKey = 0; // 设置页：“美化娱乐”折叠容器
 static const char NENavGroupKey = 0;    // 设置页：“导航增强”折叠容器
 static const char NESignInRecordKey = 0; // 设置页：自动签到记录 label
-static const char NESignInDiagKey = 0; // 设置页：自动签到诊断行 label（v0.4.1）
 static const char NESpeedLimitValueKey = 0;
 
 @interface NEHUDSettingsVC : UIViewController
@@ -5201,7 +5208,7 @@ static void NECheckSettingsButton(void) {
     }
     [stack addArrangedSubview:[self ne_cardWrappingStack:tipsStack]];
 
-    // ---- 自动签到卡（v0.4.0，快捷指令的保险；单独一行，不折叠；v0.4.1 加诊断行）----
+    // ---- 自动签到卡（v0.4.0；单独一行，不折叠；v0.4.1 加诊断行；v0.4.7 诊断行只进 ne-diag.txt，不再在设置页显示）----
     UIStackView *signStack = [UIStackView new];
     signStack.axis = UILayoutConstraintAxisVertical;
     signStack.spacing = 0;
@@ -5213,16 +5220,9 @@ static void NECheckSettingsButton(void) {
     signRecord.numberOfLines = 0;
     objc_setAssociatedObject(self, &NESignInRecordKey, signRecord, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     [signStack addArrangedSubview:[self ne_footnoteView:signRecord]];
-    // v0.4.1 诊断行：token 有/无·来源、上次检查时间、结果（只显示状态，不显示 token 值）
-    UILabel *signDiag = [UILabel new];
-    signDiag.text = NEAutoSignInDiagText();
-    signDiag.font = [UIFont systemFontOfSize:13];
-    signDiag.textColor = [UIColor secondaryLabelColor];
-    signDiag.numberOfLines = 0;
-    objc_setAssociatedObject(self, &NESignInDiagKey, signDiag, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    [signStack addArrangedSubview:[self ne_footnoteView:signDiag]];
+    // v0.4.7：诊断行已从设置页拿掉（只进 ne-diag.txt 导出），这里只留记录行与说明
     UILabel *signNote = [UILabel new];
-    signNote.text = @"快捷指令每天 08:00 已自动签到，这里是保险：万一快捷指令没跑起来，打开 App 时插件会静默补签；今天已签过就什么也不做。";
+    signNote.text = @"打开 App 时自动签到，每天签一次；今天已签过就什么也不做。";
     signNote.font = [UIFont systemFontOfSize:13];
     signNote.textColor = [UIColor secondaryLabelColor];
     signNote.numberOfLines = 0;
@@ -5329,7 +5329,7 @@ static void NECheckSettingsButton(void) {
     aboutName.text = @"NinebotEnhance";
     aboutName.font = [UIFont boldSystemFontOfSize:16];
     UILabel *aboutVer = [UILabel new];
-    aboutVer.text = @"0.4.6";
+    aboutVer.text = @"0.4.7";
     aboutVer.font = [UIFont systemFontOfSize:15];
     aboutVer.textColor = [UIColor secondaryLabelColor];
     [aboutTitleRow addArrangedSubview:aboutName];
@@ -5377,12 +5377,11 @@ static void NECheckSettingsButton(void) {
     [self refreshSignInRecord];
 }
 
-// 签到记录行 + 诊断行：打开设置页时按最新状态刷一遍（签到可能在设置页打开前已跑完）
+// 签到记录行：打开设置页时按最新状态刷一遍（签到可能在设置页打开前已跑完；
+// v0.4.7 诊断行不再在设置页显示，只进 ne-diag.txt）
 - (void)refreshSignInRecord {
     UILabel *record = objc_getAssociatedObject(self, &NESignInRecordKey);
     if (record) record.text = NEAutoSignInRecordText();
-    UILabel *diag = objc_getAssociatedObject(self, &NESignInDiagKey);
-    if (diag) diag.text = NEAutoSignInDiagText();
 }
 
 // 签到跑完发来的通知（成功或今天已签过都发）：设置页开着时也刷新记录行
@@ -6422,7 +6421,7 @@ static void NEProbeStart(void) {
                hasSel ? "YES" : "NO");
     }
 
-    os_log(gLog, "NinebotEnhance iOS 0.4.6 已加载（小胶囊 HUD：日期/天气/信号/音量/电量/来电/超速 + 翻页时钟 + 车辆数据探测 + 有效期9999/主页换图/自定义显示 + 自动签到）");
+    os_log(gLog, "NinebotEnhance iOS 0.4.7 已加载（小胶囊 HUD：日期/天气/信号/音量/电量/来电/超速 + 翻页时钟 + 车辆数据探测 + 有效期9999/主页换图/自定义显示 + 自动签到）");
 
     // 电量监听 + 定位 + 来电观察，全部在主队列 / 后台队列做，不阻塞加载
     dispatch_async(dispatch_get_main_queue(), ^{
