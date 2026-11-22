@@ -2365,7 +2365,12 @@ static void NECheckSettingsButton(void) {
                                                         NSUserDomainMask, YES).firstObject;
     if (!doc) return;
     NSString *path = [doc stringByAppendingPathComponent:name];
-    NSData *data = [img pngData];
+    // 注意：-[UIImage pngData] 在 Theos 构建的 SDK 头文件里不可见（编译报 no visible @interface），
+    // 改用 UIImagePNGRepresentation；它在新 SDK 已废弃，用 pragma 压掉废弃警告（构建是 -Werror）。
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    NSData *data = UIImagePNGRepresentation(img);
+#pragma clang diagnostic pop
     if (!data) {
         os_log(gLog, "[IMG] 选图转 PNG 失败");
         return;
