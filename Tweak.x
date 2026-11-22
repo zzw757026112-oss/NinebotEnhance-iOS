@@ -1,4 +1,17 @@
-// NinebotEnhance iOS v0.4.1 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
+// NinebotEnhance iOS v0.4.2 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
+//
+// v0.4.2 修复（0.4.1 实测：token 已抓到（NSURLSession），但签到接口回 code 2，
+//  记录一直“暂无签到记录”）：code 2 不在已知集合（0 成功 / 540004 已签 /
+//  54019 会话失效）里，最可能是 deviceId 不对——0.4.1 的 NEFindDeviceId 扫
+//  NSUserDefaults 里任意含 device 的键、取第一个 ≥8 字符的字符串，字典顺序
+//  未定，可能拿到设备名等别的“device*”值而非签到接口要的 deviceId。本版：
+//  ① deviceId 改按 App 自己的值取：App 自己发给网关的请求里带的 deviceId
+//  （请求头/URL 参数）> RN AsyncStorage 存的 deviceId > defaults 精确键
+//  （deviceId/device_id/uniqueId）> 含 device 键中 UUID 形状的值 > IDFV；
+//  ② 请求对齐已知能用的快捷指令：加 Accept: application/json，并复用 App
+//  自己请求的 User-Agent；③ 诊断按次记 code：状态接口与签到接口的 code
+//  分开记、都显示，并取服务端返回的 message（截断 20 字）；设备来源也记
+//  在诊断里。其余不变（单独开关、记录行、重试、不加分享）。
 //
 // v0.4.1 修复（0.4.0 实测：打开 App 后签到没触发，记录一直“暂无签到记录”）：
 //  设置页签到卡下加一行诊断（token 有/无·来源、上次检查时间、结果），同步写进
@@ -3732,11 +3745,20 @@ static void NoteFrame(size_t w, size_t h) {
 //  ① 优先用 App 自己发给九号网关的请求里带的 Authorization（NSURLSession
 //     钩子只读捕获，存在内存，不写盘、不打日志）；
 //  ② 拿不到时扫 App 自己的 NSUserDefaults，找含 token 的键（值够长才算）。
-// deviceId 同理：先扫 NSUserDefaults 含 device 的键，拿不到用 IDFV。
+// deviceId：v0.4.2 改按 App 自己的值取（0.4.1 扫任意含 device 的键、取第
+// 一个 ≥8 字符的字符串，字典顺序未定，可能拿到设备名，签到接口回 code 2）：
+// App 自己请求里带的 deviceId > AsyncStorage 存的 > defaults 精确键
+// （deviceId/device_id/uniqueId）> 含 device 键中 UUID 形状的值 > IDFV。
+// 来源记在 gSignInDiagDeviceSource 里，供诊断行显示。
 // 找不到 token 或 deviceId 就静默跳过（只记一行不含敏感值的日志），绝不猜、
 // 绝不写死、绝不问用户要。整个过程无 UI、无弹窗，后台跑、不阻塞。
 // 签到记录（NEAutoSignInLastDate，YYYY-MM-DD）存 NSUserDefaults，设置页开关
 // 下面显示：今天已签到 / 上次签到：YYYY-MM-DD / 暂无签到记录。
+// v0.4.2 修复：0.4.1 实测 token 已抓到，但签到接口回 code 2。最可能是
+//  deviceId 不对（0.4.1 扫任意含 device 的键取第一个值，可能拿到设备名）。
+//  deviceId 改按 App 自己的值取（请求头/URL 参数 > AsyncStorage > 精确键
+//  > UUID 形状 > IDFV）；请求加 Accept 并复用 App 的 User-Agent；诊断按
+//  次记 code（状态/签到分开）+ 服务端 message + 设备来源。
 // v0.4.1 修复：0.4.0 实测签到没触发（记录一直“暂无签到记录”）。原因大概率是
 //  token 拿不到：NSURLSession 钩子要等 App 自己发 ninebot.com 请求才抓得到，
 //  6 秒窗口里没发就抓不到；NSUserDefaults 里又没有 token（RN App 的 token
@@ -3791,6 +3813,15 @@ static NSString *gSignInDiagTokenSource = nil;
 static NSString *gSignInDiagLastTime = nil; // 上次检查 HH:mm
 static NSString *gSignInDiagLastResult = nil; // 已签到 / 无 token / 网络失败 / code N / 未检查
 static NSInteger gSignInDiagLastCode = -1; // 上次接口 code，-1 表示没调过接口
+// v0.4.2：状态接口与签到接口的 code 分开记（-1 表示该接口没调过），这样
+// code 2 到底是哪一步报的能看出来；服务端 message 截断存一份；deviceId
+// 来源也记下来（App 请求 / AsyncStorage / NSUserDefaults / IDFV）。
+static NSInteger gSignInDiagStatusCode = -1; // 状态 GET 的 code
+static NSInteger gSignInDiagSignCode = -1; // 签到 POST 的 code
+static NSString *gSignInDiagLastMessage = nil; // 服务端 message，截断 ≤20 字
+static NSString *gSignInDiagDeviceSource = nil; // 本次用的 deviceId 来源
+static NSString *gCapturedUserAgent = nil; // App 自己请求的 UA（仅内存）
+static NSString *gCapturedDeviceId = nil; // App 自己请求里带的 deviceId（仅内存）
 
 static NSString *NEAutoSignInNowHHmm(void) {
     static NSDateFormatter *fmt = nil;
@@ -3804,7 +3835,10 @@ static NSString *NEAutoSignInNowHHmm(void) {
     return [fmt stringFromDate:[NSDate date]];
 }
 
-// 设置页诊断行文案：token 有/无（+来源）· 上次检查时间 · 结果
+// 设置页诊断行文案：token 有/无（+来源）· 设备来源 · 上次检查时间 ·
+// 状态 code / 签到 code（+服务端 message）。例如：
+//   token:有（NSURLSession）· 设备:AsyncStorage · 上次检查 00:16 · 状态 0 · 签到 code 2（参数错误）
+// 还没调过某一步时那步显示 —。message 为空时不加括号。
 static NSString *NEAutoSignInDiagText(void) {
     NSString *tok;
     [gAuthLock lock];
@@ -3817,9 +3851,25 @@ static NSString *NEAutoSignInDiagText(void) {
     } else {
         tok = @"无";
     }
+    NSString *dev = gSignInDiagDeviceSource.length
+        ? [NSString stringWithFormat:@"设备:%@", gSignInDiagDeviceSource] : @"设备:—";
     NSString *time = gSignInDiagLastTime.length ? gSignInDiagLastTime : @"—";
     NSString *res = gSignInDiagLastResult.length ? gSignInDiagLastResult : @"未检查";
-    return [NSString stringWithFormat:@"token:%@ · 上次检查 %@ · %@", tok, time, res];
+    NSString *codes;
+    if (gSignInDiagStatusCode >= 0 && gSignInDiagSignCode >= 0) {
+        codes = [NSString stringWithFormat:@"状态 %d · 签到 code %d",
+                 (int)gSignInDiagStatusCode, (int)gSignInDiagSignCode];
+    } else if (gSignInDiagSignCode >= 0) {
+        codes = [NSString stringWithFormat:@"签到 code %d", (int)gSignInDiagSignCode];
+    } else if (gSignInDiagStatusCode >= 0) {
+        codes = [NSString stringWithFormat:@"状态 %d", (int)gSignInDiagStatusCode];
+    } else {
+        codes = @"";
+    }
+    NSMutableString *out = [NSMutableString stringWithFormat:@"token:%@ · %@ · 上次检查 %@ · %@", tok, dev, time, res];
+    if (codes.length) [out appendFormat:@" · %@", codes];
+    if (gSignInDiagLastMessage.length) [out appendFormat:@"（%@）", gSignInDiagLastMessage];
+    return out;
 }
 
 // 记一次检查结果（主队列发通知，设置页刷新记录行+诊断行）
@@ -3833,12 +3883,23 @@ static void NEAutoSignInNoteCheck(NSString *result, NSInteger code) {
     });
 }
 
-// ne-diag.txt 里的一行（code 没调过就不写）
+// ne-diag.txt 里的一行（v0.4.2：诊断文案本身已含状态/签到 code 与
+// message，这里只加前缀，不再重复拼 code）。
 static NSString *NEAutoSignInDiagExportLine(void) {
-    if (gSignInDiagLastCode >= 0)
-        return [NSString stringWithFormat:@"[自动签到] %@（code %d）",
-                NEAutoSignInDiagText(), (int)gSignInDiagLastCode];
     return [NSString stringWithFormat:@"[自动签到] %@", NEAutoSignInDiagText()];
+}
+
+// 服务端 message 取出来（message / msg 字段），截断 ≤20 字存诊断；
+// 空或缺失返回 nil。只读文本，不记 token。
+static NSString *NEAutoSignInServerMessage(NSDictionary *json) {
+    id m = json[@"message"];
+    if (![m isKindOfClass:[NSString class]] || [(NSString *)m length] == 0) m = json[@"msg"];
+    if (![m isKindOfClass:[NSString class]]) return nil;
+    NSString *s = [(NSString *)m stringByTrimmingCharactersInSet:
+                   [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (s.length == 0) return nil;
+    if (s.length > 20) s = [s substringToIndex:20];
+    return s;
 }
 
 // NSURLSession 只读观察：App 自己发给九号网关的请求，把 Authorization 记下来。
@@ -3867,6 +3928,51 @@ static NSURLSessionDataTask *NE_NSURLSession_dataTaskWithRequest(id self, SEL _c
                     });
                 }
             }
+            // v0.4.2：顺带记 App 自己请求的 User-Agent 和 deviceId（只读）。
+            // deviceId 是签到接口要的那个值：App 自己请求里带的，比扫 defaults
+            // 猜的可靠。只记，不改请求。deviceId 形状：≥8 字符、仅字母数字和 -，
+            // 避免把设备名之类的值当成 deviceId。
+            [gAuthLock lock];
+            if (!gCapturedUserAgent) {
+                for (NSString *hk in request.allHTTPHeaderFields) {
+                    if ([[hk lowercaseString] isEqualToString:@"user-agent"]) {
+                        NSString *ua = request.allHTTPHeaderFields[hk];
+                        if (ua.length >= 4) gCapturedUserAgent = [ua copy];
+                        break;
+                    }
+                }
+            }
+            if (!gCapturedDeviceId) {
+                NSString *found = nil;
+                for (NSString *hk in request.allHTTPHeaderFields) {
+                    NSString *lk = [hk lowercaseString];
+                    if ([lk isEqualToString:@"deviceid"] || [lk isEqualToString:@"device-id"] ||
+                        [lk isEqualToString:@"device_id"]) {
+                        found = request.allHTTPHeaderFields[hk];
+                        break;
+                    }
+                }
+                if (!found.length && url.query.length) {
+                    for (NSString *pair in [url.query componentsSeparatedByString:@"&"]) {
+                        NSArray *kv = [pair componentsSeparatedByString:@"="];
+                        if (kv.count == 2) {
+                            NSString *k = [[kv[0] lowercaseString]
+                                stringByRemovingPercentEncoding] ?: [kv[0] lowercaseString];
+                            if ([k isEqualToString:@"deviceid"] || [k isEqualToString:@"device_id"]) {
+                                found = [kv[1] stringByRemovingPercentEncoding] ?: kv[1];
+                                break;
+                            }
+                        }
+                    }
+                }
+                if (found.length >= 8) {
+                    NSCharacterSet *bad = [[NSCharacterSet characterSetWithCharactersInString:
+                        @"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-"] invertedSet];
+                    if ([found rangeOfCharacterFromSet:bad].location == NSNotFound)
+                        gCapturedDeviceId = [found copy];
+                }
+            }
+            [gAuthLock unlock];
         }
     } @catch (...) {}
     return orig_NSURLSession_dataTaskWithRequest(self, _cmd, request, completionHandler);
@@ -4084,17 +4190,149 @@ static NSString *NEFindSignInAuthHeader(void) {
     return nil;
 }
 
+// 像 deviceId 吗：36 位 UUID（含 -）、32 位 hex、或 ≥16 位字母数字/-。
+// 设备名（如“XXX 的 iPhone”）含空格/中文，不会通过。
+static BOOL NEIsPlausibleDeviceId(NSString *s) {
+    if (s.length < 8) return NO;
+    NSCharacterSet *bad = [[NSCharacterSet characterSetWithCharactersInString:
+        @"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-"] invertedSet];
+    if ([s rangeOfCharacterFromSet:bad].location != NSNotFound) return NO;
+    if (s.length == 36) {
+        NSCharacterSet *hexBad = [[NSCharacterSet characterSetWithCharactersInString:
+            @"0123456789abcdefABCDEF-"] invertedSet];
+        return [s rangeOfCharacterFromSet:hexBad].location == NSNotFound;
+    }
+    if (s.length == 32) {
+        NSCharacterSet *hexBad = [[NSCharacterSet characterSetWithCharactersInString:
+            @"0123456789abcdefABCDEF"] invertedSet];
+        return [s rangeOfCharacterFromSet:hexBad].location == NSNotFound;
+    }
+    return s.length >= 16;
+}
+
+// UUID 形状才算（36 位 UUID 或 32 位 hex）：含 device 的键里乱七八糟的值
+// 很多（设备名、型号），只有 UUID 形状的才敢当 deviceId 用。
+static BOOL NEIsUUIDShapedDeviceId(NSString *s) {
+    if (s.length == 36) {
+        NSCharacterSet *hexBad = [[NSCharacterSet characterSetWithCharactersInString:
+            @"0123456789abcdefABCDEF-"] invertedSet];
+        return [s rangeOfCharacterFromSet:hexBad].location == NSNotFound;
+    }
+    if (s.length == 32) {
+        NSCharacterSet *hexBad = [[NSCharacterSet characterSetWithCharactersInString:
+            @"0123456789abcdefABCDEF"] invertedSet];
+        return [s rangeOfCharacterFromSet:hexBad].location == NSNotFound;
+    }
+    return NO;
+}
+
+// RN AsyncStorage 里找 deviceId（v0.4.2）：复用 token 那套目录查找，
+// 只读 manifest。先扫 deviceId/device_id/uniqueId/deviceUUID 精确键，
+// 再扫含 device 的键（值须 UUID 形状）。本次启动只扫一次，记内存。
+static NSString *gAsyncStorageDeviceId = nil;
+static BOOL gAsyncStorageDeviceScanned = NO;
+static NSString *NEFindDeviceIdInAsyncStorage(void) {
+    if (gAsyncStorageDeviceScanned) return gAsyncStorageDeviceId;
+    gAsyncStorageDeviceScanned = YES;
+    NSString *dir = NEFindAsyncStorageDir();
+    if (!dir) return nil;
+    NSData *manifestData = [NSData dataWithContentsOfFile:[dir stringByAppendingPathComponent:@"manifest.json"]];
+    if (!manifestData) return nil;
+    NSDictionary *manifest = [NSJSONSerialization JSONObjectWithData:manifestData options:0 error:nil];
+    if (![manifest isKindOfClass:[NSDictionary class]]) return nil;
+    NSFileManager *fm = [NSFileManager defaultManager];
+    for (int pass = 0; pass < 2 && !gAsyncStorageDeviceId; pass++) {
+        for (NSString *key in manifest) {
+            NSString *lk = [key lowercaseString];
+            BOOL exact = [lk isEqualToString:@"deviceid"] || [lk isEqualToString:@"device_id"] ||
+                         [lk isEqualToString:@"deviceuuid"] || [lk isEqualToString:@"uniqueid"] ||
+                         [lk isEqualToString:@"unique_id"];
+            BOOL loose = [lk containsString:@"device"];
+            if (pass == 0 && !exact) continue;
+            if (pass == 1 && (exact || !loose)) continue;
+            NSString *file = manifest[key];
+            if (![file isKindOfClass:[NSString class]]) continue;
+            NSString *path = [dir stringByAppendingPathComponent:file];
+            NSDictionary *attrs = [fm attributesOfItemAtPath:path error:nil];
+            unsigned long long size = [attrs[NSFileSize] unsignedLongLongValue];
+            if (size > 512 * 1024) continue;
+            NSData *d = [NSData dataWithContentsOfFile:path];
+            if (!d) continue;
+            id parsed = [NSJSONSerialization JSONObjectWithData:d options:NSJSONReadingAllowFragments error:nil];
+            NSString *val = nil;
+            if ([parsed isKindOfClass:[NSString class]]) {
+                val = (NSString *)parsed;
+            } else if ([parsed isKindOfClass:[NSDictionary class]]) {
+                for (NSString *k in (NSDictionary *)parsed) {
+                    id v = parsed[k];
+                    if ([v isKindOfClass:[NSString class]]) { val = (NSString *)v; break; }
+                }
+            } else {
+                NSString *raw = [[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding];
+                NSString *t = [raw stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+                if (t.length >= 2 && [t hasPrefix:@"\""] && [t hasSuffix:@"\""])
+                    t = [t substringWithRange:NSMakeRange(1, t.length - 2)];
+                val = t;
+            }
+            if (!val.length) continue;
+            if (pass == 0) {
+                if (NEIsPlausibleDeviceId(val)) { gAsyncStorageDeviceId = val; break; }
+            } else {
+                if (NEIsUUIDShapedDeviceId(val)) { gAsyncStorageDeviceId = val; break; }
+            }
+        }
+    }
+    return gAsyncStorageDeviceId;
+}
+
 static NSString *NEFindDeviceId(void) {
+    // ① App 自己发给网关的请求里带的 deviceId（最可靠，就是 App 在用的值）
+    [gAuthLock lock];
+    NSString *captured = gCapturedDeviceId;
+    [gAuthLock unlock];
+    if (captured.length >= 8) {
+        gSignInDiagDeviceSource = @"App 请求";
+        return captured;
+    }
+    // ② RN AsyncStorage 存的 deviceId
+    NSString *async = NEFindDeviceIdInAsyncStorage();
+    if (async.length >= 8) {
+        gSignInDiagDeviceSource = @"AsyncStorage";
+        return async;
+    }
+    // ③ NSUserDefaults 精确键（deviceId/device_id/uniqueId/deviceUUID）
     NSDictionary *all = [[NSUserDefaults standardUserDefaults] dictionaryRepresentation];
+    for (NSString *key in all) {
+        NSString *lk = [key lowercaseString];
+        if ([lk isEqualToString:@"deviceid"] || [lk isEqualToString:@"device_id"] ||
+            [lk isEqualToString:@"deviceuuid"] || [lk isEqualToString:@"uniqueid"] ||
+            [lk isEqualToString:@"unique_id"]) {
+            id v = all[key];
+            if ([v isKindOfClass:[NSString class]] && NEIsPlausibleDeviceId((NSString *)v)) {
+                gSignInDiagDeviceSource = @"NSUserDefaults";
+                return (NSString *)v;
+            }
+        }
+    }
+    // ④ 含 device 的键：只认 UUID 形状的值（设备名/型号不要）
     for (NSString *key in all) {
         NSString *lk = [key lowercaseString];
         if ([lk containsString:@"device"]) {
             id v = all[key];
-            if ([v isKindOfClass:[NSString class]] && [(NSString *)v length] >= 8) return (NSString *)v;
+            if ([v isKindOfClass:[NSString class]] && NEIsUUIDShapedDeviceId((NSString *)v)) {
+                gSignInDiagDeviceSource = @"NSUserDefaults";
+                return (NSString *)v;
+            }
         }
     }
+    // ⑤ 兜底：IDFV（RN 的 getUniqueId 在 iOS 上就是 IDFV，很可能就是 App 用的值）
     NSString *idfv = [[[UIDevice currentDevice] identifierForVendor] UUIDString];
-    return idfv.length >= 8 ? idfv : nil;
+    if (idfv.length >= 8) {
+        gSignInDiagDeviceSource = @"IDFV";
+        return idfv;
+    }
+    gSignInDiagDeviceSource = nil;
+    return nil;
 }
 
 static NSURLSession *NESignInSession(void) {
@@ -4110,6 +4348,9 @@ static NSURLSession *NESignInSession(void) {
 
 // 调签到接口（body 只有 deviceId）。code 0 成功；540004 今天已签过（不重复领）。
 // 回调里清 pending、记诊断；成功/已签才算“今天签成”，之后不再试。
+// v0.4.2：记下签到接口的 code 与服务端 message（供诊断分清是哪一步报的）；
+// 请求头对齐已知能用的快捷指令：加 Accept: application/json，并复用 App
+// 自己请求的 User-Agent（抓到才带，没抓到不伪造）。
 static void NEAutoSignInDoSignWithAuth(NSString *auth, NSString *deviceId) {
     NSURL *url = [NSURL URLWithString:@"https://cn-cbu-gateway.ninebot.com/portal/api/user-sign/v2/sign"];
     if (!url) { gAutoSignInCheckPending = NO; return; }
@@ -4117,6 +4358,11 @@ static void NEAutoSignInDoSignWithAuth(NSString *auth, NSString *deviceId) {
     req.HTTPMethod = @"POST";
     [req setValue:auth forHTTPHeaderField:@"Authorization"];
     [req setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
+    [req setValue:@"application/json" forHTTPHeaderField:@"Accept"];
+    [gAuthLock lock];
+    NSString *ua = gCapturedUserAgent;
+    [gAuthLock unlock];
+    if (ua.length) [req setValue:ua forHTTPHeaderField:@"User-Agent"];
     req.HTTPBody = [NSJSONSerialization dataWithJSONObject:@{@"deviceId": deviceId}
                                                    options:0 error:nil];
     NSURLSessionDataTask *task = [NESignInSession() dataTaskWithRequest:req
@@ -4131,6 +4377,8 @@ static void NEAutoSignInDoSignWithAuth(NSString *auth, NSString *deviceId) {
         NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
         NSNumber *code = json[@"code"];
         int c = code ? [code intValue] : -1;
+        gSignInDiagSignCode = c;
+        gSignInDiagLastMessage = NEAutoSignInServerMessage(json);
         if (c == 0) {
             NENoteSignInDoneToday();
             gAutoSignInDoneToday = YES;
@@ -4153,6 +4401,10 @@ static void NEAutoSignInDoSignWithAuth(NSString *auth, NSString *deviceId) {
 // token 没找到 / 网络失败都不算“签成”，pending 清掉，下次进前台再试。
 static void NEAutoSignInRun(void) {
     if (!NEAutoSignInEnabled()) { gAutoSignInCheckPending = NO; return; }
+    // v0.4.2：每次检查先清掉上次的按次 code 与 message，诊断只反映本次检查
+    gSignInDiagStatusCode = -1;
+    gSignInDiagSignCode = -1;
+    gSignInDiagLastMessage = nil;
     NSString *auth = NEFindSignInAuthHeader();
     NSString *deviceId = NEFindDeviceId();
     if (auth.length < 20 || deviceId.length < 8) {
@@ -4167,6 +4419,11 @@ static void NEAutoSignInRun(void) {
     NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:statusURL];
     req.HTTPMethod = @"GET";
     [req setValue:auth forHTTPHeaderField:@"Authorization"];
+    [req setValue:@"application/json" forHTTPHeaderField:@"Accept"];
+    [gAuthLock lock];
+    NSString *ua = gCapturedUserAgent;
+    [gAuthLock unlock];
+    if (ua.length) [req setValue:ua forHTTPHeaderField:@"User-Agent"];
     NSURLSessionDataTask *task = [NESignInSession() dataTaskWithRequest:req
         completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
         if (err || !data) {
@@ -4178,7 +4435,10 @@ static void NEAutoSignInRun(void) {
         }
         NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
         NSNumber *code = json[@"code"];
-        if (code && [code intValue] == 540004) {
+        int c = code ? [code intValue] : -1;
+        gSignInDiagStatusCode = c; // v0.4.2：状态接口的 code 单独记
+        gSignInDiagLastMessage = NEAutoSignInServerMessage(json);
+        if (c == 540004) {
             NENoteSignInDoneToday();
             gAutoSignInDoneToday = YES;
             gAutoSignInCheckPending = NO;
@@ -4562,7 +4822,7 @@ static void NECheckSettingsButton(void) {
     aboutName.text = @"NinebotEnhance";
     aboutName.font = [UIFont boldSystemFontOfSize:16];
     UILabel *aboutVer = [UILabel new];
-    aboutVer.text = @"0.4.1";
+    aboutVer.text = @"0.4.2";
     aboutVer.font = [UIFont systemFontOfSize:15];
     aboutVer.textColor = [UIColor secondaryLabelColor];
     [aboutTitleRow addArrangedSubview:aboutName];
@@ -5655,7 +5915,7 @@ static void NEProbeStart(void) {
                hasSel ? "YES" : "NO");
     }
 
-    os_log(gLog, "NinebotEnhance iOS 0.4.1 已加载（小胶囊 HUD：日期/天气/信号/音量/电量/来电/超速 + 翻页时钟 + 车辆数据探测 + 有效期9999/主页换图/自定义显示 + 自动签到）");
+    os_log(gLog, "NinebotEnhance iOS 0.4.2 已加载（小胶囊 HUD：日期/天气/信号/音量/电量/来电/超速 + 翻页时钟 + 车辆数据探测 + 有效期9999/主页换图/自定义显示 + 自动签到）");
 
     // 电量监听 + 定位 + 来电观察，全部在主队列 / 后台队列做，不阻塞加载
     dispatch_async(dispatch_get_main_queue(), ^{
