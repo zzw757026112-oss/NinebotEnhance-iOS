@@ -1,4 +1,11 @@
-// NinebotEnhance iOS v0.4.0 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
+// NinebotEnhance iOS v0.4.1 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
+//
+// v0.4.1 修复（0.4.0 实测：打开 App 后签到没触发，记录一直“暂无签到记录”）：
+//  设置页签到卡下加一行诊断（token 有/无·来源、上次检查时间、结果），同步写进
+//  ne-diag.txt；token 没抓到时下次进前台再试（不再只试一次），钩子一抓到
+//  Authorization 就马上排一次检查；新增 RN AsyncStorage 读 token（九号 App
+//  是 RN，token 很可能不在 NSUserDefaults 里）。其余不变（单独开关、记录行、
+//  静默签到、0/540004、不加分享）。
 //
 // v0.4.0 新增：自动签到（快捷指令的保险，设置页单独一行开关，默认开）：
 //  打开九号 App 时静默签到一次；快捷指令每天 08:00 已自动签到，这里是保险，
@@ -1507,6 +1514,8 @@ static void NEForceRefreshLabels(void) {
 // imageView/按钮的基本信息，不写任何 token、密码、请求头。
 // 前向声明：NEAppTabBarController 定义在后面（主页车辆图那节），这里先声明。
 static UITabBarController *NEAppTabBarController(void);
+// 前向声明：自动签到诊断行（定义在后面的 v0.4.1 自动签到节）
+static NSString *NEAutoSignInDiagExportLine(void);
 
 static NSString *NEDiagFilePath(void) {
     NSString *doc = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory,
@@ -1703,6 +1712,7 @@ static void NEDumpDiagForView(UIView *root, NSString *pageName) {
     NSDateFormatter *df = [[NSDateFormatter alloc] init];
     df.dateFormat = @"yyyy-MM-dd HH:mm:ss";
     [out appendFormat:@"\n===== %@ %@ =====\n", pageName ?: @"?", [df stringFromDate:[NSDate date]]];
+    [out appendFormat:@"%@\n", NEAutoSignInDiagExportLine()];
     [out appendString:@"(文本为当前显示值；→ 后面是匹配器会换成的字段/值，(no change) 表示不换；[hidden] 表示该视图被隐藏；[RN-text] 是 React Native 文本视图；RN 文本的 verdict 只含同 label 规则；frame 是页面自身坐标)\n"];
     int count = 0;
     @try {
@@ -3727,6 +3737,13 @@ static void NoteFrame(size_t w, size_t h) {
 // 绝不写死、绝不问用户要。整个过程无 UI、无弹窗，后台跑、不阻塞。
 // 签到记录（NEAutoSignInLastDate，YYYY-MM-DD）存 NSUserDefaults，设置页开关
 // 下面显示：今天已签到 / 上次签到：YYYY-MM-DD / 暂无签到记录。
+// v0.4.1 修复：0.4.0 实测签到没触发（记录一直“暂无签到记录”）。原因大概率是
+//  token 拿不到：NSURLSession 钩子要等 App 自己发 ninebot.com 请求才抓得到，
+//  6 秒窗口里没发就抓不到；NSUserDefaults 里又没有 token（RN App 的 token
+//  在 AsyncStorage/钥匙串里）。本版：① 设置页加诊断行（token 有/无·来源、
+//  上次检查时间、结果），并写进 ne-diag.txt；② token 没抓到 / 网络失败时
+//  下次进前台再试（不再只试一次），钩子一抓到 Authorization 就马上排一次；
+//  ③ 新增 RN AsyncStorage 读 token。token 只记有/无和来源，绝不记值。
 
 static BOOL NEAutoSignInEnabled(void) {
     id v = [[NSUserDefaults standardUserDefaults] objectForKey:@"NEAutoSignIn"];
@@ -3753,26 +3770,83 @@ static NSString *NEAutoSignInRecordText(void) {
     return [NSString stringWithFormat:@"上次签到：%@", last];
 }
 
-// 今天签到成功（或接口已报今天签过）就记一笔，供设置页显示；
-// 设置页开着时也刷新记录行（通知只在主队列发）。
+// 今天签到成功（或接口已报今天签过）就记一笔，供设置页显示。
+// 刷新靠 NEAutoSignInNoteCheck 发的通知（记录行+诊断行一起刷），这里不发。
 static void NENoteSignInDoneToday(void) {
     [[NSUserDefaults standardUserDefaults] setObject:NEAutoSignInTodayString()
                                               forKey:@"NEAutoSignInLastDate"];
+}
+
+// ---- token / deviceId：只从 App 自身运行状态取，绝不写死 ----
+static NSString *gCapturedAuthToken = nil; // 仅内存，不写盘、不打日志
+static NSLock *gAuthLock = nil; // %ctor 里建
+static BOOL gAutoSignInDoneToday = NO; // 本次启动已有一次成功/已签（今天不用再试）
+static BOOL gAutoSignInCheckPending = NO; // 已排了一个检查，别重复排
+static BOOL gAutoSignInEverScheduled = NO; // 排过一次后重试用 3 秒（首次 6 秒）
+static id gAutoSignInObserver = nil; // become-active 观察者，强引用留着
+
+// ---- 自动签到诊断（v0.4.1）：只记状态，不记 token 值 ----
+// token 来源：@"NSURLSession" / @"AsyncStorage" / @"NSUserDefaults" / nil（无）
+static NSString *gSignInDiagTokenSource = nil;
+static NSString *gSignInDiagLastTime = nil; // 上次检查 HH:mm
+static NSString *gSignInDiagLastResult = nil; // 已签到 / 无 token / 网络失败 / code N / 未检查
+static NSInteger gSignInDiagLastCode = -1; // 上次接口 code，-1 表示没调过接口
+
+static NSString *NEAutoSignInNowHHmm(void) {
+    static NSDateFormatter *fmt = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        fmt = [NSDateFormatter new];
+        fmt.dateFormat = @"HH:mm";
+        fmt.locale = [NSLocale localeWithLocaleIdentifier:@"en_US_POSIX"];
+        fmt.timeZone = [NSTimeZone localTimeZone];
+    });
+    return [fmt stringFromDate:[NSDate date]];
+}
+
+// 设置页诊断行文案：token 有/无（+来源）· 上次检查时间 · 结果
+static NSString *NEAutoSignInDiagText(void) {
+    NSString *tok;
+    [gAuthLock lock];
+    BOOL hasCaptured = gCapturedAuthToken.length >= 20;
+    [gAuthLock unlock];
+    if (hasCaptured) {
+        tok = @"有（NSURLSession）";
+    } else if (gSignInDiagTokenSource.length) {
+        tok = [NSString stringWithFormat:@"有（%@）", gSignInDiagTokenSource];
+    } else {
+        tok = @"无";
+    }
+    NSString *time = gSignInDiagLastTime.length ? gSignInDiagLastTime : @"—";
+    NSString *res = gSignInDiagLastResult.length ? gSignInDiagLastResult : @"未检查";
+    return [NSString stringWithFormat:@"token:%@ · 上次检查 %@ · %@", tok, time, res];
+}
+
+// 记一次检查结果（主队列发通知，设置页刷新记录行+诊断行）
+static void NEAutoSignInNoteCheck(NSString *result, NSInteger code) {
+    gSignInDiagLastTime = NEAutoSignInNowHHmm();
+    gSignInDiagLastResult = result;
+    gSignInDiagLastCode = code;
     dispatch_async(dispatch_get_main_queue(), ^{
         [[NSNotificationCenter defaultCenter]
             postNotificationName:@"NEAutoSignInRecordChanged" object:nil];
     });
 }
 
-// ---- token / deviceId：只从 App 自身运行状态取，绝不写死 ----
-static NSString *gCapturedAuthToken = nil; // 仅内存，不写盘、不打日志
-static NSLock *gAuthLock = nil; // %ctor 里建
-static BOOL gAutoSignInAttempted = NO; // 本次启动只试一次
-static id gAutoSignInObserver = nil; // become-active 观察者，强引用留着
+// ne-diag.txt 里的一行（code 没调过就不写）
+static NSString *NEAutoSignInDiagExportLine(void) {
+    if (gSignInDiagLastCode >= 0)
+        return [NSString stringWithFormat:@"[自动签到] %@（code %d）",
+                NEAutoSignInDiagText(), (int)gSignInDiagLastCode];
+    return [NSString stringWithFormat:@"[自动签到] %@", NEAutoSignInDiagText()];
+}
 
 // NSURLSession 只读观察：App 自己发给九号网关的请求，把 Authorization 记下来。
 // 不改请求、不拦请求，只读。原实现照调。
 static NSURLSessionDataTask *(*orig_NSURLSession_dataTaskWithRequest)(id, SEL, NSURLRequest *, void (^)(NSData *, NSURLResponse *, NSError *));
+
+// 前向声明：排一次静默检查（定义在后面；钩子抓到新 token 时马上排一次）
+static void NEAutoSignInScheduleAfter(double seconds);
 
 static NSURLSessionDataTask *NE_NSURLSession_dataTaskWithRequest(id self, SEL _cmd, NSURLRequest *request, void (^completionHandler)(NSData *, NSURLResponse *, NSError *)) {
     @try {
@@ -3781,8 +3855,17 @@ static NSURLSessionDataTask *NE_NSURLSession_dataTaskWithRequest(id self, SEL _c
             NSString *auth = request.allHTTPHeaderFields[@"Authorization"];
             if (auth.length >= 20) {
                 [gAuthLock lock];
-                if (![gCapturedAuthToken isEqualToString:auth]) gCapturedAuthToken = [auth copy];
+                BOOL changed = ![gCapturedAuthToken isEqualToString:auth];
+                if (changed) gCapturedAuthToken = [auth copy];
                 [gAuthLock unlock];
+                // v0.4.1：刚抓到 token（之前没有，或换了）：如果今天还没签成，
+                // 马上排一次检查（1 秒后），不用等下次进前台。已排/已签成时
+                // ScheduleAfter 自己会拦，不会重复跑。
+                if (changed) {
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        NEAutoSignInScheduleAfter(1.0);
+                    });
+                }
             }
         }
     } @catch (...) {}
@@ -3818,13 +3901,165 @@ static NSString *NEAuthHeaderFromStoredToken(NSString *stored) {
     return [@"Bearer " stringByAppendingString:stored];
 }
 
+// ---- RN AsyncStorage 读 token（v0.4.1）----
+// 九号 App 是 React Native，登录 token 很可能不在 NSUserDefaults 里，
+// 而在 RN AsyncStorage（文件型）里。目录：
+//   Library/Application Support[/<bundleID>]/RCTAsyncLocalStorage_V1/
+// 里面 manifest.json 是 key→文件名，值存在对应文件里（JSON 编码过的字符串
+// 或对象）。只读；找到的 token 只放内存，不写盘、不打日志。
+
+// 像 token 吗：JWT（三段 base64url）或 eyJ 开头，或 ≥32 位的 token 字符
+static BOOL NEIsPlausibleToken(NSString *s) {
+    if (s.length < 20) return NO;
+    if ([s hasPrefix:@"eyJ"]) return YES;
+    NSArray *parts = [s componentsSeparatedByString:@"."];
+    if (parts.count == 3) {
+        NSCharacterSet *bad = [[NSCharacterSet characterSetWithCharactersInString:
+            @"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"] invertedSet];
+        BOOL ok = YES;
+        for (NSString *p in parts) {
+            if (p.length < 4 || [p rangeOfCharacterFromSet:bad].location != NSNotFound) { ok = NO; break; }
+        }
+        if (ok) return YES;
+    }
+    if (s.length >= 32) {
+        NSCharacterSet *bad = [[NSCharacterSet characterSetWithCharactersInString:
+            @"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-+/="] invertedSet];
+        if ([s rangeOfCharacterFromSet:bad].location == NSNotFound) return YES;
+    }
+    return NO;
+}
+
+// 在 JSON 值里递归找 token：key 含 token/authorization 的字符串优先；
+// 其余字符串够像 token 也算。只返回找到的值，不记日志。
+static NSString *NEFindTokenInJSONValue(id v, NSString *keyHint) {
+    if ([v isKindOfClass:[NSString class]]) {
+        NSString *s = (NSString *)v;
+        NSString *lk = keyHint ? [keyHint lowercaseString] : @"";
+        if (([lk containsString:@"token"] || [lk isEqualToString:@"authorization"]) && s.length >= 20) return s;
+        if (NEIsPlausibleToken(s)) return s;
+        return nil;
+    }
+    if ([v isKindOfClass:[NSDictionary class]]) {
+        for (NSString *k in (NSDictionary *)v) {
+            NSString *found = NEFindTokenInJSONValue(v[k], k);
+            if (found) return found;
+        }
+        return nil;
+    }
+    if ([v isKindOfClass:[NSArray class]]) {
+        for (id item in (NSArray *)v) {
+            NSString *found = NEFindTokenInJSONValue(item, keyHint);
+            if (found) return found;
+        }
+        return nil;
+    }
+    return nil;
+}
+
+static NSString *gAsyncStorageDir = nil; // 找到的目录（本次启动只找一次）
+static BOOL gAsyncStorageSearched = NO;
+static NSString *NEFindAsyncStorageDir(void) {
+    if (gAsyncStorageSearched) return gAsyncStorageDir;
+    gAsyncStorageSearched = YES;
+    NSArray *libs = NSSearchPathForDirectoriesInDomains(NSLibraryDirectory, NSUserDomainMask, YES);
+    NSString *lib = libs.firstObject;
+    if (!lib) return nil;
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *support = [lib stringByAppendingPathComponent:@"Application Support"];
+    NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
+    NSArray *candidates = @[
+        [[support stringByAppendingPathComponent:bundleID ?: @""] stringByAppendingPathComponent:@"RCTAsyncLocalStorage_V1"],
+        [support stringByAppendingPathComponent:@"RCTAsyncLocalStorage_V1"],
+    ];
+    for (NSString *dir in candidates) {
+        if ([fm fileExistsAtPath:[dir stringByAppendingPathComponent:@"manifest.json"]]) {
+            gAsyncStorageDir = dir;
+            return dir;
+        }
+    }
+    // 兜底：Application Support 下找名字是 RCTAsyncLocalStorage_V1 的目录（最多看 2000 项）
+    NSDirectoryEnumerator *en = [fm enumeratorAtPath:support];
+    int seen = 0;
+    NSString *rel = nil;
+    while ((rel = [en nextObject]) && seen < 2000) {
+        seen++;
+        if ([[rel lastPathComponent] isEqualToString:@"RCTAsyncLocalStorage_V1"]) {
+            NSString *dir = [support stringByAppendingPathComponent:rel];
+            if ([fm fileExistsAtPath:[dir stringByAppendingPathComponent:@"manifest.json"]]) {
+                gAsyncStorageDir = dir;
+                return dir;
+            }
+        }
+    }
+    return nil;
+}
+
+static NSString *gAsyncStorageToken = nil; // 本次启动扫到的（仅内存）
+static BOOL gAsyncStorageScanned = NO;
+static NSString *NEFindTokenInAsyncStorage(void) {
+    if (gAsyncStorageScanned) return gAsyncStorageToken;
+    gAsyncStorageScanned = YES;
+    NSString *dir = NEFindAsyncStorageDir();
+    if (!dir) return nil;
+    NSData *manifestData = [NSData dataWithContentsOfFile:[dir stringByAppendingPathComponent:@"manifest.json"]];
+    if (!manifestData) return nil;
+    NSDictionary *manifest = [NSJSONSerialization JSONObjectWithData:manifestData options:0 error:nil];
+    if (![manifest isKindOfClass:[NSDictionary class]]) return nil;
+    NSArray *keys = [manifest allKeys];
+    NSFileManager *fm = [NSFileManager defaultManager];
+    // 两遍：先扫 key 名含 token 的，再全扫
+    for (int pass = 0; pass < 2 && !gAsyncStorageToken; pass++) {
+        for (NSString *key in keys) {
+            NSString *lk = [key lowercaseString];
+            BOOL keyMatch = [lk containsString:@"token"] || [lk isEqualToString:@"authorization"];
+            if (pass == 0 && !keyMatch) continue;
+            if (pass == 1 && keyMatch) continue;
+            NSString *file = manifest[key];
+            if (![file isKindOfClass:[NSString class]]) continue;
+            NSString *path = [dir stringByAppendingPathComponent:file];
+            NSDictionary *attrs = [fm attributesOfItemAtPath:path error:nil];
+            unsigned long long size = [attrs[NSFileSize] unsignedLongLongValue];
+            if (size > 512 * 1024) continue; // 值文件过大（缓存/blob），token 不会在里面
+            NSData *d = [NSData dataWithContentsOfFile:path];
+            if (!d) continue;
+            id parsed = [NSJSONSerialization JSONObjectWithData:d options:NSJSONReadingAllowFragments error:nil];
+            NSString *found = nil;
+            if (parsed) {
+                found = NEFindTokenInJSONValue(parsed, key);
+            } else {
+                NSString *raw = [[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding];
+                NSString *t = [raw stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+                if (t.length >= 2 && [t hasPrefix:@"\""] && [t hasSuffix:@"\""])
+                    t = [t substringWithRange:NSMakeRange(1, t.length - 2)];
+                if (keyMatch) {
+                    if (t.length >= 20) found = t;
+                } else if (NEIsPlausibleToken(t)) {
+                    found = t;
+                }
+            }
+            if (found.length >= 20) { gAsyncStorageToken = found; break; }
+        }
+    }
+    return gAsyncStorageToken;
+}
+
 // Authorization 头完整值（直接能 setValue:forHTTPHeaderField: 的）。
-// 先用钩子抓到的（App 正在用的，最可靠）；再扫 App 自己的 defaults。
+// ① 钩子抓到的（App 正在用的，最可靠）；② RN AsyncStorage；③ defaults。
+// 来源记在 gSignInDiagTokenSource 里，供诊断行显示。
 static NSString *NEFindSignInAuthHeader(void) {
     [gAuthLock lock];
     NSString *captured = gCapturedAuthToken;
     [gAuthLock unlock];
-    if (captured.length >= 20) return captured;
+    if (captured.length >= 20) {
+        gSignInDiagTokenSource = @"NSURLSession";
+        return captured;
+    }
+    NSString *async = NEFindTokenInAsyncStorage();
+    if (async.length >= 20) {
+        gSignInDiagTokenSource = @"AsyncStorage";
+        return NEAuthHeaderFromStoredToken(async);
+    }
     NSDictionary *all = [[NSUserDefaults standardUserDefaults] dictionaryRepresentation];
     NSString *best = nil;
     for (NSString *key in all) {
@@ -3833,13 +4068,20 @@ static NSString *NEFindSignInAuthHeader(void) {
             id v = all[key];
             if ([v isKindOfClass:[NSString class]] && [(NSString *)v length] >= 20) {
                 if ([lk isEqualToString:@"token"] || [lk isEqualToString:@"accesstoken"] ||
-                    [lk isEqualToString:@"access_token"] || [lk isEqualToString:@"authorization"])
+                    [lk isEqualToString:@"access_token"] || [lk isEqualToString:@"authorization"]) {
+                    gSignInDiagTokenSource = @"NSUserDefaults";
                     return NEAuthHeaderFromStoredToken((NSString *)v);
+                }
                 if (!best) best = (NSString *)v;
             }
         }
     }
-    return best ? NEAuthHeaderFromStoredToken(best) : nil;
+    if (best) {
+        gSignInDiagTokenSource = @"NSUserDefaults";
+        return NEAuthHeaderFromStoredToken(best);
+    }
+    gSignInDiagTokenSource = nil;
+    return nil;
 }
 
 static NSString *NEFindDeviceId(void) {
@@ -3867,9 +4109,10 @@ static NSURLSession *NESignInSession(void) {
 }
 
 // 调签到接口（body 只有 deviceId）。code 0 成功；540004 今天已签过（不重复领）。
+// 回调里清 pending、记诊断；成功/已签才算“今天签成”，之后不再试。
 static void NEAutoSignInDoSignWithAuth(NSString *auth, NSString *deviceId) {
     NSURL *url = [NSURL URLWithString:@"https://cn-cbu-gateway.ninebot.com/portal/api/user-sign/v2/sign"];
-    if (!url) return;
+    if (!url) { gAutoSignInCheckPending = NO; return; }
     NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:url];
     req.HTTPMethod = @"POST";
     [req setValue:auth forHTTPHeaderField:@"Authorization"];
@@ -3878,7 +4121,9 @@ static void NEAutoSignInDoSignWithAuth(NSString *auth, NSString *deviceId) {
                                                    options:0 error:nil];
     NSURLSessionDataTask *task = [NESignInSession() dataTaskWithRequest:req
         completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
+        gAutoSignInCheckPending = NO;
         if (err || !data) {
+            NEAutoSignInNoteCheck(@"网络失败", -1);
             os_log(gLog, "[SIGN] 签到请求失败：%{public}s",
                    err ? err.localizedDescription.UTF8String : "no data");
             return;
@@ -3888,11 +4133,16 @@ static void NEAutoSignInDoSignWithAuth(NSString *auth, NSString *deviceId) {
         int c = code ? [code intValue] : -1;
         if (c == 0) {
             NENoteSignInDoneToday();
+            gAutoSignInDoneToday = YES;
+            NEAutoSignInNoteCheck(@"已签到", c);
             os_log(gLog, "[SIGN] 签到成功（code 0）");
         } else if (c == 540004) {
             NENoteSignInDoneToday();
+            gAutoSignInDoneToday = YES;
+            NEAutoSignInNoteCheck(@"已签到", c);
             os_log(gLog, "[SIGN] 今天已签到（签到接口报 540004），不重复签");
         } else {
+            NEAutoSignInNoteCheck([NSString stringWithFormat:@"code %d", c], c);
             os_log(gLog, "[SIGN] 签到返回 code=%d（下次打开 App 再试）", c);
         }
     }];
@@ -3900,23 +4150,28 @@ static void NEAutoSignInDoSignWithAuth(NSString *auth, NSString *deviceId) {
 }
 
 // 静默签到（后台跑，无 UI、无弹窗）：先查状态，再按需签。只记 code，不记 token。
+// token 没找到 / 网络失败都不算“签成”，pending 清掉，下次进前台再试。
 static void NEAutoSignInRun(void) {
-    if (!NEAutoSignInEnabled()) return;
+    if (!NEAutoSignInEnabled()) { gAutoSignInCheckPending = NO; return; }
     NSString *auth = NEFindSignInAuthHeader();
     NSString *deviceId = NEFindDeviceId();
     if (auth.length < 20 || deviceId.length < 8) {
+        gAutoSignInCheckPending = NO;
+        NEAutoSignInNoteCheck(@"无 token", -1);
         os_log(gLog, "[SIGN] 跳过：token 或 deviceId 未找到（token:%s deviceId:%s）",
                auth.length >= 20 ? "有" : "无", deviceId.length >= 8 ? "有" : "无");
         return;
     }
     NSURL *statusURL = [NSURL URLWithString:@"https://cn-cbu-gateway.ninebot.com/portal/api/user-sign/v2/status"];
-    if (!statusURL) return;
+    if (!statusURL) { gAutoSignInCheckPending = NO; return; }
     NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:statusURL];
     req.HTTPMethod = @"GET";
     [req setValue:auth forHTTPHeaderField:@"Authorization"];
     NSURLSessionDataTask *task = [NESignInSession() dataTaskWithRequest:req
         completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
         if (err || !data) {
+            gAutoSignInCheckPending = NO;
+            NEAutoSignInNoteCheck(@"网络失败", -1);
             os_log(gLog, "[SIGN] 查状态失败：%{public}s",
                    err ? err.localizedDescription.UTF8String : "no data");
             return;
@@ -3925,37 +4180,44 @@ static void NEAutoSignInRun(void) {
         NSNumber *code = json[@"code"];
         if (code && [code intValue] == 540004) {
             NENoteSignInDoneToday();
+            gAutoSignInDoneToday = YES;
+            gAutoSignInCheckPending = NO;
+            NEAutoSignInNoteCheck(@"已签到", 540004);
             os_log(gLog, "[SIGN] 今天已签到（状态接口报 540004），不重复签");
             return;
         }
         // 状态正常（code 0）或未明确 → 调签到接口，签过会回 540004，不会重复领
+        // （pending 由 DoSign 的回调清掉，别在这里清）
         NEAutoSignInDoSignWithAuth(auth, deviceId);
     }];
     [task resume];
 }
 
-// 本次启动只排一次：开关开着才排；等 6 秒让 App 自己的登录/请求先跑（钩子先抓到 token）。
-static void NEAutoSignInScheduleOnce(void) {
-    if (gAutoSignInAttempted) return;
-    gAutoSignInAttempted = YES;
+// 排一次静默检查：开关开着、今天还没签成、且没已排的检查时才排。
+// 首次 6 秒（等 App 自己的登录/请求先跑，钩子先抓到 token）；重试 3 秒。
+// token 没抓到 / 网络失败都不算“签成”，下次进前台再试（不再只试一次）。
+static void NEAutoSignInScheduleAfter(double seconds) {
     if (!NEAutoSignInEnabled()) return;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(6 * NSEC_PER_SEC)),
+    if (gAutoSignInDoneToday || gAutoSignInCheckPending) return;
+    gAutoSignInCheckPending = YES;
+    gAutoSignInEverScheduled = YES;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(seconds * NSEC_PER_SEC)),
                    dispatch_get_global_queue(QOS_CLASS_BACKGROUND, 0), ^{
         NEAutoSignInRun();
     });
 }
 
-// 首次进前台时触发一次（本次启动只试一次，不在每次切回前台时重复）。
+// 每次进前台都试着排一次（已签成/已排时 ScheduleAfter 自己会拦）。
 // 万一注入时 App 已在前台（become-active 已发过），直接排一次。
 static void NEAutoSignInTriggerIfNeeded(void) {
     if (gAutoSignInObserver) return;
     gAutoSignInObserver = [[NSNotificationCenter defaultCenter]
         addObserverForName:UIApplicationDidBecomeActiveNotification object:nil
         queue:[NSOperationQueue mainQueue] usingBlock:^(NSNotification *note) {
-        NEAutoSignInScheduleOnce();
+        NEAutoSignInScheduleAfter(gAutoSignInEverScheduled ? 3.0 : 6.0);
     }];
     if ([[UIApplication sharedApplication] applicationState] == UIApplicationStateActive)
-        NEAutoSignInScheduleOnce();
+        NEAutoSignInScheduleAfter(6.0);
 }
 
 // ---------------- HUD 设置界面 ----------------
@@ -3970,6 +4232,7 @@ static const char NEHUDButtonKey = 0;
 static const char NEBeautyGroupKey = 0; // 设置页：“美化娱乐”折叠容器
 static const char NENavGroupKey = 0;    // 设置页：“导航增强”折叠容器
 static const char NESignInRecordKey = 0; // 设置页：自动签到记录 label
+static const char NESignInDiagKey = 0; // 设置页：自动签到诊断行 label（v0.4.1）
 static const char NESpeedLimitValueKey = 0;
 
 @interface NEHUDSettingsVC : UIViewController
@@ -4171,7 +4434,7 @@ static void NECheckSettingsButton(void) {
     }
     [stack addArrangedSubview:[self ne_cardWrappingStack:tipsStack]];
 
-    // ---- 自动签到卡（v0.4.0，快捷指令的保险；单独一行，不折叠）----
+    // ---- 自动签到卡（v0.4.0，快捷指令的保险；单独一行，不折叠；v0.4.1 加诊断行）----
     UIStackView *signStack = [UIStackView new];
     signStack.axis = UILayoutConstraintAxisVertical;
     signStack.spacing = 0;
@@ -4183,6 +4446,14 @@ static void NECheckSettingsButton(void) {
     signRecord.numberOfLines = 0;
     objc_setAssociatedObject(self, &NESignInRecordKey, signRecord, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     [signStack addArrangedSubview:[self ne_footnoteView:signRecord]];
+    // v0.4.1 诊断行：token 有/无·来源、上次检查时间、结果（只显示状态，不显示 token 值）
+    UILabel *signDiag = [UILabel new];
+    signDiag.text = NEAutoSignInDiagText();
+    signDiag.font = [UIFont systemFontOfSize:13];
+    signDiag.textColor = [UIColor secondaryLabelColor];
+    signDiag.numberOfLines = 0;
+    objc_setAssociatedObject(self, &NESignInDiagKey, signDiag, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    [signStack addArrangedSubview:[self ne_footnoteView:signDiag]];
     UILabel *signNote = [UILabel new];
     signNote.text = @"快捷指令每天 08:00 已自动签到，这里是保险：万一快捷指令没跑起来，打开 App 时插件会静默补签；今天已签过就什么也不做。";
     signNote.font = [UIFont systemFontOfSize:13];
@@ -4291,7 +4562,7 @@ static void NECheckSettingsButton(void) {
     aboutName.text = @"NinebotEnhance";
     aboutName.font = [UIFont boldSystemFontOfSize:16];
     UILabel *aboutVer = [UILabel new];
-    aboutVer.text = @"0.4.0";
+    aboutVer.text = @"0.4.1";
     aboutVer.font = [UIFont systemFontOfSize:15];
     aboutVer.textColor = [UIColor secondaryLabelColor];
     [aboutTitleRow addArrangedSubview:aboutName];
@@ -4339,10 +4610,12 @@ static void NECheckSettingsButton(void) {
     [self refreshSignInRecord];
 }
 
-// 签到记录行：打开设置页时按最新存值刷一遍（签到可能在设置页打开前已跑完）
+// 签到记录行 + 诊断行：打开设置页时按最新状态刷一遍（签到可能在设置页打开前已跑完）
 - (void)refreshSignInRecord {
     UILabel *record = objc_getAssociatedObject(self, &NESignInRecordKey);
     if (record) record.text = NEAutoSignInRecordText();
+    UILabel *diag = objc_getAssociatedObject(self, &NESignInDiagKey);
+    if (diag) diag.text = NEAutoSignInDiagText();
 }
 
 // 签到跑完发来的通知（成功或今天已签过都发）：设置页开着时也刷新记录行
@@ -4566,8 +4839,8 @@ static void NECheckSettingsButton(void) {
         NEForceRefreshLabels(); // v0.3.9 修复：同上
         NEForceRedrawRNText();
     }
-    // v0.4.0 自动签到：打开开关就排一次静默签到（本次启动还没试过时）
-    if ([key isEqualToString:@"NEAutoSignIn"] && sw.isOn) NEAutoSignInScheduleOnce();
+    // v0.4.1 自动签到：打开开关就排一次静默签到（今天没签成、且没已排的检查时）
+    if ([key isEqualToString:@"NEAutoSignIn"] && sw.isOn) NEAutoSignInScheduleAfter(1.0);
 }
 
 // 限速行：左边“限速”+ 中间值 + 右边步进器（30–120，每 5 一档）
@@ -5382,7 +5655,7 @@ static void NEProbeStart(void) {
                hasSel ? "YES" : "NO");
     }
 
-    os_log(gLog, "NinebotEnhance iOS 0.4.0 已加载（小胶囊 HUD：日期/天气/信号/音量/电量/来电/超速 + 翻页时钟 + 车辆数据探测 + 有效期9999/主页换图/自定义显示 + 自动签到）");
+    os_log(gLog, "NinebotEnhance iOS 0.4.1 已加载（小胶囊 HUD：日期/天气/信号/音量/电量/来电/超速 + 翻页时钟 + 车辆数据探测 + 有效期9999/主页换图/自定义显示 + 自动签到）");
 
     // 电量监听 + 定位 + 来电观察，全部在主队列 / 后台队列做，不阻塞加载
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -5392,7 +5665,7 @@ static void NEProbeStart(void) {
         gLocMgr.delegate = gLocDelegate;
         NEApplySpeedLocationMode(); // 提醒开着 → 连续定位；关着 → 单次定位（只够天气用）
 
-        // v0.4.0 自动签到（保险）：首次进前台时静默补签一次（开关默认开）
+        // v0.4.1 自动签到（保险）：每次进前台时静默补签（今天没签成时才跑，开关默认开）
         NEAutoSignInTriggerIfNeeded();
 
         // v0.3.9 修复：启动 3 秒后强制刷新一次文字+图片——页面可能在钩子装好前已加载，
