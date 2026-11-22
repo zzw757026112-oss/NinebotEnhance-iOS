@@ -131,6 +131,22 @@
 //  填满宽度必然要裁掉一部分），优先保顶部。显示版按（原图对象 + view 尺寸）
 //  缓存，换图时 NEClearImageCache 一起清；“已是自定义图”的放行判定三处
 //  （setImage 分类、CALayer setContents、刷新同步）都认显示版。车辆图不动。
+// v0.3.9 第九修（用户实测 c5731585：设置页两行都显示“战神”）：
+//  根因不是行标题写错——源码里标题本来就是“等级”“连续签到天数”。
+//  是 UILabel setText: 钩子把设置页自己的 label 也改了：称号的“分开 label”
+//  规则（短文本 + 不含“称号” + 不是数字 + 附近有“称号” label 就换成称号值）
+//  在设置页里误触发——“等级”“连续签到天数”两行紧挨着“称号”行（行高 32 +
+//  间距 18 = 50px，在相邻判定 60px 内），开关一切换就触发强制刷新重算，
+//  两行都被换成称号值“战神”。改：NEFixedLabelString 开头直接放行我们自己
+//  设置页（NEHUDSettingsVC）的 label（响应链上溯找所属 VC）；同时按用户
+//  要求把两行标题改成“等级（1-9）”（等级最高 9 级，超过 9 不显示）和
+//  “签到天数”。只改标题 + 钩子放行，key/值/开关行为一律不动。
+//  另：用户报“改车辆图却换了背景图”——静态核查：选图接线、图片加载缓存、
+//  分类三处全对（kind 0 → ne-vehicle.png/NEVehicleImagePath，kind 1 →
+//  ne-bg.png/NEBackgroundImagePath；分类 veh 给最后一个可见满屏 view，
+//  其余给 bg），代码里没有车辆/背景写反的地方；应是运行时的三张 view
+//  可见状态在选图瞬间与诊断快照不同，需用户选完车辆图后立刻导一份新
+//  ne-diag.txt（看三张图的 hidden 状态和图尺寸）+ 设备页截图才能定。
 // v0.3.8 改动：超速红行改成“请勿超速行驶！”，字比普通行大但绝不超胶囊边框；
 //  超速那一刻中文语音读一次“您已超速行驶，请注意安全”（跟着超速提醒开关走，不另设开关）。
 // v0.3.7 改动：设置页“日期时间”改叫“日期”（时间只在翻页时钟里显示）；和 App 1.3.19 同款。
@@ -569,6 +585,24 @@ static BOOL NENearbyLabelContainsWide(UILabel *label, NSString *keyword) {
     return NO;
 }
 
+// 这个 label 是不是我们自己的设置页（NEHUDSettingsVC）里的：
+// 沿响应链上溯找所属 VC，类名含 NEHUDSettings 就是。设置页的 label
+// 是插件自己写的文字，钩子不该改——设置页的自定义项 label（“等级（1-9）”
+// “签到天数”等）就在“称号”行旁边，称号的“分开 label”规则会把它们
+// 当成要换的称号值（战神），设置页两行都显示“战神”就是这么来的。
+static BOOL NEIsLabelInOwnSettingsPage(UILabel *label) {
+    if (!label) return NO;
+    UIResponder *r = label.nextResponder;
+    while (r) {
+        if ([r isKindOfClass:[UIViewController class]]) {
+            NSString *cls = NSStringFromClass([r class]);
+            return [cls rangeOfString:@"NEHUDSettings"].location != NSNotFound;
+        }
+        r = r.nextResponder;
+    }
+    return NO;
+}
+
 // 所有文字替换共用：输入 label 的纯文本（setText: 的 text 或 attributedText.string），
 // 返回替换后的字符串；没有可换的返回 nil。
 // fieldOut/separateOut（可为 NULL）返回命中的字段 key 和是不是“分开 label”式替换。
@@ -579,6 +613,8 @@ static NSString *NEFixedLabelString(NSString *text, UILabel *label,
     if (!text.length || !label) return nil;
     // 按钮的标题 label（如我们自己的“Ninebot pro+”按钮）不碰
     if ([label.superview isKindOfClass:[UIButton class]]) return nil;
+    // 我们自己的设置页的 label 不碰（见上文 NEIsLabelInOwnSettingsPage）
+    if (NEIsLabelInOwnSettingsPage(label)) return nil;
     // 1. 服务有效期（自定义值；没填就不换，显示真实有效期）
     NSString *validityValue = NEValidityDisplayValue();
     if (gValidity9999 && validityValue.length > 0) {
@@ -3679,9 +3715,9 @@ static void NECheckSettingsButton(void) {
     // v0.3.9 追加：五个自定义显示项（开关 + 输入框，自己填想显示的值）
     [beautyStack addArrangedSubview:[self customDisplayRow:@"N币余额" toggleKey:@"NENCoins" valueKey:@"NENCoinsValue" on:NEBoolDefault(@"NENCoins") value:[defs stringForKey:@"NENCoinsValue"] placeholder:@"如 99999"]];
     [beautyStack addArrangedSubview:[self customDisplayRow:@"总里程" toggleKey:@"NEMileage" valueKey:@"NEMileageValue" on:NEBoolDefault(@"NEMileage") value:[defs stringForKey:@"NEMileageValue"] placeholder:@"如 99999.9 km"]];
-    [beautyStack addArrangedSubview:[self customDisplayRow:@"等级" toggleKey:@"NELevel" valueKey:@"NELevelValue" on:NEBoolDefault(@"NELevel") value:[defs stringForKey:@"NELevelValue"] placeholder:@"如 Lv.99"]];
+    [beautyStack addArrangedSubview:[self customDisplayRow:@"等级（1-9）" toggleKey:@"NELevel" valueKey:@"NELevelValue" on:NEBoolDefault(@"NELevel") value:[defs stringForKey:@"NELevelValue"] placeholder:@"如 Lv.99"]];
     [beautyStack addArrangedSubview:[self customDisplayRow:@"称号" toggleKey:@"NETitle" valueKey:@"NETitleValue" on:NEBoolDefault(@"NETitle") value:[defs stringForKey:@"NETitleValue"] placeholder:@"如 车神"]];
-    [beautyStack addArrangedSubview:[self customDisplayRow:@"连续签到天数" toggleKey:@"NESignDays" valueKey:@"NESignDaysValue" on:NEBoolDefault(@"NESignDays") value:[defs stringForKey:@"NESignDaysValue"] placeholder:@"如 365"]];
+    [beautyStack addArrangedSubview:[self customDisplayRow:@"签到天数" toggleKey:@"NESignDays" valueKey:@"NESignDaysValue" on:NEBoolDefault(@"NESignDays") value:[defs stringForKey:@"NESignDaysValue"] placeholder:@"如 365"]];
     // v0.3.9 诊断：手动导出当前页的界面结构（设置页底下的那个 tab 页面）
     [beautyStack addArrangedSubview:[self diagExportRow]];
     [stack addArrangedSubview:[self groupHeader:@"美化娱乐" tag:0]];
