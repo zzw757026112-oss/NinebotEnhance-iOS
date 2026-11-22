@@ -63,6 +63,16 @@
 //  记有没有图、图尺寸；每按钮记标题）。设置页“美化娱乐”组里加一行
 //  “导出界面诊断”，点一下立刻导当前页。用户用 Filza 打开发回，照真实结构修。
 //  只写界面文本，不写任何 token、密码、请求头；文件超 500KB 从头写。
+// v0.3.9 第四修（诊断实测：车辆槽位显示背景图）：背景/车辆按 frame 尺寸分
+//  是错的——诊断证明车辆图画在满屏透明画布上，frame 和背景图一模一样
+//  （0,0,430,521），按尺寸分车辆永远被当成背景；而且用户自选背景是竖图，
+//  按纵横比分也不稳。改：主信号是同级顺序——容器里最后一个 UIImageView
+//  是车辆层（两个 UIViews 之后、UITableView 之前），之前的都是背景层；
+//  顺序拿不到时才退到纵横比，且只认“近似正方形 → 背景”。setImage: 钩子、
+//  SDWebImage URL 判定、图片强制刷新三处共用同一套分类（NEClassifyDeviceImage
+//  / NEImageBySiblingOrder）；已是自定义图的放行，不来回换；换图后刷新
+//  （缓存已清、当前图是旧自定义图）也能分对，因为顺序判定不依赖当前图片。
+//  我的/服务页（React Native）的值仍不动，是另一回事，不在这次改动里。
 // v0.3.8 改动：超速红行改成“请勿超速行驶！”，字比普通行大但绝不超胶囊边框；
 //  超速那一刻中文语音读一次“您已超速行驶，请注意安全”（跟着超速提醒开关走，不另设开关）。
 // v0.3.7 改动：设置页“日期时间”改叫“日期”（时间只在翻页时钟里显示）；和 App 1.3.19 同款。
@@ -976,17 +986,79 @@ static NSString *NEDiagSanitize(NSString *s) {
     return t;
 }
 
+// 可见性标记：FailureView 常驻层级里、加载成功时只是 hidden，不记 hidden 就
+// 会把它当成当前状态。self hidden 记 [hidden]，祖先 hidden 记 [hidden-by-ancestor]，
+// alpha<1 也记出来。
+static NSString *NEVisMarker(UIView *v) {
+    NSMutableString *m = [NSMutableString string];
+    if (v.hidden) {
+        [m appendString:@" [hidden]"];
+    } else {
+        for (UIView *p = v.superview; p; p = p.superview) {
+            if (p.hidden) { [m appendString:@" [hidden-by-ancestor]"]; break; }
+        }
+    }
+    if (v.alpha < 0.99) [m appendFormat:@" [alpha=%.2f]", v.alpha];
+    return m;
+}
+
+// 诊断里的 frame：相对被导出的根视图（页面自身坐标），不是窗口坐标。
+// 自动导出时根视图就是全屏 tab 页，两者数值相同；手动导出时设置 modal 把
+// 底下的 tab 页缩放到约 0.907，窗口坐标全是缩过的，页面自身坐标才是真实布局。
+static CGRect NEDiagFrame(UIView *v, UIView *root) {
+    if (!v || !root) return CGRectZero;
+    @try { return [v convertRect:v.bounds toView:root]; } @catch (...) { return CGRectZero; }
+}
+
+// RN Fabric 文本（我的/服务页是 React Native，文字不是 UILabel）：
+// 类名含 Paragraph/Text（如 RCTParagraphComponentView）。文字在组件的
+// attributedString（KVC 可能读到 NSAttributedString）或 accessibilityLabel
+// 里；读不到只记类名+frame，绝不崩。
+static BOOL NEIsRNTextView(UIView *v) {
+    NSString *cls = NSStringFromClass([v class]);
+    return [cls rangeOfString:@"Paragraph"].location != NSNotFound ||
+           [cls rangeOfString:@"Text"].location != NSNotFound;
+}
+
+static NSString *NERNTextOfView(UIView *v) {
+    if (!v) return nil;
+    @try {
+        id as = [v valueForKey:@"attributedString"];
+        if ([as isKindOfClass:[NSAttributedString class]]) return [(NSAttributedString *)as string];
+        if ([as isKindOfClass:[NSString class]]) return (NSString *)as;
+    } @catch (...) {}
+    @try {
+        id t = [v valueForKey:@"text"];
+        if ([t isKindOfClass:[NSString class]]) return (NSString *)t;
+        if ([t isKindOfClass:[NSAttributedString class]]) return [(NSAttributedString *)t string];
+    } @catch (...) {}
+    @try {
+        id at = [v valueForKey:@"attributedText"];
+        if ([at isKindOfClass:[NSAttributedString class]]) return [(NSAttributedString *)at string];
+        if ([at isKindOfClass:[NSString class]]) return (NSString *)at;
+    } @catch (...) {}
+    @try {
+        NSString *acc = v.accessibilityLabel;
+        if (acc.length) return acc;
+    } @catch (...) {}
+    return nil;
+}
+
 // 递归走子树：深度最多 8 层、总视图数最多 2000，超了就停（文件别太大）。
 // 每个 label 多记一列“匹配器会怎么换”——直接跑 NEFixedLabelString（纯读，
-// 无副作用），一眼看出哪个没认出来、为什么。
-static void NEDumpDiagViewRec(UIView *v, UIWindow *w, NSMutableString *out,
+// 无副作用），一眼看出哪个没认出来、为什么。RN 文本也跑同一匹配器
+// （它只用 label.superview/frame 等 UIView 层面的东西，不调 UILabel 专有
+// 方法，传 RN view 是安全的）；但分开 label 的描述在 RN 里也是 RN 文本、
+// 不是 UILabel，所以 RN 的 verdict 只含同 label 规则，纯数字需看 frame 人工判断。
+static void NEDumpDiagViewRec(UIView *v, UIView *root, NSMutableString *out,
                               int depth, int *count) {
     if (!v || depth > 8 || *count >= 2000) return;
     (*count)++;
     NSMutableString *indent = [NSMutableString string];
     for (int i = 0; i < depth; i++) [indent appendString:@"  "];
-    CGRect f = NEFrameInWindow(v, w);
+    CGRect f = NEDiagFrame(v, root);
     NSString *cls = NSStringFromClass([v class]);
+    NSString *vis = NEVisMarker(v);
     if ([v isKindOfClass:[UILabel class]]) {
         UILabel *label = (UILabel *)v;
         NSString *plain = NEPlainTextOfLabel(label);
@@ -1001,8 +1073,30 @@ static void NEDumpDiagViewRec(UIView *v, UIWindow *w, NSMutableString *out,
         } else {
             verdict = @"(no change)";
         }
-        [out appendFormat:@"%@%@ frame=(%.0f,%.0f,%.0f,%.0f) text=\"%@\" %@\n",
-            indent, cls, f.origin.x, f.origin.y, f.size.width, f.size.height, text, verdict];
+        [out appendFormat:@"%@%@ frame=(%.0f,%.0f,%.0f,%.0f)%@ text=\"%@\" %@\n",
+            indent, cls, f.origin.x, f.origin.y, f.size.width, f.size.height, vis, text, verdict];
+        NSString *chain = NESuperviewChainString(v);
+        if (chain.length) [out appendFormat:@"%@  ancestors: %@\n", indent, chain];
+    } else if (NEIsRNTextView(v)) {
+        NSString *rnText = NERNTextOfView(v);
+        if (rnText.length) {
+            NSString *text = NEDiagSanitize(rnText);
+            NSString *field = nil; BOOL sep = NO;
+            NSString *fixed = NEFixedLabelString(rnText, (UILabel *)v, &field, &sep);
+            NSString *verdict;
+            if (field.length) {
+                NSString *fv = NEDiagSanitize(fixed);
+                if (fv.length > 80) fv = [[fv substringToIndex:80] stringByAppendingString:@"…"];
+                verdict = [NSString stringWithFormat:@"→ %@ = \"%@\"", field, fv];
+            } else {
+                verdict = @"(no change)";
+            }
+            [out appendFormat:@"%@%@ [RN-text] frame=(%.0f,%.0f,%.0f,%.0f)%@ text=\"%@\" %@\n",
+                indent, cls, f.origin.x, f.origin.y, f.size.width, f.size.height, vis, text, verdict];
+        } else {
+            [out appendFormat:@"%@%@ [RN-text] frame=(%.0f,%.0f,%.0f,%.0f)%@ (text unreadable)\n",
+                indent, cls, f.origin.x, f.origin.y, f.size.width, f.size.height, vis];
+        }
         NSString *chain = NESuperviewChainString(v);
         if (chain.length) [out appendFormat:@"%@  ancestors: %@\n", indent, chain];
     } else if ([v isKindOfClass:[UIImageView class]]) {
@@ -1010,35 +1104,33 @@ static void NEDumpDiagViewRec(UIView *v, UIWindow *w, NSMutableString *out,
         NSString *imgInfo = iv.image ?
             [NSString stringWithFormat:@"image %.0fx%.0f", iv.image.size.width, iv.image.size.height] :
             @"no image";
-        [out appendFormat:@"%@%@ frame=(%.0f,%.0f,%.0f,%.0f) %@\n",
-            indent, cls, f.origin.x, f.origin.y, f.size.width, f.size.height, imgInfo];
+        [out appendFormat:@"%@%@ frame=(%.0f,%.0f,%.0f,%.0f)%@ %@\n",
+            indent, cls, f.origin.x, f.origin.y, f.size.width, f.size.height, vis, imgInfo];
     } else if ([v isKindOfClass:[UIButton class]]) {
         UIButton *btn = (UIButton *)v;
         NSString *title = NEDiagSanitize([btn titleForState:UIControlStateNormal]);
-        [out appendFormat:@"%@%@ frame=(%.0f,%.0f,%.0f,%.0f) title=\"%@\"\n",
-            indent, cls, f.origin.x, f.origin.y, f.size.width, f.size.height, title];
+        [out appendFormat:@"%@%@ frame=(%.0f,%.0f,%.0f,%.0f)%@ title=\"%@\"\n",
+            indent, cls, f.origin.x, f.origin.y, f.size.width, f.size.height, vis, title];
     } else {
-        [out appendFormat:@"%@%@ frame=(%.0f,%.0f,%.0f,%.0f)\n",
-            indent, cls, f.origin.x, f.origin.y, f.size.width, f.size.height];
+        [out appendFormat:@"%@%@ frame=(%.0f,%.0f,%.0f,%.0f)%@\n",
+            indent, cls, f.origin.x, f.origin.y, f.size.width, f.size.height, vis];
     }
     for (UIView *sub in v.subviews) {
-        NEDumpDiagViewRec(sub, w, out, depth + 1, count);
+        NEDumpDiagViewRec(sub, root, out, depth + 1, count);
         if (*count >= 2000) return;
     }
 }
 
 static void NEDumpDiagForView(UIView *root, NSString *pageName) {
     if (!root) return;
-    UIWindow *w = NEKeyWindow();
-    if (!w) return;
     NSMutableString *out = [NSMutableString string];
     NSDateFormatter *df = [[NSDateFormatter alloc] init];
     df.dateFormat = @"yyyy-MM-dd HH:mm:ss";
     [out appendFormat:@"\n===== %@ %@ =====\n", pageName ?: @"?", [df stringFromDate:[NSDate date]]];
-    [out appendString:@"(label 文本为当前显示值；→ 后面是匹配器会换成的字段/值，(no change) 表示不换)\n"];
+    [out appendString:@"(文本为当前显示值；→ 后面是匹配器会换成的字段/值，(no change) 表示不换；[hidden] 表示该视图被隐藏；[RN-text] 是 React Native 文本视图；RN 文本的 verdict 只含同 label 规则；frame 是页面自身坐标)\n"];
     int count = 0;
     @try {
-        NEDumpDiagViewRec(root, w, out, 0, &count);
+        NEDumpDiagViewRec(root, root, out, 0, &count);
     } @catch (...) {
         [out appendString:@"(dump 中途异常，已截断)\n"];
     }
@@ -1170,25 +1262,69 @@ static BOOL NEStringHasAny(NSString *s, NSArray<NSString *> *keys) {
 // 盖在上面。定义在 NEAppTabBarController 之后，这里先声明。
 static BOOL NEViewIsOnDeviceTab(UIView *v);
 
-// SDWebImage 的 URL 判定：满屏大图位 → 背景；小图（图标）直接放行；
-// 其余按 URL 关键字分车辆图 / 背景图。view 的 bounds 在自动布局完成前可能为 0，
-// 那时只按 URL 关键字判定。
+// 背景 vs 车辆：主信号是 view 在同级里的顺序，不是图片尺寸。
+// 诊断（ne-diag.txt，两次）证明：设备页容器里有三张满屏 UIImageView，
+// 车辆图画在满屏透明画布上，frame 和背景图一模一样（0,0,430,521），
+// 按 frame/尺寸分，车辆永远被当成背景——车辆槽位显示背景图的根因
+// （用户实测：背景和车辆选了不同的图，车辆处却显示背景图；换背景图后
+// 三张 view 全跟着变，全是背景图尺寸）。
+// 而且用户自选背景是竖图（2458x4096、2160x4790），车图也可能是竖图，
+// 按纵横比分也不稳。所以：容器里最后一个 UIImageView 是车辆层
+// （两个 UIViews 之后、UITableView 之前），之前的 UIImageView 都是背景层。
+// 顺序拿不到时（view 还没挂进层级）才退到纵横比，且只认“近似正方形 → 背景”
+// （主题背景 1440x1440 正好是正方形）；非正方形的不换，等刷新时再按顺序换。
+// 返回要换成的自定义图；nil = 不换。
+static UIImage *NEImageBySiblingOrder(UIImageView *iv, UIImage *bg, UIImage *veh) {
+    UIView *parent = iv.superview;
+    if (!parent) return nil;
+    // 只对满屏大 view 用顺序判定：宽 >= 屏宽 0.9 且高 >= 屏高 0.5
+    // （诊断里三张图都是 430x521）；小图走不到这里。
+    CGSize bs = iv.bounds.size;
+    CGFloat sw = [UIScreen mainScreen].bounds.size.width;
+    CGFloat sh = [UIScreen mainScreen].bounds.size.height;
+    if (bs.width < sw * 0.9 || bs.height < sh * 0.5) return nil;
+    UIImageView *last = nil;
+    for (UIView *sub in parent.subviews) {
+        if ([sub isKindOfClass:[UIImageView class]]) last = (UIImageView *)sub;
+    }
+    if (!last) return nil;
+    return (last == iv) ? veh : bg;
+}
+
+static UIImage *NEClassifyDeviceImage(UIImageView *iv, UIImage *image) {
+    if (!image) return nil;
+    UIImage *bg = NECustomBackgroundImage();
+    UIImage *veh = NECustomVehicleImage();
+    if (!bg && !veh) return nil;
+    // 已经是自定义图：放行。刷新/重设时再进钩子不会来回换。
+    if ((bg && image == bg) || (veh && image == veh)) return nil;
+    CGFloat w = image.size.width, h = image.size.height;
+    // 小图（图标/头像）一概不碰
+    if (w < 200 && h < 200) return nil;
+    // 主信号：同级顺序
+    UIImage *byOrder = NEImageBySiblingOrder(iv, bg, veh);
+    if (byOrder) return byOrder;
+    // 拿不到顺序：只认近似正方形 → 背景；其余不换，等刷新时按顺序换。
+    if (w > 0 && h > 0) {
+        CGFloat ratio = w / h;
+        if (ratio >= 0.98 && ratio <= 1.02) return bg;
+    }
+    return nil;
+}
+
+// SDWebImage 的 URL 判定：URL 关键字优先；没关键字时按同级顺序。
+// 以前满屏 bounds 先判（车辆 view 的 bounds 也是满屏），车辆 URL 也会被当成背景。
+// 小图（图标）直接放行；判定不出就返回 nil，等图片下完走 setImage: 兜底再判。
 static UIImage *NEImageForSDURL(UIImageView *iv, NSURL *url) {
     if (!NEViewIsOnDeviceTab(iv)) return nil;
     NSString *u = [[url absoluteString] lowercaseString];
     if (!u.length) return nil;
-    CGSize vs = iv.bounds.size;
-    CGFloat sw = [UIScreen mainScreen].bounds.size.width;
-    CGFloat sh = [UIScreen mainScreen].bounds.size.height;
-    if (vs.width >= sw * 0.9 && vs.height >= sh * 0.5)
-        return NECustomBackgroundImage();
-    if (vs.width > 0 && vs.width < 150) return nil; // 图标/头像不碰
     if (NEStringHasAny(u, @[@"vehicle", @"veh", @"car", @"bike", @"scooter",
                             @"motor", @"m395", @"model"]))
         return NECustomVehicleImage();
     if (NEStringHasAny(u, @[@"bg", @"background", @"banner", @"wallpaper", @"theme"]))
         return NECustomBackgroundImage();
-    return nil;
+    return NEImageBySiblingOrder(iv, NECustomBackgroundImage(), NECustomVehicleImage());
 }
 
 static void (*orig_sd_setImageWithURL)(id, SEL, NSURL *);
@@ -1224,21 +1360,15 @@ static void NE_sd_setImageWithURL_ctx(id self, SEL _cmd, NSURL *url, id placehol
 
 // set-time 拦截的主力：任何路径设图（SDWebImage 内部完成、imageNamed + setImage、
 // 直接赋值、主题重载）都会走这里，在显示前就把主题图/车图换掉——没有延迟、
-// 没有竞态，切 tab 回来重载也一样被拦。只在“设备”tab 换（响应链判定，
-// 不跟 presented 链）；小图（图标/头像）不碰。
+// 没有竞态，切 tab 回来重载也一样被拦。背景/车辆按 NEClassifyDeviceImage
+// 区分（主信号是同级顺序，不按 frame 尺寸——车辆画在满屏画布上，
+// 按尺寸分永远错）。只在“设备”tab 换（响应链判定，不跟 presented 链）；
+// 小图（图标/头像）不碰；已是自定义图的放行，不来回换。
 static void (*orig_UIImageView_setImage)(id, SEL, UIImage *);
 static void NE_UIImageView_setImage(id self, SEL _cmd, UIImage *image) {
-    if (image && (gHasVehicleImage || gHasBgImage)) {
-        CGSize sz = image.size;
-        CGFloat sw = [UIScreen mainScreen].bounds.size.width;
-        CGFloat sh = [UIScreen mainScreen].bounds.size.height;
-        UIImage *custom = nil;
-        if (sz.width >= sw * 0.9 && sz.height >= sh * 0.5) {
-            custom = NECustomBackgroundImage(); // 满屏大图 → 背景
-        } else if (sz.width >= 200) {
-            custom = NECustomVehicleImage();    // 大图 → 车辆图；小图不碰
-        }
-        if (custom && NEViewIsOnDeviceTab((UIImageView *)self)) {
+    if (image && (gHasVehicleImage || gHasBgImage) && NEViewIsOnDeviceTab((UIImageView *)self)) {
+        UIImage *custom = NEClassifyDeviceImage((UIImageView *)self, image);
+        if (custom) {
             orig_UIImageView_setImage(self, _cmd, custom);
             return;
         }
@@ -1415,16 +1545,12 @@ static void NEForceRefreshImagesInView(UIView *view) {
             UIImage *img = iv.image;
             if (img) {
                 @try {
-                    CGSize sz = img.size;
-                    CGFloat sw = [UIScreen mainScreen].bounds.size.width;
-                    CGFloat sh = [UIScreen mainScreen].bounds.size.height;
-                    UIImage *custom = nil;
-                    if (sz.width >= sw * 0.9 && sz.height >= sh * 0.5)
-                        custom = NECustomBackgroundImage(); // 满屏大图 → 背景
-                    else if (sz.width >= 200)
-                        custom = NECustomVehicleImage();    // 大图 → 车辆图；小图不碰
-                    // 直接赋值：SDWebImage 路径下 setImage: 没钩子，赋值就是替换；
-                    // setImage: 兜底钩子装着时，走钩子再算一次也是同一张图，不会循环。
+                    // 背景/车辆按 NEClassifyDeviceImage 区分（主信号是同级顺序，
+                    // 不按尺寸——车辆画在满屏画布上，按尺寸分会错换成背景图）。
+                    // 顺序判定不依赖当前图片的纵横比，所以换图后刷新（缓存已清、
+                    // 当前图是旧自定义图）也能分对；已是当前自定义图的直接放行。
+                    // 直接赋值走 setImage: 钩子再算一次也是同一张图，不会循环。
+                    UIImage *custom = NEClassifyDeviceImage(iv, img);
                     if (custom && custom != img) iv.image = custom;
                 } @catch (...) {}
             }
@@ -3185,12 +3311,24 @@ static void NECheckSettingsButton(void) {
 }
 
 - (void)exportDiagTapped:(UIButton *)sender {
+    // 取设置 modal 底下的 tab 页面：选中的 tab 若是导航控制器，取它的根页面
+    // （tab 页本身）；设置页若是 push 进来的，在栈顶，不取它。frame 用页面
+    // 自身坐标（见 NEDiagFrame），modal 把底下页面缩放也不影响。
     UITabBarController *tab = NEAppTabBarController();
     UIViewController *sel = tab.selectedViewController;
+    if ([sel isKindOfClass:[UINavigationController class]]) {
+        UINavigationController *nav = (UINavigationController *)sel;
+        if (nav.viewControllers.count > 0) sel = nav.viewControllers.firstObject;
+    }
     NSString *page = NEPageNameForVC(sel);
-    if (sel.view) NEDumpDiagForView(sel.view, [page stringByAppendingString:@"（手动）"]);
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"已导出"
-        message:@"诊断已保存到 Documents/ne-diag.txt，用 Filza 打开九号出行 Documents 文件夹查看。"
+    BOOL dumped = NO;
+    if (sel.view) {
+        NEDumpDiagForView(sel.view, [page stringByAppendingString:@"（手动）"]);
+        dumped = YES;
+    }
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:dumped ? @"已导出" : @"未导出"
+        message:dumped ? @"诊断已保存到 Documents/ne-diag.txt，用 Filza 打开九号出行 Documents 文件夹查看。"
+                       : @"没找到当前页面，稍后再试。"
         preferredStyle:UIAlertControllerStyleAlert];
     [alert addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault handler:nil]];
     [self presentViewController:alert animated:YES completion:nil];
