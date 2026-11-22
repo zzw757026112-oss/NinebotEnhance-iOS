@@ -39,6 +39,24 @@
 //     设置页本身不刷；tab 懒加载，切过去才加载，显示时重算文字+图片。
 //  ③ 等级/称号药丸可能是 UIButton 标题：再 hook -[UIButton setTitle:forState:]，
 //     只换 Lv. 开头和“暂无称号”，刷新时按钮标题也重设。
+// v0.3.9 第三修（d130e03e 构建实测：背景图启动闪主题、切 tab 回来就还原；
+//  总里程 9999 仍在主页面、我的页 35624.6 还是真的；我的/服务页五项全不动）：
+//  ① 背景图时序竞态的根因：图片钩子是“二选一”——有 SDWebImage 就只装 SD 钩子，
+//     -[UIImageView setImage:] 永远不装。主题重载（SD 内部完成、imageNamed + setImage、
+//     直接赋值）全走 setImage:，全绕过拦截；3 秒/切页刷新只改一次，App 随后一重载
+//     就盖回去，所以“卡一下就还原”。改：setImage: 永远装（set-time 拦截的主力，
+//     任何路径设图都在显示前被换掉），SD 钩子只做补充；tab 判定改走响应链找所属 VC
+//     （NEIsDeviceTabSelected 跟 presented 链，设置 modal 盖着时永远 NO，是错的）。
+//     另加 UIButton setBackgroundImage:forState: 钩子（主题若是按钮背景图）。
+//  ② 里程只认我的页：“总里程”会命中主页面最近骑行卡片底下那行，肯定判定只留
+//     “我的数据”（我的页卡片头），主页面不再换。
+//  ③ 我的/服务页全不动的根因：刷新是“把同一文本重设一遍、指望 setText: 钩子
+//     再算一次”。若该 label 的 setText: 没走 UILabel 的实现（子类重写、或文本
+//     经别的路径设好），钩子根本不触发，刷新就是空转。改：刷新直接对每个 label
+//     的当前文本跑一遍 NEFixedLabelString，算出就换，不依赖 setter 钩子；
+//     相邻/放宽搜索从只看父/祖父两层改成沿祖先链上溯 4 层（卡片嵌套深也能找到
+//     “我的数据”/“N币”）；再加一个 3 秒定时刷新（仅 App 在前台时），兜住布局
+//     晚、数据晚到的情况。
 // v0.3.8 改动：超速红行改成“请勿超速行驶！”，字比普通行大但绝不超胶囊边框；
 //  超速那一刻中文语音读一次“您已超速行驶，请注意安全”（跟着超速提醒开关走，不另设开关）。
 // v0.3.7 改动：设置页“日期时间”改叫“日期”（时间只在翻页时钟里显示）；和 App 1.3.19 同款。
@@ -195,6 +213,7 @@ static int      gDumped   = 0;
 // 定时器必须有强引用留着（局部变量出作用域就释放，定时器会停）
 static dispatch_source_t gVolumeTimer = nil;
 static dispatch_source_t gButtonTimer = nil;
+static dispatch_source_t gRefreshTimer = nil; // v0.3.9 第三修：每 3 秒补刷一次文字+图片
 
 @class NELocationDelegate;
 static CLLocationManager *gLocMgr = nil;
@@ -388,6 +407,22 @@ static void NECollectLabelsExcept(UIView *view, UIView *exclude, NSMutableArray<
     }
 }
 
+// 从 label 往上沿祖先链上溯（最多 4 层），收集每层祖先子树里的 label
+// （排除 label 自己所在的子树）。卡片嵌套深时描述 label 可能不在父/祖父
+// 层，只看两层会漏；几何判定（相邻/放宽窗口）本身已足够严格，
+// 多搜几层不会误认，只会让深嵌套的卡片也能配对。
+static void NECollectNearbyLabels(UILabel *label, NSMutableArray<UILabel *> *out) {
+    UIView *child = label;
+    UIView *anc = label.superview;
+    int levels = 0;
+    while (anc && levels < 4) {
+        NECollectLabelsExcept(anc, child, out);
+        child = anc;
+        anc = anc.superview;
+        levels++;
+    }
+}
+
 // label 附近（下方或右侧相邻）的所有 label。帧还没布局出来时返回空——
 // 那时不认，宁可不换，等刷新时（已布局好）再认。
 static NSArray<UILabel *> *NEAdjacentLabels(UILabel *label) {
@@ -397,11 +432,7 @@ static NSArray<UILabel *> *NEAdjacentLabels(UILabel *label) {
     CGRect lf = NEFrameInWindow(label, w);
     if (CGRectIsEmpty(lf)) return out;
     NSMutableArray<UILabel *> *cands = [NSMutableArray array];
-    UIView *sup = label.superview;
-    if (!sup) return out;
-    NECollectLabelsExcept(sup, label, cands);
-    UIView *sup2 = sup.superview;
-    if (sup2) NECollectLabelsExcept(sup2, sup, cands);
+    NECollectNearbyLabels(label, cands);
     for (UILabel *cand in cands) {
         CGRect cf = NEFrameInWindow(cand, w);
         if (CGRectIsEmpty(cf)) continue;
@@ -442,11 +473,7 @@ static BOOL NENearbyLabelContainsWide(UILabel *label, NSString *keyword) {
     if (CGRectIsEmpty(lf)) return NO;
     CGRect expanded = CGRectInset(lf, -300, -120);
     NSMutableArray<UILabel *> *cands = [NSMutableArray array];
-    UIView *sup = label.superview;
-    if (!sup) return NO;
-    NECollectLabelsExcept(sup, label, cands);
-    UIView *sup2 = sup.superview;
-    if (sup2) NECollectLabelsExcept(sup2, sup, cands);
+    NECollectNearbyLabels(label, cands);
     for (UILabel *cand in cands) {
         CGRect cf = NEFrameInWindow(cand, w);
         if (CGRectIsEmpty(cf)) continue;
@@ -508,10 +535,11 @@ static NSString *NEFixedLabelString(NSString *text, UILabel *label,
     }
     // 纯数字才走“分开 label”匹配；先算一次，后面复用
     BOOL isNum = NEIsPureNumberString(text);
-    // 2. 总里程 — 只换总里程，绝不换续航/最近骑行。
-    // 有 km 的数才可能是里程：先排除（文本自己或附近 label 含续航/最近骑行/
-    // 骑行/剩余/续航里程/本次/单次），再肯定（附近放宽范围有“总里程”或“我的数据”）。
-    // 认不出是总里程就不换。
+    // 2. 总里程 — 只换我的页的总里程，绝不换续航/最近骑行、绝不换主页面。
+    // 肯定判定只认“我的数据”（我的页卡片头）；“总里程”会命中主页面最近骑行
+    // 卡片底下那行，不能当肯定依据。有 km 的数才可能是里程：先排除（文本自己
+    // 或附近 label 含续航/最近骑行/骑行/剩余/续航里程/本次/单次），再肯定
+    // （附近放宽范围有“我的数据”）。认不出是我的页总里程就不换。
     if (gMileage && gMileageValue.length > 0) {
         BOOL sameKm = NO;
         if ([text rangeOfString:@"km"].location != NSNotFound) {
@@ -562,8 +590,7 @@ static NSString *NEFixedLabelString(NSString *text, UILabel *label,
             }
             BOOL isTotal = NO;
             if (!skip) {
-                isTotal = NENearbyLabelContainsWide(label, @"总里程") ||
-                          NENearbyLabelContainsWide(label, @"我的数据");
+                isTotal = NENearbyLabelContainsWide(label, @"我的数据");
             }
             if (!skip && isTotal) {
                 if (fieldOut) *fieldOut = @"NEMileage";
@@ -823,8 +850,12 @@ static void NESetLabelPlainText(UILabel *label, NSString *newText) {
     }
 }
 
-// 强制刷新：把 view 子树里所有 UILabel 的当前文本重设一遍，让它们走一遍钩子。
-// 解决“页面启动时已设好文本，改设置后 App 不再重设”的问题。
+// 强制刷新：把 view 子树里所有 UILabel 的当前文本直接算一遍匹配，算出就换。
+// 之前是“把同一文本重设一遍、指望 setText: 钩子再算一次”——若该 label 的
+// setText: 没走 UILabel 的实现（子类重写、或文本经别的路径设好），钩子根本
+// 不触发，刷新就是空转，这就是我的/服务页全不动的根因。这里直接跑匹配，
+// 不依赖 setter 钩子；算出的值用普通赋值写回去（子类重写 setText: 也会
+// 显示算好的值，不影响）。
 // 注意：开关关掉后换过的 label 恢复不了原值（原值已被换掉），只能等下次进 App——
 // 钩子关了就不再换，App 自己重设时就显示真值。
 static void NEForceRefreshLabelsInView(UIView *view) {
@@ -840,11 +871,19 @@ static void NEForceRefreshLabelsInView(UIView *view) {
                     NSString *val = NEFieldCurrentValue(field, sep.boolValue);
                     if (val) { NESetLabelPlainText(label, val); continue; }
                 }
-                if (label.attributedText) {
-                    NSAttributedString *a = label.attributedText;
-                    if (a.length) label.attributedText = a;
-                } else if (label.text.length) {
-                    label.text = label.text;
+                NSString *cur = NEPlainTextOfLabel(label);
+                if (cur.length) {
+                    NSString *f2 = nil; BOOL sep2 = NO;
+                    NSString *fixed = NEFixedLabelString(cur, label, &f2, &sep2);
+                    if (fixed) {
+                        if (f2.length) {
+                            objc_setAssociatedObject(label, &NEAppliedFieldKey, f2,
+                                                     OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                            objc_setAssociatedObject(label, &NEAppliedSeparateKey, @(sep2),
+                                                     OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                        }
+                        NESetLabelPlainText(label, fixed);
+                    }
                 }
             } @catch (...) {}
         }
@@ -939,11 +978,17 @@ static BOOL NEStringHasAny(NSString *s, NSArray<NSString *> *keys) {
     return NO;
 }
 
+// 这个 view 是不是在“设备”tab 里（响应链上溯找所属 VC，再看它是不是设备 tab
+// 的根页面或其子页面）。NEIsDeviceTabSelected 跟 presented 链，设置 modal 盖着
+// 时永远返回 NO，用在 set-time 拦截里是错的——图正在被设的时候，modal 可能正
+// 盖在上面。定义在 NEAppTabBarController 之后，这里先声明。
+static BOOL NEViewIsOnDeviceTab(UIView *v);
+
 // SDWebImage 的 URL 判定：满屏大图位 → 背景；小图（图标）直接放行；
 // 其余按 URL 关键字分车辆图 / 背景图。view 的 bounds 在自动布局完成前可能为 0，
 // 那时只按 URL 关键字判定。
 static UIImage *NEImageForSDURL(UIImageView *iv, NSURL *url) {
-    if (!NEIsDeviceTabSelected()) return nil;
+    if (!NEViewIsOnDeviceTab(iv)) return nil;
     NSString *u = [[url absoluteString] lowercaseString];
     if (!u.length) return nil;
     CGSize vs = iv.bounds.size;
@@ -991,7 +1036,10 @@ static void NE_sd_setImageWithURL_ctx(id self, SEL _cmd, NSURL *url, id placehol
     orig_sd_setImageWithURL_ctx(self, _cmd, url, placeholder, options, context, progress, completed);
 }
 
-// 兜底：无 SDWebImage 时 hook -[UIImageView setImage:]，按图片尺寸分车辆图/背景图
+// set-time 拦截的主力：任何路径设图（SDWebImage 内部完成、imageNamed + setImage、
+// 直接赋值、主题重载）都会走这里，在显示前就把主题图/车图换掉——没有延迟、
+// 没有竞态，切 tab 回来重载也一样被拦。只在“设备”tab 换（响应链判定，
+// 不跟 presented 链）；小图（图标/头像）不碰。
 static void (*orig_UIImageView_setImage)(id, SEL, UIImage *);
 static void NE_UIImageView_setImage(id self, SEL _cmd, UIImage *image) {
     if (image && (gHasVehicleImage || gHasBgImage)) {
@@ -1004,12 +1052,31 @@ static void NE_UIImageView_setImage(id self, SEL _cmd, UIImage *image) {
         } else if (sz.width >= 200) {
             custom = NECustomVehicleImage();    // 大图 → 车辆图；小图不碰
         }
-        if (custom && NEIsDeviceTabSelected()) {
+        if (custom && NEViewIsOnDeviceTab((UIImageView *)self)) {
             orig_UIImageView_setImage(self, _cmd, custom);
             return;
         }
     }
     orig_UIImageView_setImage(self, _cmd, image);
+}
+
+// 次要路径：主题若是 UIButton 的背景图（满屏大图），走 setBackgroundImage:forState:。
+// 只换满屏尺寸的，按钮上的小图标一概不碰。
+static void (*orig_UIButton_setBackgroundImage)(id, SEL, UIImage *, UIControlState);
+static void NE_UIButton_setBackgroundImage(id self, SEL _cmd, UIImage *image, UIControlState state) {
+    if (image && gHasBgImage) {
+        CGSize sz = image.size;
+        CGFloat sw = [UIScreen mainScreen].bounds.size.width;
+        CGFloat sh = [UIScreen mainScreen].bounds.size.height;
+        if (sz.width >= sw * 0.9 && sz.height >= sh * 0.5) {
+            UIImage *custom = NECustomBackgroundImage();
+            if (custom && NEViewIsOnDeviceTab((UIView *)self)) {
+                orig_UIButton_setBackgroundImage(self, _cmd, custom, state);
+                return;
+            }
+        }
+    }
+    orig_UIButton_setBackgroundImage(self, _cmd, image, state);
 }
 
 // 本地 asset 兜底：+[UIImage imageNamed:]，按名字关键字匹配。
@@ -1054,6 +1121,18 @@ static void NEInstallImageHooksIfNeeded(void) {
         os_log(gLog, "[IMG] UIImageView 类未找到，不装图片钩子");
         return;
     }
+    // setImage: 永远装（set-time 拦截的主力）：以前是“有 SD 就不装 setImage:”，
+    // 结果所有不走 sd_setImageWithURL: 的设置路径（SD 内部完成、imageNamed +
+    // setImage、直接赋值、主题重载）全绕过拦截——切 tab 回来就还原的根因。
+    // SD 钩子只做补充（URL 层先拦一次）；SD 钩子调 setImage: 换图时会再进
+    // 一次本钩子，算出来是同一张自定义图，不会循环。
+    MSHookMessageEx(iv, @selector(setImage:),
+                    (IMP)NE_UIImageView_setImage, (IMP *)&orig_UIImageView_setImage);
+    if (!orig_UIImageView_setImage) {
+        os_log(gLog, "[IMG] UIImageView setImage: 钩子安装失败");
+    } else {
+        os_log(gLog, "[IMG] UIImageView setImage: 钩子已装（set-time 拦截）");
+    }
     if (class_getInstanceMethod(iv, @selector(sd_setImageWithURL:))) {
         MSHookMessageEx(iv, @selector(sd_setImageWithURL:),
                         (IMP)NE_sd_setImageWithURL, (IMP *)&orig_sd_setImageWithURL);
@@ -1069,14 +1148,15 @@ static void NEInstallImageHooksIfNeeded(void) {
             if (orig_sd_setImageWithURL_ctx)
                 os_log(gLog, "[IMG] SDWebImage 钩子已装（sd_setImageWithURL:…context:）");
         }
-    } else {
-        MSHookMessageEx(iv, @selector(setImage:),
-                        (IMP)NE_UIImageView_setImage, (IMP *)&orig_UIImageView_setImage);
-        if (!orig_UIImageView_setImage) {
-            os_log(gLog, "[IMG] UIImageView setImage: 钩子安装失败");
-        } else {
-            os_log(gLog, "[IMG] 无 SDWebImage，改用 UIImageView setImage: 兜底钩子");
-        }
+    }
+    // UIButton 背景图钩子（主题若是按钮背景图，走这里）
+    Class btnCls = objc_getClass("UIButton");
+    if (btnCls && class_getInstanceMethod(btnCls, @selector(setBackgroundImage:forState:))) {
+        MSHookMessageEx(btnCls, @selector(setBackgroundImage:forState:),
+                        (IMP)NE_UIButton_setBackgroundImage,
+                        (IMP *)&orig_UIButton_setBackgroundImage);
+        if (orig_UIButton_setBackgroundImage)
+            os_log(gLog, "[IMG] UIButton setBackgroundImage:forState: 钩子已装");
     }
     Class ui = objc_getClass("UIImage");
     if (ui && class_getClassMethod(ui, @selector(imageNamed:))) {
@@ -1102,6 +1182,44 @@ static UITabBarController *NEAppTabBarController(void) {
     UIViewController *root = w.rootViewController;
     if ([root isKindOfClass:[UITabBarController class]]) return (UITabBarController *)root;
     return nil;
+}
+
+// 这个 view 是不是在“设备”tab 里：沿响应链上溯找所属 VC，再看它是不是
+// 设备 tab 的根页面或其子页面（导航栈里的子页面、子 VC 都算；从设备 tab
+// 弹出的 modal 也算）。不跟 presented 链、不看当前选中的 tab——图正在被
+// 设的时候，设置 modal 可能正盖在上面，那时“当前选中”已经不准了。
+// 响应链里找不到 VC（view 还没挂进任何页面）时，退回看当前选中的 tab。
+static BOOL NEViewIsOnDeviceTab(UIView *v) {
+    if (!v) return NO;
+    UITabBarController *tab = NEAppTabBarController();
+    if (!tab || tab.viewControllers.count == 0) return NO;
+    UIViewController *deviceRoot = nil;
+    for (UIViewController *child in tab.viewControllers) {
+        if ([child.tabBarItem.title isEqualToString:@"设备"]) { deviceRoot = child; break; }
+    }
+    if (!deviceRoot) deviceRoot = tab.viewControllers.firstObject;
+    if (!deviceRoot) return NO;
+    UIResponder *r = v.nextResponder;
+    UIViewController *vc = nil;
+    while (r) {
+        if ([r isKindOfClass:[UIViewController class]]) { vc = (UIViewController *)r; break; }
+        r = r.nextResponder;
+    }
+    if (vc) {
+        UIViewController *p = vc;
+        while (p) {
+            if (p == deviceRoot) return YES;
+            p = p.parentViewController;
+        }
+        p = vc.presentingViewController;
+        while (p) {
+            if (p == deviceRoot) return YES;
+            p = p.presentingViewController;
+        }
+        return NO;
+    }
+    return tab.selectedIndex == 0 ||
+           [tab.selectedViewController.tabBarItem.title isEqualToString:@"设备"];
 }
 
 static void NEForceRefreshImagesInView(UIView *view) {
@@ -3491,6 +3609,24 @@ static void NEProbeStart(void) {
                                   3 * NSEC_PER_SEC, NSEC_PER_SEC);
         dispatch_source_set_event_handler(gButtonTimer, ^{ NECheckSettingsButton(); });
         dispatch_resume(gButtonTimer);
+
+        // v0.3.9 第三修：每 3 秒补刷一次文字+图片（仅 App 在前台、且任一自定义
+        // 开关开着或已选自定义图时）。兜住布局晚、数据晚到、页面重渲染的情况；
+        // 刷新直接跑匹配，不依赖 setter 钩子。我们自己的设置页在最上层时不刷
+        //（别打扰输入框）。图片主要靠 set-time 的 setImage: 钩子，这里只是兜底。
+        gRefreshTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0,
+                                               dispatch_get_main_queue());
+        dispatch_source_set_timer(gRefreshTimer, dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC),
+                                  3 * NSEC_PER_SEC, NSEC_PER_SEC);
+        dispatch_source_set_event_handler(gRefreshTimer, ^{
+            if ([[UIApplication sharedApplication] applicationState] != UIApplicationStateActive) return;
+            if (!gLabelHookInstalled && !gHasVehicleImage && !gHasBgImage) return;
+            UIViewController *top = NETopViewController();
+            if (top && [[NSStringFromClass([top class]) lowercaseString] containsString:@"nehud"]) return;
+            NEForceRefreshLabels();
+            NEForceRefreshImages();
+        });
+        dispatch_resume(gRefreshTimer);
     });
 
     // 联网方式监听（后台队列）
