@@ -3982,6 +3982,61 @@ static void NECheckSettingsButton(void) {
                              OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     [stack addArrangedSubview:[self groupHeader:@"导航增强" tag:1]];
     [stack addArrangedSubview:navCard];
+
+    // ---- 关于卡（填补底下空白）----
+    UIStackView *aboutStack = [UIStackView new];
+    aboutStack.axis = UILayoutConstraintAxisVertical;
+    aboutStack.spacing = 4;
+    [aboutStack addArrangedSubview:[self sectionLabel:@"关于"]];
+    UIStackView *aboutTitleRow = [UIStackView new];
+    aboutTitleRow.axis = UILayoutConstraintAxisHorizontal;
+    aboutTitleRow.spacing = 8;
+    UILabel *aboutName = [UILabel new];
+    aboutName.text = @"NinebotEnhance";
+    aboutName.font = [UIFont boldSystemFontOfSize:16];
+    UILabel *aboutVer = [UILabel new];
+    aboutVer.text = @"0.3.9";
+    aboutVer.font = [UIFont systemFontOfSize:15];
+    aboutVer.textColor = [UIColor secondaryLabelColor];
+    [aboutTitleRow addArrangedSubview:aboutName];
+    [aboutTitleRow addArrangedSubview:aboutVer];
+    [aboutStack addArrangedSubview:aboutTitleRow];
+    UILabel *aboutDesc = [UILabel new];
+    aboutDesc.text = @"九号 App 美化与 HUD 增强";
+    aboutDesc.font = [UIFont systemFontOfSize:14];
+    aboutDesc.textColor = [UIColor secondaryLabelColor];
+    aboutDesc.numberOfLines = 0;
+    [aboutStack addArrangedSubview:aboutDesc];
+    [stack addArrangedSubview:[self ne_cardWrappingStack:aboutStack]];
+
+    // ---- 使用提示卡 ----
+    UIStackView *tipsStack = [UIStackView new];
+    tipsStack.axis = UILayoutConstraintAxisVertical;
+    tipsStack.spacing = 6;
+    [tipsStack addArrangedSubview:[self sectionLabel:@"使用提示"]];
+    NSArray<NSString *> *neFooterTips = @[
+        @"翻页时钟和 BMS 面板互斥，只能开一个。",
+        @"恢复原图立即生效，不用重启 App。",
+        @"HUD 开关打开后会一直保持，重启也不丢。",
+        @"等级最高 9 级，填 10 以上不显示。"
+    ];
+    for (NSString *tip in neFooterTips) {
+        UILabel *tipLabel = [UILabel new];
+        tipLabel.text = [NSString stringWithFormat:@"• %@", tip];
+        tipLabel.font = [UIFont systemFontOfSize:14];
+        tipLabel.numberOfLines = 0;
+        [tipsStack addArrangedSubview:tipLabel];
+    }
+    [stack addArrangedSubview:[self ne_cardWrappingStack:tipsStack]];
+
+    // ---- 底部醒目行（页末最后一行，作者 QQ + 防倒卖声明）----
+    UILabel *credit = [UILabel new];
+    credit.text = @"作者QQ:349204217，仅供娱乐，制作不易，请勿倒卖！";
+    credit.font = [UIFont boldSystemFontOfSize:15];
+    credit.textColor = [UIColor systemOrangeColor];
+    credit.textAlignment = NSTextAlignmentCenter;
+    credit.numberOfLines = 0;
+    [stack addArrangedSubview:credit];
 }
 
 - (UILabel *)sectionLabel:(NSString *)text {
