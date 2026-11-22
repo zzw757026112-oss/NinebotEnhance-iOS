@@ -1,6 +1,20 @@
-// NinebotEnhance iOS v0.4.4 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
+// NinebotEnhance iOS v0.4.5 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
 //
-// v0.4.4 修复（0.4.3 实测：deviceId 已找到真值（NSUserDefaults:backup_id），
+// v0.4.5 修复（0.4.4 实测：用户打开签到页后模板仍“未捕获”——App 调
+//  user-sign 不走 NSURLSession（签到页大概率是 WKWebView，请求走 WebKit
+//  进程，钩子看不到），模板路线暂时指望不上；状态与签到两步仍回 code 2
+//  “Params error”）：剩下的变量只有 token 本身——钩子抓到的 Authorization
+//  可能是 App 调车辆接口用的设备 token，不是签到接口要的用户登录 token；
+//  格式也可能不对（Bearer 前缀有/无）。本版把三个 token 来源 × 两种
+//  Authorization 格式都试一遍：NSURLSession 抓到的（原样 + 切换 Bearer）>
+//  AsyncStorage（Bearer 版 + 裸版）> NSUserDefaults（Bearer 版 + 裸版），
+//  最多 6 次；code 2 才换下一个，0 / 540004 立停；赢的组合只记来源名 +
+//  有无 Bearer（不记 token 值），下次检查排最前；54019 会话失效时清赢家
+//  + 模板，下次从头重找。诊断行显示当前在用的（来源·格式），如
+//  NSURLSession·Bearer / AsyncStorage·裸。模板抓取与重放保留（以后 App
+//  万一走 NSURLSession 调 user-sign 还能用上）。其余不变（单独开关、记录
+//  行、重试、不加分享）。
+//
 //  但状态与签到两步仍回 code 2 “Params error”，且状态 GET 本来就不带
 //  deviceId）：问题不在 deviceId——是插件自己拼的请求和 App/快捷指令发
 //  的不一样（缺查询参数、头或 body 形状不对）。不再猜：App 自己调通
@@ -3774,6 +3788,18 @@ static void NoteFrame(size_t w, size_t h) {
 // defaults 精确键（deviceId/device_id/uniqueId/udid/did/clientId 等）>
 // 含 device 键中 UUID 形状的值 > 任意键的 UUID 形状值 > IDFV。
 // 来源记在 gSignInDiagDeviceSource 里（带出自哪个 key/请求部位），供诊断行显示。
+// v0.4.5 修复：0.4.4 实测用户打开签到页后模板仍“未捕获”——App 调
+//  user-sign 不走 NSURLSession（签到页大概率是 WKWebView，请求走 WebKit
+//  进程），模板路线暂时指望不上；状态与签到两步仍回 code 2 “Params error”，
+//  且状态 GET 本来就不带 deviceId。剩下的变量只有 token 本身：钩子抓到的
+//  Authorization 可能是 App 调车辆接口用的设备 token，不是签到接口要的
+//  用户登录 token；格式也可能不对（Bearer 前缀有/无）。本版把三个来源 ×
+//  两种格式都试一遍（NSURLSession 原样/切换版 > AsyncStorage Bearer 版/
+//  裸版 > NSUserDefaults Bearer 版/裸版，最多 6 次）；code 2 才换下一个，
+//  0 / 540004 立停并记住赢的组合（只记来源名 + 有无 Bearer，不记 token
+//  值），下次检查排最前；54019 清赢家 + 模板。诊断行显示当前在用的
+//  （来源·格式）。模板抓取与重放保留，以后 App 万一走 NSURLSession 调
+//  user-sign 还能用上。
 // v0.4.3 修复：0.4.2 实测 deviceId 落到 IDFV，状态与签到两步都回 code 2
 //  “Params error”。deviceId 找得更广（见上）；状态 GET 仍只发 Authorization
 //  + Accept + App 的 User-Agent，不带 deviceId——0.4.2 起已是这样，状态 2
@@ -3835,6 +3861,12 @@ static BOOL gAutoSignInCheckPending = NO; // 已排了一个检查，别重复�
 static BOOL gAutoSignInEverScheduled = NO; // 排过一次后重试用 3 秒（首次 6 秒）
 static id gAutoSignInObserver = nil; // become-active 观察者，强引用留着
 
+// v0.4.5：一轮检查内的候选轮换状态（来源 × Bearer 有/无；候选表见
+// NEAutoSignInAuthCandidates）。本轮内 deviceId 只找一次。
+static NSArray *gSignInPassCandidates = nil; // 本轮候选表，每项 @{auth, source, bearer}
+static NSInteger gSignInPassIndex = -1; // 当前试到第几个候选
+static NSString *gSignInPassDeviceId = nil; // 本轮用的 deviceId
+
 // ---- 自动签到诊断（v0.4.1）：只记状态，不记 token 值 ----
 // token 来源：@"NSURLSession" / @"AsyncStorage" / @"NSUserDefaults" / nil（无）
 static NSString *gSignInDiagTokenSource = nil;
@@ -3881,21 +3913,20 @@ static NSString *NEAutoSignInNowHHmm(void) {
     return [fmt stringFromDate:[NSDate date]];
 }
 
-// 设置页诊断行文案：token 有/无（+来源）· 设备来源 · 上次检查时间 ·
+// 设置页诊断行文案：token 有/无（+来源·格式，v0.4.5）· 设备来源 · 上次检查时间 ·
 // 状态 code / 签到 code（+服务端 message）。例如：
-//   token:有（NSURLSession）· 设备:AsyncStorage · 上次检查 00:16 · 状态 0 · 签到 code 2（参数错误）
+//   token:有（NSURLSession·Bearer）· 设备:AsyncStorage · 上次检查 00:16 · 状态 0 · 签到 code 2（参数错误）
 // 还没调过某一步时那步显示 —。message 为空时不加括号。
 static NSString *NEAutoSignInDiagText(void) {
     NSString *tok;
-    [gAuthLock lock];
-    BOOL hasCaptured = gCapturedAuthToken.length >= 20;
-    [gAuthLock unlock];
-    if (hasCaptured) {
-        tok = @"有（NSURLSession）";
-    } else if (gSignInDiagTokenSource.length) {
+    if (gSignInDiagTokenSource.length) {
+        // v0.4.5：诊断显示本次在用的（来源·格式），如 NSURLSession·Bearer / AsyncStorage·裸
         tok = [NSString stringWithFormat:@"有（%@）", gSignInDiagTokenSource];
     } else {
-        tok = @"无";
+        [gAuthLock lock];
+        BOOL hasCaptured = gCapturedAuthToken.length >= 20;
+        [gAuthLock unlock];
+        tok = hasCaptured ? @"有（NSURLSession）" : @"无";
     }
     NSString *dev = gSignInDiagDeviceSource.length
         ? [NSString stringWithFormat:@"设备:%@", gSignInDiagDeviceSource] : @"设备:—";
@@ -3964,6 +3995,10 @@ static void NEAutoSignInScheduleAfter(double seconds);
 // 前向声明：插件自己的签到 session（定义在后面；钩子用它排除插件自己的
 // 请求，不让重发请求进模板）
 static NSURLSession *NESignInSession(void);
+// 前向声明（v0.4.5）：候选轮换的三个入口（定义在后面；NEAutoSignInRun 调 RunAttempt）
+static void NEAutoSignInRunAttempt(void);
+static void NEAutoSignInDoSignAttempt(void);
+static void NEAutoSignInTryNextCandidate(void);
 
 static NSURLSessionDataTask *NE_NSURLSession_dataTaskWithRequest(id self, SEL _cmd, NSURLRequest *request, void (^completionHandler)(NSData *, NSURLResponse *, NSError *)) {
     @try {
@@ -4316,22 +4351,49 @@ static NSString *NEFindTokenInAsyncStorage(void) {
     return gAsyncStorageToken;
 }
 
-// Authorization 头完整值（直接能 setValue:forHTTPHeaderField: 的）。
-// ① 钩子抓到的（App 正在用的，最可靠）；② RN AsyncStorage；③ defaults。
-// 来源记在 gSignInDiagTokenSource 里，供诊断行显示。
-static NSString *NEFindSignInAuthHeader(void) {
-    [gAuthLock lock];
-    NSString *captured = gCapturedAuthToken;
-    [gAuthLock unlock];
-    if (captured.length >= 20) {
-        gSignInDiagTokenSource = @"NSURLSession";
-        return captured;
-    }
-    NSString *async = NEFindTokenInAsyncStorage();
-    if (async.length >= 20) {
-        gSignInDiagTokenSource = @"AsyncStorage";
-        return NEAuthHeaderFromStoredToken(async);
-    }
+// ---- v0.4.5：token 候选表（来源 × Authorization 格式）----
+// 0.4.4 实测：用户打开签到页后模板仍“未捕获”——App 调 user-sign 不走
+// NSURLSession（签到页大概率是 WKWebView，请求走 WebKit 进程，钩子看不
+// 到），模板路线暂时指望不上。剩下的变量只有 token 本身：钩子抓到的
+// Authorization 可能是 App 调车辆接口用的设备 token，不是签到接口要的
+// 用户登录 token；格式也可能不对（Bearer 前缀有/无）。本版把三个来源 ×
+// 两种格式都试一遍：NSURLSession 抓到的（原样 + 切换 Bearer）>
+// AsyncStorage（Bearer 版 + 裸版）> NSUserDefaults（Bearer 版 + 裸版），
+// 最多 6 次；code 2 才换下一个，0 / 540004 立停，54019 清赢家+模板后停。
+// 同一个头值只试一次（两来源抓到同一 token 时不重复发）。赢的组合只记
+// 来源名 + 有无 Bearer（不记 token 值），下次检查把它排最前。
+static BOOL NEAuthHasBearerPrefix(NSString *auth) {
+    if (auth.length < 7) return NO;
+    return [[[auth substringToIndex:7] lowercaseString] isEqualToString:@"bearer "];
+}
+
+// Bearer 有/无切换：有 Bearer 去掉，没 Bearer 加上
+static NSString *NEAuthToggledBearer(NSString *auth) {
+    if (NEAuthHasBearerPrefix(auth)) return [auth substringFromIndex:7];
+    return [@"Bearer " stringByAppendingString:auth];
+}
+
+// 诊断用的候选标签：来源·格式，如 NSURLSession·Bearer / AsyncStorage·裸
+static NSString *NEAuthCandidateLabel(NSString *source, BOOL bearer) {
+    return [NSString stringWithFormat:@"%@·%@", source, bearer ? @"Bearer" : @"裸"];
+}
+
+// 候选表里加一项：头值 <20 字符不要；同一头值只留第一次出现
+static void NEAutoSignInAddCandidate(NSMutableArray *out, NSMutableSet *seenAuth,
+                                     NSString *auth, NSString *source) {
+    if (auth.length < 20) return;
+    if ([seenAuth containsObject:auth]) return;
+    [seenAuth addObject:auth];
+    [out addObject:@{@"auth": auth,
+                     @"source": source,
+                     @"bearer": @(NEAuthHasBearerPrefix(auth))}];
+}
+
+// NSUserDefaults 里找 token 的原值（不加 Bearer，由调用方决定格式）。
+// 精确键（token / accesstoken / access_token / authorization）优先，
+// 其余含 token 的键取第一个 ≥20 字符的字符串；都没有返回 nil。
+// 原 NEFindSignInAuthHeader 里的 defaults 扫描抽出来（逻辑不变）。
+static NSString *NEFindTokenInDefaultsRaw(void) {
     NSDictionary *all = [[NSUserDefaults standardUserDefaults] dictionaryRepresentation];
     NSString *best = nil;
     for (NSString *key in all) {
@@ -4341,19 +4403,75 @@ static NSString *NEFindSignInAuthHeader(void) {
             if ([v isKindOfClass:[NSString class]] && [(NSString *)v length] >= 20) {
                 if ([lk isEqualToString:@"token"] || [lk isEqualToString:@"accesstoken"] ||
                     [lk isEqualToString:@"access_token"] || [lk isEqualToString:@"authorization"]) {
-                    gSignInDiagTokenSource = @"NSUserDefaults";
-                    return NEAuthHeaderFromStoredToken((NSString *)v);
+                    return (NSString *)v;
                 }
                 if (!best) best = (NSString *)v;
             }
         }
     }
-    if (best) {
-        gSignInDiagTokenSource = @"NSUserDefaults";
-        return NEAuthHeaderFromStoredToken(best);
+    return best;
+}
+
+// 上次赢的（来源，格式）：只记来源名 + 有无 Bearer，不记 token 值。
+// 54019 会话失效时清掉，下次从头重找。
+static void NEAutoSignInRememberWinner(NSString *source, BOOL bearer) {
+    NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
+    [d setObject:source forKey:@"NEAutoSignInAuthSource"];
+    [d setBool:bearer forKey:@"NEAutoSignInAuthBearer"];
+}
+
+static void NEAutoSignInClearWinner(void) {
+    NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
+    [d removeObjectForKey:@"NEAutoSignInAuthSource"];
+    [d removeObjectForKey:@"NEAutoSignInAuthBearer"];
+}
+
+// 本轮要试的候选表：每项 @{@"auth": 完整头值, @"source": 来源名,
+// @"bearer": @(有无 Bearer)}。顺序：NSURLSession（原样，切换版）>
+// AsyncStorage（Bearer 版，裸版）> NSUserDefaults（Bearer 版，裸版）；
+// 同一头值只留第一次出现；上次赢的组合（来源+格式都对上）挪到最前。
+static NSArray *NEAutoSignInAuthCandidates(void) {
+    NSMutableArray *out = [NSMutableArray array];
+    NSMutableSet *seenAuth = [NSMutableSet set];
+    // ① NSURLSession 钩子抓到的（App 正在用的头值，原样；再试切换版）
+    [gAuthLock lock];
+    NSString *captured = gCapturedAuthToken;
+    [gAuthLock unlock];
+    if (captured.length >= 20) {
+        NEAutoSignInAddCandidate(out, seenAuth, captured, @"NSURLSession");
+        NEAutoSignInAddCandidate(out, seenAuth, NEAuthToggledBearer(captured), @"NSURLSession");
     }
-    gSignInDiagTokenSource = nil;
-    return nil;
+    // ② RN AsyncStorage（Bearer 版 + 裸版）
+    NSString *async = NEFindTokenInAsyncStorage();
+    if (async.length >= 20) {
+        NSString *primary = NEAuthHeaderFromStoredToken(async);
+        NEAutoSignInAddCandidate(out, seenAuth, primary, @"AsyncStorage");
+        NEAutoSignInAddCandidate(out, seenAuth, NEAuthToggledBearer(primary), @"AsyncStorage");
+    }
+    // ③ NSUserDefaults（Bearer 版 + 裸版）
+    NSString *stored = NEFindTokenInDefaultsRaw();
+    if (stored.length >= 20) {
+        NSString *primary = NEAuthHeaderFromStoredToken(stored);
+        NEAutoSignInAddCandidate(out, seenAuth, primary, @"NSUserDefaults");
+        NEAutoSignInAddCandidate(out, seenAuth, NEAuthToggledBearer(primary), @"NSUserDefaults");
+    }
+    // 上次赢的组合排最前（来源 + 格式都对上才挪；该来源本次没 token 就不动）
+    NSString *winSource = [[NSUserDefaults standardUserDefaults] stringForKey:@"NEAutoSignInAuthSource"];
+    if (winSource.length) {
+        BOOL winBearer = [[NSUserDefaults standardUserDefaults] boolForKey:@"NEAutoSignInAuthBearer"];
+        NSUInteger winIdx = NSNotFound;
+        for (NSUInteger i = 0; i < out.count; i++) {
+            NSDictionary *cand = out[i];
+            if ([cand[@"source"] isEqualToString:winSource] &&
+                [cand[@"bearer"] boolValue] == winBearer) { winIdx = i; break; }
+        }
+        if (winIdx != NSNotFound && winIdx != 0) {
+            id win = out[winIdx];
+            [out removeObjectAtIndex:winIdx];
+            [out insertObject:win atIndex:0];
+        }
+    }
+    return out;
 }
 
 // 像 deviceId 吗：36 位 UUID（含 -）、32 位 hex、或 ≥16 位字母数字/-。
@@ -4582,14 +4700,39 @@ static NSData *NEAutoSignInSignBodyWithDeviceId(NSData *tplBody, NSString *devic
     return out.length ? out : tplBody;
 }
 
+// 本轮结束：清 pending 与本轮状态（终态路径调一次；换候选时不调）。
+// 诊断行（来源·格式、按次 code、message）不清，留着给设置页看。
+static void NEAutoSignInEndPass(void) {
+    gAutoSignInCheckPending = NO;
+    gSignInPassCandidates = nil;
+    gSignInPassIndex = -1;
+    gSignInPassDeviceId = nil;
+}
+
+// 换下一个候选（同一轮内不重不漏）；没有下一个时结束本轮，诊断停在
+// 最后一个候选的结果上（来源+格式+code 都看得到）。
+static void NEAutoSignInTryNextCandidate(void) {
+    gSignInPassIndex++;
+    if (gSignInPassIndex < (NSInteger)gSignInPassCandidates.count) {
+        NEAutoSignInRunAttempt();
+    } else {
+        NEAutoSignInEndPass();
+    }
+}
+
 // 调签到接口（body 只有 deviceId）。code 0 成功；540004 今天已签过（不重复领）。
-// 回调里清 pending、记诊断；成功/已签才算“今天签成”，之后不再试。
+// v0.4.5：用当前候选的 auth（本轮状态里取，不再传参）。0 / 540004 → 今天签成，
+// 记赢家、结束本轮；54019 → 清赢家+模板、结束；code 2 或其他失败码 → 换
+// 下一个候选；网络失败 → 结束本轮（下次进前台再试）。
 // v0.4.2：记下签到接口的 code 与服务端 message（供诊断分清是哪一步报的）；
 // 请求头对齐已知能用的快捷指令：加 Accept: application/json，并复用 App
 // 自己请求的 User-Agent（抓到才带，没抓到不伪造）。
 // v0.4.4：有 App 的签到请求模板时按模板重发（URL、头原样，体只换 deviceId）；
 // 没模板时用 0.4.3 的拼法。54019 会话失效时清模板，下次用拼法+新 token。
-static void NEAutoSignInDoSignWithAuth(NSString *auth, NSString *deviceId) {
+static void NEAutoSignInDoSignAttempt(void) {
+    NSDictionary *cand = gSignInPassCandidates[gSignInPassIndex];
+    NSString *auth = cand[@"auth"];
+    NSString *deviceId = gSignInPassDeviceId;
     [gAuthLock lock];
     NSURL *tplURL = gTplSignCaptured ? gTplSignURL : nil;
     NSDictionary *tplHeaders = gTplSignCaptured ? gTplSignHeaders : nil;
@@ -4610,7 +4753,7 @@ static void NEAutoSignInDoSignWithAuth(NSString *auth, NSString *deviceId) {
         os_log(gLog, "[SIGN] 签到：按 App 模板重发");
     } else {
         NSURL *url = [NSURL URLWithString:@"https://cn-cbu-gateway.ninebot.com/portal/api/user-sign/v2/sign"];
-        if (!url) { gAutoSignInCheckPending = NO; return; }
+        if (!url) { NEAutoSignInEndPass(); return; }
         req = [NSMutableURLRequest requestWithURL:url];
         req.HTTPMethod = @"POST";
         [req setValue:auth forHTTPHeaderField:@"Authorization"];
@@ -4625,8 +4768,8 @@ static void NEAutoSignInDoSignWithAuth(NSString *auth, NSString *deviceId) {
     }
     NSURLSessionDataTask *task = [NESignInSession() dataTaskWithRequest:req
         completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
-        gAutoSignInCheckPending = NO;
         if (err || !data) {
+            NEAutoSignInEndPass();
             NEAutoSignInNoteCheck(@"网络失败", -1);
             os_log(gLog, "[SIGN] 签到请求失败：%{public}s",
                    err ? err.localizedDescription.UTF8String : "no data");
@@ -4640,39 +4783,70 @@ static void NEAutoSignInDoSignWithAuth(NSString *auth, NSString *deviceId) {
         if (c == 0) {
             NENoteSignInDoneToday();
             gAutoSignInDoneToday = YES;
+            NEAutoSignInRememberWinner(cand[@"source"], [cand[@"bearer"] boolValue]);
+            NEAutoSignInEndPass();
             NEAutoSignInNoteCheck(@"已签到", c);
             os_log(gLog, "[SIGN] 签到成功（code 0）");
         } else if (c == 540004) {
             NENoteSignInDoneToday();
             gAutoSignInDoneToday = YES;
+            NEAutoSignInRememberWinner(cand[@"source"], [cand[@"bearer"] boolValue]);
+            NEAutoSignInEndPass();
             NEAutoSignInNoteCheck(@"已签到", c);
             os_log(gLog, "[SIGN] 今天已签到（签到接口报 540004），不重复签");
+        } else if (c == 54019) {
+            NEClearSignInTemplates(); // 会话失效：模板里的 token 已过期，清掉下次用拼法+新 token
+            NEAutoSignInClearWinner(); // v0.4.5：赢家也清掉，下次从头重找
+            NEAutoSignInEndPass();
+            NEAutoSignInNoteCheck(@"会话失效", c);
+            os_log(gLog, "[SIGN] 签到报 54019（会话失效），已清模板+赢家，下次重找");
         } else {
-            if (c == 54019) NEClearSignInTemplates(); // 会话失效：模板里的 token 已过期，清掉下次用拼法+新 token
+            // code 2 或其他失败码：这个（来源，格式）不对，换下一个候选
+            os_log(gLog, "[SIGN] 签到返回 code=%d（候选 %{public}@），换下一个", c,
+                   gSignInDiagTokenSource);
             NEAutoSignInNoteCheck([NSString stringWithFormat:@"code %d", c], c);
-            os_log(gLog, "[SIGN] 签到返回 code=%d（下次打开 App 再试）", c);
+            NEAutoSignInTryNextCandidate();
         }
     }];
     [task resume];
 }
 
 // 静默签到（后台跑，无 UI、无弹窗）：先查状态，再按需签。只记 code，不记 token。
-// token 没找到 / 网络失败都不算“签成”，pending 清掉，下次进前台再试。
+// v0.4.5：本轮按候选表依次试（来源 × Bearer 有/无）；token 没找到 / 网络失败
+// 都不算“签成”，pending 清掉，下次进前台再试。
 static void NEAutoSignInRun(void) {
     if (!NEAutoSignInEnabled()) { gAutoSignInCheckPending = NO; return; }
     // v0.4.2：每次检查先清掉上次的按次 code 与 message，诊断只反映本次检查
     gSignInDiagStatusCode = -1;
     gSignInDiagSignCode = -1;
     gSignInDiagLastMessage = nil;
-    NSString *auth = NEFindSignInAuthHeader();
-    NSString *deviceId = NEFindDeviceId();
-    if (auth.length < 20 || deviceId.length < 8) {
-        gAutoSignInCheckPending = NO;
+    gSignInDiagTokenSource = nil;
+    // v0.4.5：本轮候选表（上次赢的组合排最前），deviceId 本轮只找一次
+    gSignInPassCandidates = NEAutoSignInAuthCandidates();
+    gSignInPassIndex = 0;
+    gSignInPassDeviceId = NEFindDeviceId();
+    if (gSignInPassCandidates.count == 0 || gSignInPassDeviceId.length < 8) {
         NEAutoSignInNoteCheck(@"无 token", -1);
-        os_log(gLog, "[SIGN] 跳过：token 或 deviceId 未找到（token:%s deviceId:%s）",
-               auth.length >= 20 ? "有" : "无", deviceId.length >= 8 ? "有" : "无");
+        os_log(gLog, "[SIGN] 跳过：token 或 deviceId 未找到（候选:%ld deviceId:%s）",
+               (long)gSignInPassCandidates.count, gSignInPassDeviceId.length >= 8 ? "有" : "无");
+        NEAutoSignInEndPass();
         return;
     }
+    NEAutoSignInRunAttempt();
+}
+
+// 当前候选跑状态 GET。code 2（或其他失败码）→ 换下一个候选；54019 → 清
+// 赢家+模板、结束本轮；540004 → 今天已签，记赢家、结束；0 → 同候选调签
+// 到 POST；网络失败 → 结束本轮（下次进前台再试）。
+static void NEAutoSignInRunAttempt(void) {
+    if (gSignInPassIndex < 0 || gSignInPassIndex >= (NSInteger)gSignInPassCandidates.count) {
+        NEAutoSignInEndPass();
+        return;
+    }
+    NSDictionary *cand = gSignInPassCandidates[gSignInPassIndex];
+    NSString *auth = cand[@"auth"];
+    // v0.4.5：诊断先记下本次在用的（来源·格式），结果回来再更新 code
+    gSignInDiagTokenSource = NEAuthCandidateLabel(cand[@"source"], [cand[@"bearer"] boolValue]);
     // v0.4.4：有 App 的状态请求模板就按模板重发（完整 URL 含查询串、全部头
     // 原样，包括 App 自己的 Authorization）；没模板时用 0.4.3 的拼法
     // （Authorization + Accept + App 的 User-Agent，不带 deviceId）。
@@ -4691,7 +4865,7 @@ static void NEAutoSignInRun(void) {
         os_log(gLog, "[SIGN] 查状态：按 App 模板重发");
     } else {
         NSURL *statusURL = [NSURL URLWithString:@"https://cn-cbu-gateway.ninebot.com/portal/api/user-sign/v2/status"];
-        if (!statusURL) { gAutoSignInCheckPending = NO; return; }
+        if (!statusURL) { NEAutoSignInEndPass(); return; }
         req = [NSMutableURLRequest requestWithURL:statusURL];
         req.HTTPMethod = @"GET";
         [req setValue:auth forHTTPHeaderField:@"Authorization"];
@@ -4704,7 +4878,7 @@ static void NEAutoSignInRun(void) {
     NSURLSessionDataTask *task = [NESignInSession() dataTaskWithRequest:req
         completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
         if (err || !data) {
-            gAutoSignInCheckPending = NO;
+            NEAutoSignInEndPass();
             NEAutoSignInNoteCheck(@"网络失败", -1);
             os_log(gLog, "[SIGN] 查状态失败：%{public}s",
                    err ? err.localizedDescription.UTF8String : "no data");
@@ -4715,18 +4889,34 @@ static void NEAutoSignInRun(void) {
         int c = code ? [code intValue] : -1;
         gSignInDiagStatusCode = c; // v0.4.2：状态接口的 code 单独记
         gSignInDiagLastMessage = NEAutoSignInServerMessage(json);
-        if (c == 54019) NEClearSignInTemplates(); // 会话失效：模板里的 token 已过期，清掉，签到那步用拼法+新 token
+        if (c == 54019) {
+            NEClearSignInTemplates(); // 会话失效：模板里的 token 已过期，清掉，签到那步用拼法+新 token
+            NEAutoSignInClearWinner(); // v0.4.5：赢家也清掉，下次从头重找
+            NEAutoSignInEndPass();
+            NEAutoSignInNoteCheck(@"会话失效", c);
+            os_log(gLog, "[SIGN] 状态报 54019（会话失效），已清模板+赢家，下次重找");
+            return;
+        }
         if (c == 540004) {
             NENoteSignInDoneToday();
             gAutoSignInDoneToday = YES;
-            gAutoSignInCheckPending = NO;
+            NEAutoSignInRememberWinner(cand[@"source"], [cand[@"bearer"] boolValue]);
+            NEAutoSignInEndPass();
             NEAutoSignInNoteCheck(@"已签到", 540004);
             os_log(gLog, "[SIGN] 今天已签到（状态接口报 540004），不重复签");
             return;
         }
-        // 状态正常（code 0）或未明确 → 调签到接口，签过会回 540004，不会重复领
-        // （pending 由 DoSign 的回调清掉，别在这里清）
-        NEAutoSignInDoSignWithAuth(auth, deviceId);
+        if (c == 0) {
+            // token 没问题 → 同候选调签到接口，签过会回 540004，不会重复领
+            // （pending 由签到回调清掉，别在这里清）
+            NEAutoSignInDoSignAttempt();
+            return;
+        }
+        // code 2 或其他失败码：这个（来源，格式）不对，换下一个候选
+        os_log(gLog, "[SIGN] 状态返回 code=%d（候选 %{public}@），换下一个", c,
+               gSignInDiagTokenSource);
+        NEAutoSignInNoteCheck([NSString stringWithFormat:@"code %d", c], c);
+        NEAutoSignInTryNextCandidate();
     }];
     [task resume];
 }
@@ -5100,7 +5290,7 @@ static void NECheckSettingsButton(void) {
     aboutName.text = @"NinebotEnhance";
     aboutName.font = [UIFont boldSystemFontOfSize:16];
     UILabel *aboutVer = [UILabel new];
-    aboutVer.text = @"0.4.4";
+    aboutVer.text = @"0.4.5";
     aboutVer.font = [UIFont systemFontOfSize:15];
     aboutVer.textColor = [UIColor secondaryLabelColor];
     [aboutTitleRow addArrangedSubview:aboutName];
@@ -6193,7 +6383,7 @@ static void NEProbeStart(void) {
                hasSel ? "YES" : "NO");
     }
 
-    os_log(gLog, "NinebotEnhance iOS 0.4.4 已加载（小胶囊 HUD：日期/天气/信号/音量/电量/来电/超速 + 翻页时钟 + 车辆数据探测 + 有效期9999/主页换图/自定义显示 + 自动签到）");
+    os_log(gLog, "NinebotEnhance iOS 0.4.5 已加载（小胶囊 HUD：日期/天气/信号/音量/电量/来电/超速 + 翻页时钟 + 车辆数据探测 + 有效期9999/主页换图/自定义显示 + 自动签到）");
 
     // 电量监听 + 定位 + 来电观察，全部在主队列 / 后台队列做，不阻塞加载
     dispatch_async(dispatch_get_main_queue(), ^{
