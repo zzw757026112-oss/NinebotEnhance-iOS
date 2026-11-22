@@ -3897,6 +3897,26 @@ static void NECheckSettingsButton(void) {
     tap.cancelsTouchesInView = NO;
     [self.view addGestureRecognizer:tap];
 
+    // ---- 使用提示卡 ----
+    UIStackView *tipsStack = [UIStackView new];
+    tipsStack.axis = UILayoutConstraintAxisVertical;
+    tipsStack.spacing = 6;
+    [tipsStack addArrangedSubview:[self sectionLabel:@"使用提示"]];
+    NSArray<NSString *> *neFooterTips = @[
+        @"恢复原图立即生效，不用重启 App。",
+        @"HUD 开关打开后会一直保持，重启也不丢。",
+        @"等级最高 9 级，填 10 以上不显示。",
+        @"导航增强功能只能在APP投屏导航的时候生效。"
+    ];
+    for (NSString *tip in neFooterTips) {
+        UILabel *tipLabel = [UILabel new];
+        tipLabel.text = [NSString stringWithFormat:@"• %@", tip];
+        tipLabel.font = [UIFont systemFontOfSize:14];
+        tipLabel.numberOfLines = 0;
+        [tipsStack addArrangedSubview:tipLabel];
+    }
+    [stack addArrangedSubview:[self ne_cardWrappingStack:tipsStack]];
+
     // ---- 美化娱乐组（默认折叠，只改显示不改真数据）----
     UIStackView *beautyStack = [UIStackView new];
     beautyStack.axis = UILayoutConstraintAxisVertical;
@@ -4016,27 +4036,7 @@ static void NECheckSettingsButton(void) {
     [aboutStack addArrangedSubview:aboutDiagBtn];
     [stack addArrangedSubview:[self ne_cardWrappingStack:aboutStack]];
 
-    // ---- 使用提示卡 ----
-    UIStackView *tipsStack = [UIStackView new];
-    tipsStack.axis = UILayoutConstraintAxisVertical;
-    tipsStack.spacing = 6;
-    [tipsStack addArrangedSubview:[self sectionLabel:@"使用提示"]];
-    NSArray<NSString *> *neFooterTips = @[
-        @"恢复原图立即生效，不用重启 App。",
-        @"HUD 开关打开后会一直保持，重启也不丢。",
-        @"等级最高 9 级，填 10 以上不显示。",
-        @"导航增强功能只能在APP投屏导航的时候生效。"
-    ];
-    for (NSString *tip in neFooterTips) {
-        UILabel *tipLabel = [UILabel new];
-        tipLabel.text = [NSString stringWithFormat:@"• %@", tip];
-        tipLabel.font = [UIFont systemFontOfSize:14];
-        tipLabel.numberOfLines = 0;
-        [tipsStack addArrangedSubview:tipLabel];
-    }
-    [stack addArrangedSubview:[self ne_cardWrappingStack:tipsStack]];
-
-    // ---- 底部醒目行（页末最后一行，作者 QQ + 防倒卖声明）----
+    // ---- 底部醒目行（作者 QQ + 防倒卖声明）----
     UILabel *credit = [UILabel new];
     credit.text = @"作者QQ:349204217，仅供娱乐，制作不易，请勿倒卖！";
     credit.font = [UIFont boldSystemFontOfSize:15];
@@ -4044,6 +4044,15 @@ static void NECheckSettingsButton(void) {
     credit.textAlignment = NSTextAlignmentCenter;
     credit.numberOfLines = 0;
     [stack addArrangedSubview:credit];
+
+    // ---- 署名行（页末最后一行）----
+    UILabel *byline = [UILabel new];
+    byline.text = @"by再见青春";
+    byline.font = [UIFont systemFontOfSize:12];
+    byline.textColor = [UIColor secondaryLabelColor];
+    byline.textAlignment = NSTextAlignmentCenter;
+    byline.numberOfLines = 0;
+    [stack addArrangedSubview:byline];
 }
 
 - (UILabel *)sectionLabel:(NSString *)text {
