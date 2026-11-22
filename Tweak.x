@@ -57,6 +57,12 @@
 //     相邻/放宽搜索从只看父/祖父两层改成沿祖先链上溯 4 层（卡片嵌套深也能找到
 //     “我的数据”/“N币”）；再加一个 3 秒定时刷新（仅 App 在前台时），兜住布局
 //     晚、数据晚到的情况。
+// v0.3.9 诊断追加：匹配三轮靠猜层级都修不好，加界面诊断导出——
+//  我的/服务/设备页每启动第一次显示时，把视图层级写到 Documents/ne-diag.txt
+//  （每 label 记文本、窗口 frame、4 级祖先链，和匹配器会怎么换；每 imageView
+//  记有没有图、图尺寸；每按钮记标题）。设置页“美化娱乐”组里加一行
+//  “导出界面诊断”，点一下立刻导当前页。用户用 Filza 打开发回，照真实结构修。
+//  只写界面文本，不写任何 token、密码、请求头；文件超 500KB 从头写。
 // v0.3.8 改动：超速红行改成“请勿超速行驶！”，字比普通行大但绝不超胶囊边框；
 //  超速那一刻中文语音读一次“您已超速行驶，请注意安全”（跟着超速提醒开关走，不另设开关）。
 // v0.3.7 改动：设置页“日期时间”改叫“日期”（时间只在翻页时钟里显示）；和 App 1.3.19 同款。
@@ -911,6 +917,186 @@ static void NEForceRefreshLabels(void) {
     NEForceRefreshLabelsInView(w);
 }
 
+// ---------------- 界面诊断（v0.3.9 诊断追加）----------------
+// 匹配三轮靠猜层级都修不好：把当前页的视图层级写到 Documents/ne-diag.txt，
+// 用户用 Filza 打开发回，照真实结构修匹配。只写 label 文本/frame/祖先链、
+// imageView/按钮的基本信息，不写任何 token、密码、请求头。
+// 前向声明：NEAppTabBarController 定义在后面（主页车辆图那节），这里先声明。
+static UITabBarController *NEAppTabBarController(void);
+
+static NSString *NEDiagFilePath(void) {
+    NSString *doc = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory,
+                                                        NSUserDomainMask, YES).firstObject;
+    if (!doc) return nil;
+    return [doc stringByAppendingPathComponent:@"ne-diag.txt"];
+}
+
+// 追加写入；文件超过 500KB 就从头写，避免无限增长。
+static void NEAppendDiagText(NSString *text) {
+    if (!text.length) return;
+    NSString *path = NEDiagFilePath();
+    if (!path) return;
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSDictionary *attrs = [fm attributesOfItemAtPath:path error:nil];
+    unsigned long long size = [attrs[NSFileSize] unsignedLongLongValue];
+    if (size > 500 * 1024) [fm removeItemAtPath:path error:nil];
+    NSData *data = [text dataUsingEncoding:NSUTF8StringEncoding];
+    if (!data) return;
+    NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:path];
+    if (!fh) {
+        [data writeToFile:path atomically:YES];
+    } else {
+        @try {
+            [fh seekToEndOfFile];
+            [fh writeData:data];
+            [fh closeFile];
+        } @catch (...) {
+            @try { [fh closeFile]; } @catch (...) {}
+        }
+    }
+}
+
+// 祖先链：最多 4 级父视图的类名（只看结构，不含任何隐私数据）
+static NSString *NESuperviewChainString(UIView *v) {
+    NSMutableArray<NSString *> *parts = [NSMutableArray array];
+    UIView *p = v.superview;
+    for (int i = 0; i < 4 && p; i++) {
+        [parts addObject:NSStringFromClass([p class])];
+        p = p.superview;
+    }
+    return [parts componentsJoinedByString:@" > "];
+}
+
+// 文本进文件前处理：换行转义、截断，避免一行爆掉
+static NSString *NEDiagSanitize(NSString *s) {
+    if (!s) return @"";
+    NSString *t = [s stringByReplacingOccurrencesOfString:@"\n" withString:@"\\n"];
+    t = [t stringByReplacingOccurrencesOfString:@"\r" withString:@"\\r"];
+    if (t.length > 120) t = [[t substringToIndex:120] stringByAppendingString:@"…"];
+    return t;
+}
+
+// 递归走子树：深度最多 8 层、总视图数最多 2000，超了就停（文件别太大）。
+// 每个 label 多记一列“匹配器会怎么换”——直接跑 NEFixedLabelString（纯读，
+// 无副作用），一眼看出哪个没认出来、为什么。
+static void NEDumpDiagViewRec(UIView *v, UIWindow *w, NSMutableString *out,
+                              int depth, int *count) {
+    if (!v || depth > 8 || *count >= 2000) return;
+    (*count)++;
+    NSMutableString *indent = [NSMutableString string];
+    for (int i = 0; i < depth; i++) [indent appendString:@"  "];
+    CGRect f = NEFrameInWindow(v, w);
+    NSString *cls = NSStringFromClass([v class]);
+    if ([v isKindOfClass:[UILabel class]]) {
+        UILabel *label = (UILabel *)v;
+        NSString *plain = NEPlainTextOfLabel(label);
+        NSString *text = NEDiagSanitize(plain);
+        NSString *field = nil; BOOL sep = NO;
+        NSString *fixed = NEFixedLabelString(plain, label, &field, &sep);
+        NSString *verdict;
+        if (field.length) {
+            NSString *fv = NEDiagSanitize(fixed);
+            if (fv.length > 80) fv = [[fv substringToIndex:80] stringByAppendingString:@"…"];
+            verdict = [NSString stringWithFormat:@"→ %@ = \"%@\"", field, fv];
+        } else {
+            verdict = @"(no change)";
+        }
+        [out appendFormat:@"%@%@ frame=(%.0f,%.0f,%.0f,%.0f) text=\"%@\" %@\n",
+            indent, cls, f.origin.x, f.origin.y, f.size.width, f.size.height, text, verdict];
+        NSString *chain = NESuperviewChainString(v);
+        if (chain.length) [out appendFormat:@"%@  ancestors: %@\n", indent, chain];
+    } else if ([v isKindOfClass:[UIImageView class]]) {
+        UIImageView *iv = (UIImageView *)v;
+        NSString *imgInfo = iv.image ?
+            [NSString stringWithFormat:@"image %.0fx%.0f", iv.image.size.width, iv.image.size.height] :
+            @"no image";
+        [out appendFormat:@"%@%@ frame=(%.0f,%.0f,%.0f,%.0f) %@\n",
+            indent, cls, f.origin.x, f.origin.y, f.size.width, f.size.height, imgInfo];
+    } else if ([v isKindOfClass:[UIButton class]]) {
+        UIButton *btn = (UIButton *)v;
+        NSString *title = NEDiagSanitize([btn titleForState:UIControlStateNormal]);
+        [out appendFormat:@"%@%@ frame=(%.0f,%.0f,%.0f,%.0f) title=\"%@\"\n",
+            indent, cls, f.origin.x, f.origin.y, f.size.width, f.size.height, title];
+    } else {
+        [out appendFormat:@"%@%@ frame=(%.0f,%.0f,%.0f,%.0f)\n",
+            indent, cls, f.origin.x, f.origin.y, f.size.width, f.size.height];
+    }
+    for (UIView *sub in v.subviews) {
+        NEDumpDiagViewRec(sub, w, out, depth + 1, count);
+        if (*count >= 2000) return;
+    }
+}
+
+static void NEDumpDiagForView(UIView *root, NSString *pageName) {
+    if (!root) return;
+    UIWindow *w = NEKeyWindow();
+    if (!w) return;
+    NSMutableString *out = [NSMutableString string];
+    NSDateFormatter *df = [[NSDateFormatter alloc] init];
+    df.dateFormat = @"yyyy-MM-dd HH:mm:ss";
+    [out appendFormat:@"\n===== %@ %@ =====\n", pageName ?: @"?", [df stringFromDate:[NSDate date]]];
+    [out appendString:@"(label 文本为当前显示值；→ 后面是匹配器会换成的字段/值，(no change) 表示不换)\n"];
+    int count = 0;
+    @try {
+        NEDumpDiagViewRec(root, w, out, 0, &count);
+    } @catch (...) {
+        [out appendString:@"(dump 中途异常，已截断)\n"];
+    }
+    [out appendFormat:@"----- 共 %d 个视图 -----\n", count];
+    NEAppendDiagText(out);
+    os_log(gLog, "[DIAG] 已导出 %{public}@，%d 个视图", pageName ?: @"?", count);
+}
+
+// 页面名：VC 所属的 tab 标题（设备/发现/商城/服务/我的）；不在 tab 里就用类名。
+static NSString *NEPageNameForVC(UIViewController *vc) {
+    if (!vc) return @"?";
+    UITabBarController *tab = NEAppTabBarController();
+    if (tab) {
+        UIViewController *q = vc;
+        while (q) {
+            for (UIViewController *child in tab.viewControllers) {
+                if (q == child) {
+                    return child.tabBarItem.title.length ?
+                        child.tabBarItem.title : NSStringFromClass([child class]);
+                }
+            }
+            q = q.parentViewController;
+        }
+        UIViewController *r = vc.presentingViewController;
+        while (r) {
+            for (UIViewController *child in tab.viewControllers) {
+                if (r == child) {
+                    return child.tabBarItem.title.length ?
+                        child.tabBarItem.title : NSStringFromClass([child class]);
+                }
+            }
+            r = r.presentingViewController;
+        }
+    }
+    return NSStringFromClass([vc class]);
+}
+
+// 每页每启动只导出一次（我的/服务/设备）。延迟 2 秒再导，等数据加载完；
+// 导出时若页面已不在窗口就跳过（这次不记数，切回来会再导）。
+static NSMutableSet<NSString *> *gDiagDumpedPages = nil;
+static void NEDumpDiagIfNeededForVC(UIViewController *vc) {
+    if (!vc || !vc.view) return;
+    NSString *page = NEPageNameForVC(vc);
+    if (![page isEqualToString:@"我的"] && ![page isEqualToString:@"服务"] &&
+        ![page isEqualToString:@"设备"]) return;
+    if (!gDiagDumpedPages) gDiagDumpedPages = [NSMutableSet set];
+    if ([gDiagDumpedPages containsObject:page]) return;
+    __weak UIViewController *weakVC = vc;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        UIViewController *strongVC = weakVC;
+        if (!strongVC || !strongVC.view.window) return;
+        if ([gDiagDumpedPages containsObject:page]) return;
+        [gDiagDumpedPages addObject:page];
+        NEDumpDiagForView(strongVC.view, page);
+    });
+}
+
 // --- 主页车辆图 / 背景图自定义 ---
 static NSString *NEVehicleImagePath(void) {
     return [[NSUserDefaults standardUserDefaults] stringForKey:@"NEVehicleImagePath"];
@@ -1268,6 +1454,8 @@ static void NE_UIViewController_viewDidAppear(id self, SEL _cmd, BOOL animated) 
     if (!gLabelHookInstalled && !gHasVehicleImage && !gHasBgImage) return;
     NSString *clsName = NSStringFromClass([self class]);
     if ([clsName rangeOfString:@"NEHUDSettings"].location != NSNotFound) return;
+    // 诊断：我的/服务/设备页每启动只导出一次（见 NEDumpDiagIfNeededForVC）
+    @try { NEDumpDiagIfNeededForVC((UIViewController *)self); } @catch (...) {}
     NSString *key = [NSString stringWithFormat:@"%p", self];
     CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
     if (!gAppearThrottle) gAppearThrottle = [NSMutableDictionary dictionary];
@@ -2660,6 +2848,8 @@ static void NECheckSettingsButton(void) {
     [beautyStack addArrangedSubview:[self customDisplayRow:@"等级" toggleKey:@"NELevel" valueKey:@"NELevelValue" on:NEBoolDefault(@"NELevel") value:[defs stringForKey:@"NELevelValue"] placeholder:@"如 Lv.99"]];
     [beautyStack addArrangedSubview:[self customDisplayRow:@"称号" toggleKey:@"NETitle" valueKey:@"NETitleValue" on:NEBoolDefault(@"NETitle") value:[defs stringForKey:@"NETitleValue"] placeholder:@"如 车神"]];
     [beautyStack addArrangedSubview:[self customDisplayRow:@"连续签到天数" toggleKey:@"NESignDays" valueKey:@"NESignDaysValue" on:NEBoolDefault(@"NESignDays") value:[defs stringForKey:@"NESignDaysValue"] placeholder:@"如 365"]];
+    // v0.3.9 诊断：手动导出当前页的界面结构（设置页底下的那个 tab 页面）
+    [beautyStack addArrangedSubview:[self diagExportRow]];
     [stack addArrangedSubview:[self groupHeader:@"美化娱乐" tag:0]];
     [stack addArrangedSubview:beautyStack];
 
@@ -2966,6 +3156,44 @@ static void NECheckSettingsButton(void) {
     if (v) v.text = NEVehicleImagePath().length ? @"已自定义" : @"原图";
     UILabel *b = objc_getAssociatedObject(self, &NEBackgroundStatusKey);
     if (b) b.text = NEBackgroundImagePath().length ? @"已自定义" : @"原图";
+}
+
+// v0.3.9 诊断：手动导出当前页的界面结构（设置页底下的那个 tab 页面），
+// 写到 Documents/ne-diag.txt，用户用 Filza 打开发回。
+- (UIView *)diagExportRow {
+    UIView *row = [UIView new];
+    UILabel *label = [UILabel new];
+    label.text = @"导出界面诊断";
+    label.font = [UIFont systemFontOfSize:16];
+    label.translatesAutoresizingMaskIntoConstraints = NO;
+    UIButton *btn = [UIButton buttonWithType:UIButtonTypeSystem];
+    [btn setTitle:@"导出" forState:UIControlStateNormal];
+    btn.titleLabel.font = [UIFont systemFontOfSize:16];
+    btn.translatesAutoresizingMaskIntoConstraints = NO;
+    [btn addTarget:self action:@selector(exportDiagTapped:)
+        forControlEvents:UIControlEventTouchUpInside];
+    [row addSubview:label];
+    [row addSubview:btn];
+    [NSLayoutConstraint activateConstraints:@[
+        [label.leadingAnchor constraintEqualToAnchor:row.leadingAnchor],
+        [label.centerYAnchor constraintEqualToAnchor:row.centerYAnchor],
+        [btn.trailingAnchor constraintEqualToAnchor:row.trailingAnchor],
+        [btn.centerYAnchor constraintEqualToAnchor:row.centerYAnchor],
+        [row.heightAnchor constraintEqualToConstant:32]
+    ]];
+    return row;
+}
+
+- (void)exportDiagTapped:(UIButton *)sender {
+    UITabBarController *tab = NEAppTabBarController();
+    UIViewController *sel = tab.selectedViewController;
+    NSString *page = NEPageNameForVC(sel);
+    if (sel.view) NEDumpDiagForView(sel.view, [page stringByAppendingString:@"（手动）"]);
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"已导出"
+        message:@"诊断已保存到 Documents/ne-diag.txt，用 Filza 打开九号出行 Documents 文件夹查看。"
+        preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault handler:nil]];
+    [self presentViewController:alert animated:YES completion:nil];
 }
 
 - (void)pickImageTapped:(UIButton *)sender {
