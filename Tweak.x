@@ -147,6 +147,25 @@
 //  其余给 bg），代码里没有车辆/背景写反的地方；应是运行时的三张 view
 //  可见状态在选图瞬间与诊断快照不同，需用户选完车辆图后立刻导一份新
 //  ne-diag.txt（看三张图的 hidden 状态和图尺寸）+ 设备页截图才能定。
+// v0.3.9 第十修（用户实测 + 新诊断 ne-diag-807ae3b2.txt 十一次设备导出，
+//  2026-11-22 17:52）：根因是运行时的三处，不是静态接线——
+//  ① 分类误判：第七修按“可见”分，主题重载瞬间可见状态是过渡态，14:56
+//  那次导出里可见的第二张（车辆主图）被当成背景换上了 2160x4790 背景图，
+//  就是用户说的“改车辆图却换了背景图”。改：三张满屏图时直接认中间一张
+//  是车辆（十一次导出顺序恒定：隐藏背景层 / 可见车辆主图 / 隐藏阴影层），
+//  完全不看可见状态；不是三张时退回“最后一个可见是车辆”的老规则。
+//  ② 选完图不刷新：NEForceRefreshImages 要求当前选中是设备 tab 才刷，
+//  但设置页是从“我的”tab 弹出的 modal，选完图时选中是“我的”，
+//  savePickedImage 里的“选完立刻刷新”直接 return、白跑了。改：不再
+//  要求选中设备 tab，设备根页面 view 一旦加载就常驻层级，在哪个 tab
+//  都能刷（仍只刷 rootPage.view，仪表/骑行子页面不受影响）。
+//  ③ 没有持续重断言：车辆主图只在创建时设一次（那时 view 还没挂载/布局，
+//  分类返回 nil、钩子拦不到），之后 App 再也不重设，所以第二张永远是
+//  750x908 默认图；而 App 会在主题重载时主动重写这些 view（第一张图的
+//  尺寸每次导出都在变就是证据），一次性刷新拦不住事后重写。改：3 秒定时
+//  器跑一次 NEForceRefreshImages（幂等，已是自定义图的不动），选完图后
+//  1 秒再补刷一次。背景层（第一张，隐藏）仍换背景图，阴影层（第三张，
+//  隐藏）不动逻辑；卡片/仪表页/标题/RN/有效期/HUD 开关一律不动。
 // v0.3.8 改动：超速红行改成“请勿超速行驶！”，字比普通行大但绝不超胶囊边框；
 //  超速那一刻中文语音读一次“您已超速行驶，请注意安全”（跟着超速提醒开关走，不另设开关）。
 // v0.3.7 改动：设置页“日期时间”改叫“日期”（时间只在翻页时钟里显示）；和 App 1.3.19 同款。
@@ -899,6 +918,7 @@ static void NE_UIButton_setTitle(id self, SEL _cmd, NSString *title, UIControlSt
 // 页面显示刷新钩子（viewDidAppear）的前置声明：定义在图片刷新函数之后，
 // 那里 NEForceRefreshLabels/NEForceRefreshImages 才可见。
 static void NEInstallAppearHookIfNeeded(void);
+static void NEStartImageRefreshTimerIfNeeded(void);
 
 // UILabel 文字钩子（setText: + setAttributedText:）由 9999 有效期和五个自定义项共用，只装一次。
 static BOOL gLabelHookInstalled = NO;
@@ -1865,6 +1885,8 @@ static BOOL NEViewIsOnDeviceRootPage(UIView *v);
 // 第一张和第三张一直是 hidden——按“最后一个是车辆”分，会把车辆图换到
 // 隐藏的第三张（375x385）上，用户永远看不到，而真正显示的中间那张
 // 永远换不上——车辆图一直没变化的根因。
+// （第十修更新：三张时不再按可见分，直接认中间一张是车辆，见
+// NEImageBySiblingOrder；可见判定只在不是三张时作退路。）
 static BOOL NEIsViewEffectivelyVisible(UIView *v) {
     UIView *p = v;
     while (p) {
@@ -1883,31 +1905,35 @@ static UIImage *NEImageBySiblingOrder(UIImageView *iv, UIImage *bg, UIImage *veh
     CGFloat sw = [UIScreen mainScreen].bounds.size.width;
     CGFloat sh = [UIScreen mainScreen].bounds.size.height;
     if (bs.width < sw * 0.9 || bs.height < sh * 0.5) return nil;
-    // 主信号改成“可见”，不再只看“最后一个”：同级满屏 view 里，
-    // 唯一可见的那张就是用户看到的车辆/主图 → 车辆图；其余（隐藏的背景层）
-    // → 背景图（它们显示出来时再按可见重判，刷新会兜底）。一张都不可见时
-    // 不判（等它显示出来再判，别把车辆图换到隐藏的 view 上）。
-    // 多张可见时，在可见的里面按顺序分（最后一张可见的 → 车辆）。
-    // 父容器里满屏 view 不足 2 个时不判、等刷新时再判——图先设、view 后加
-    // 的竞态下，背景 view 会暂时成为“最后一个”而被错换成车辆图。
-    UIImageView *last = nil;
-    UIImageView *lastVisible = nil;
+    // 收集同级满屏 view（保持 subviews 顺序）。
+    UIImageView *full[16];
     NSInteger fullCount = 0;
-    NSInteger visibleCount = 0;
     for (UIView *sub in parent.subviews) {
         if (![sub isKindOfClass:[UIImageView class]]) continue;
         CGSize s = sub.bounds.size;
         if (s.width < sw * 0.9 || s.height < sh * 0.5) continue;
+        if (fullCount < 16) full[fullCount] = (UIImageView *)sub;
         fullCount++;
-        last = (UIImageView *)sub;
-        if (NEIsViewEffectivelyVisible(sub)) {
-            visibleCount++;
-            lastVisible = (UIImageView *)sub;
-        }
     }
-    if (!last || fullCount < 2) return nil;
-    if (visibleCount == 0) return nil;
-    UIImage *result = (lastVisible == iv) ? veh : bg;
+    if (fullCount < 2) return nil;
+    // 主信号：同级顺序（第十修）。诊断（ne-diag-807ae3b2.txt，十一次设备导出）
+    // 证明三张满屏图顺序恒定：第一张是隐藏的背景层、中间一张是可见的车辆主图
+    // （750x908 主题合成图，狗+车画在一张图里）、第三张是隐藏的阴影层
+    // （375x385）。第七修按“可见”分是错的——主题重载瞬间可见状态是过渡态，
+    // 14:56 那次导出：可见的第二张被当成背景换上了 2160x4790 背景图，就是
+    // 用户说的“改车辆图却换了背景图”。所以三张时直接认中间一张是车辆，
+    // 其余是背景，完全不看可见状态；不是三张时退回“最后一个可见是车辆”
+    // 的老规则（一张都不可见时不判，等显示出来再判）。
+    UIImageView *vehicleView = nil;
+    if (fullCount == 3) {
+        vehicleView = full[1];
+    } else {
+        for (NSInteger i = 0; i < fullCount && i < 16; i++) {
+            if (NEIsViewEffectivelyVisible(full[i])) vehicleView = full[i];
+        }
+        if (!vehicleView) return nil;
+    }
+    UIImage *result = (vehicleView == iv) ? veh : bg;
     // 背景图返回前按 view 纵横比裁好显示版（第八修）；车辆图不动。
     if (result == bg) result = NEBackgroundDisplayImage(bg, iv.bounds.size);
     return result;
@@ -2138,6 +2164,8 @@ static void NEInstallImageHooksIfNeeded(void) {
     gImageHooksInstalled = YES;
     // 页面显示时也要刷新图片（tab 懒加载，切过去才加载）
     NEInstallAppearHookIfNeeded();
+    // 第十修：定时重断言（3 秒一次），App 事后重写主题图时能再换回来
+    NEStartImageRefreshTimerIfNeeded();
 }
 
 // v0.3.9 修复：图片强制刷新——主题图/车图在 App 启动时已加载好，改设置后
@@ -2298,18 +2326,39 @@ static void NEForceRefreshImagesInView(UIView *view) {
 
 static void NEForceRefreshImages(void) {
     if (!gHasVehicleImage && !gHasBgImage) return;
-    UITabBarController *tab = NEAppTabBarController();
-    if (!tab) return;
-    UIViewController *sel = tab.selectedViewController;
-    BOOL isDevice = [sel.tabBarItem.title isEqualToString:@"设备"] || tab.selectedIndex == 0;
-    if (!isDevice) return;
-    // 只刷设备根页面的 view（不含 push 出去的子页面，如仪表/骑行页）；
-    // 根页面的 view 即便被子页面盖住也还在层级里，照常刷。根页面 view
-    // 还没加载出来时没东西可刷，直接返回（不要退回刷 sel.view，
+    // 第十修：不再要求当前选中的是设备 tab——设置页是从“我的”tab 弹出的
+    // modal，选完图那一刻 selectedViewController 是“我的”，旧的 isDevice
+    // 判断直接 return，savePickedImage 里“选完图立刻刷新”等于没跑——这
+    // 就是选图后设备页不变的另一半原因。设备根页面的 view 一旦加载就常驻
+    // 层级（切 tab 也不卸载），在哪个 tab 都能刷；只刷 rootPage.view，不含
+    // push 出去的子页面（仪表/骑行页），所以不会把车辆图刷到子页面上去。
+    // 根页面 view 还没加载出来时没东西可刷，直接返回（不要退回刷 sel.view，
     // 那会把子页面也刷进去，正是车辆图跑到仪表页的另一条路）。
     UIViewController *rootPage = NEDeviceRootPageVC();
     if (!rootPage || !rootPage.isViewLoaded || !rootPage.view) return;
     NEForceRefreshImagesInView(rootPage.view);
+}
+
+// v0.3.9 第十修：图片定时重断言——App 会在主题重载/切 tab/回前台时把设备页
+// 三张满屏图重设回主题图（诊断 ne-diag-807ae3b2.txt 里第一张图的尺寸每次
+// 导出都在变：942x1672、2160x4790、1206x2674、375x454、750x908、1892x4088，
+// 证明 App 在主动重写它们），而一次性刷新（选完图/切 tab 时）拦不住事后
+// 重写；set-time 钩子又只在 view 已挂载且已布局时才分得清，创建时预设的
+// 那一次拦不到——车辆主图只在创建时设一次、之后再也不重设，所以钩子永远
+// 没机会，第二张永远是 750x908 默认图。3 秒跑一次强制刷新，幂等（已是
+// 自定义图的不动，只是指针比较），把被 App 盖回去的图再换回来。
+static NSTimer *gImageRefreshTimer = nil;
+static void NEStartImageRefreshTimerIfNeeded(void) {
+    if (gImageRefreshTimer) return;
+    void (^start)(void) = ^{
+        if (gImageRefreshTimer) return;
+        gImageRefreshTimer = [NSTimer scheduledTimerWithTimeInterval:3.0 repeats:YES block:^(NSTimer * _Nonnull timer) {
+            (void)timer;
+            @try { NEForceRefreshImages(); } @catch (...) {}
+        }];
+    };
+    if ([NSThread isMainThread]) start();
+    else dispatch_async(dispatch_get_main_queue(), start);
 }
 
 // v0.3.9 修复：页面显示时刷新——tab 懒加载，启动 +3 秒刷新时我的/服务页
@@ -4149,6 +4198,11 @@ static void NECheckSettingsButton(void) {
     NEInstallImageHooksIfNeeded();
     [self refreshImageStatus];
     NEForceRefreshImages(); // v0.3.9 修复：选完图立刻把设备 tab 的图重算一遍，不用等切 tab/重启
+    // 第十修：1 秒后再刷一次——App 可能在选图后异步重载主题，把刚换上的
+    // 自定义图盖回去；定时器 3 秒才跑一轮，1 秒补刷让结果更快稳定。
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        @try { NEForceRefreshImages(); } @catch (...) {}
+    });
     os_log(gLog, "[IMG] 已保存自定义%{public}@（%ldx%ld），已应用到设备页",
            kind == 0 ? @"车辆图" : @"背景图",
            (long)img.size.width, (long)img.size.height);
