@@ -1,4 +1,12 @@
-// NinebotEnhance iOS v0.3.9 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
+// NinebotEnhance iOS v0.4.0 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
+//
+// v0.4.0 新增：自动签到（快捷指令的保险，设置页单独一行开关，默认开）：
+//  打开九号 App 时静默签到一次；快捷指令每天 08:00 已自动签到，这里是保险，
+//  万一快捷指令没跑起来，打开 App 时插件补签；今天已签过就什么也不做。
+//  token / deviceId 全从 App 自身运行状态里取（App 发给九号网关的请求里带
+//  的 Authorization 只读捕获 + 扫 App 自己的 NSUserDefaults），绝不写死、
+//  绝不问用户要、不打 token 日志。设置页开关下面显示签到记录（今天已签到 /
+//  上次签到：YYYY-MM-DD / 暂无签到记录），只读不点。分享领 N 币不在本版。
 //
 // v0.3.9 改动：三个只改显示、不改真数据的样子货（照搬安卓 ninebot-sign-lsp 的思路）：
 //  1. 服务有效期自定义：hook -[UILabel setText:]，文本含“服务有效期”且带日期时，
@@ -3705,6 +3713,251 @@ static void NoteFrame(size_t w, size_t h) {
     RefreshWeatherIfNeeded();
 }
 
+// ---------------- v0.4.0：自动签到（快捷指令的保险） ----------------
+// 打开九号 App 时静默签到一次（开关 NEAutoSignIn，默认开，设置页单独一行）。
+// 快捷指令每天 08:00 已自动签到，这里是保险：万一快捷指令没跑起来，
+// 打开 App 时插件补签一次；今天已签过就什么也不做（接口回 540004）。
+// 只调官方签到接口，不碰分享（分享等 2026-11-23 测试结果再定）。
+// token / deviceId 全从 App 自身运行状态里取：
+//  ① 优先用 App 自己发给九号网关的请求里带的 Authorization（NSURLSession
+//     钩子只读捕获，存在内存，不写盘、不打日志）；
+//  ② 拿不到时扫 App 自己的 NSUserDefaults，找含 token 的键（值够长才算）。
+// deviceId 同理：先扫 NSUserDefaults 含 device 的键，拿不到用 IDFV。
+// 找不到 token 或 deviceId 就静默跳过（只记一行不含敏感值的日志），绝不猜、
+// 绝不写死、绝不问用户要。整个过程无 UI、无弹窗，后台跑、不阻塞。
+// 签到记录（NEAutoSignInLastDate，YYYY-MM-DD）存 NSUserDefaults，设置页开关
+// 下面显示：今天已签到 / 上次签到：YYYY-MM-DD / 暂无签到记录。
+
+static BOOL NEAutoSignInEnabled(void) {
+    id v = [[NSUserDefaults standardUserDefaults] objectForKey:@"NEAutoSignIn"];
+    return v ? [v boolValue] : YES; // 默认开：就是要这个保险
+}
+
+static NSString *NEAutoSignInTodayString(void) {
+    static NSDateFormatter *fmt = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        fmt = [NSDateFormatter new];
+        fmt.dateFormat = @"yyyy-MM-dd";
+        fmt.locale = [NSLocale localeWithLocaleIdentifier:@"en_US_POSIX"];
+        fmt.timeZone = [NSTimeZone localTimeZone];
+    });
+    return [fmt stringFromDate:[NSDate date]];
+}
+
+// 签到记录显示文案：今天已签过 → 今天已签到；有旧日期 → 上次签到：日期；无 → 暂无签到记录
+static NSString *NEAutoSignInRecordText(void) {
+    NSString *last = [[NSUserDefaults standardUserDefaults] stringForKey:@"NEAutoSignInLastDate"];
+    if (last.length == 0) return @"暂无签到记录";
+    if ([last isEqualToString:NEAutoSignInTodayString()]) return @"今天已签到";
+    return [NSString stringWithFormat:@"上次签到：%@", last];
+}
+
+// 今天签到成功（或接口已报今天签过）就记一笔，供设置页显示；
+// 设置页开着时也刷新记录行（通知只在主队列发）。
+static void NENoteSignInDoneToday(void) {
+    [[NSUserDefaults standardUserDefaults] setObject:NEAutoSignInTodayString()
+                                              forKey:@"NEAutoSignInLastDate"];
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [[NSNotificationCenter defaultCenter]
+            postNotificationName:@"NEAutoSignInRecordChanged" object:nil];
+    });
+}
+
+// ---- token / deviceId：只从 App 自身运行状态取，绝不写死 ----
+static NSString *gCapturedAuthToken = nil; // 仅内存，不写盘、不打日志
+static NSLock *gAuthLock = nil; // %ctor 里建
+static BOOL gAutoSignInAttempted = NO; // 本次启动只试一次
+static id gAutoSignInObserver = nil; // become-active 观察者，强引用留着
+
+// NSURLSession 只读观察：App 自己发给九号网关的请求，把 Authorization 记下来。
+// 不改请求、不拦请求，只读。原实现照调。
+static NSURLSessionDataTask *(*orig_NSURLSession_dataTaskWithRequest)(id, SEL, NSURLRequest *, void (^)(NSData *, NSURLResponse *, NSError *));
+
+static NSURLSessionDataTask *NE_NSURLSession_dataTaskWithRequest(id self, SEL _cmd, NSURLRequest *request, void (^completionHandler)(NSData *, NSURLResponse *, NSError *)) {
+    @try {
+        NSURL *url = request.URL;
+        if (url && url.host && [url.host containsString:@"ninebot.com"]) {
+            NSString *auth = request.allHTTPHeaderFields[@"Authorization"];
+            if (auth.length >= 20) {
+                [gAuthLock lock];
+                if (![gCapturedAuthToken isEqualToString:auth]) gCapturedAuthToken = [auth copy];
+                [gAuthLock unlock];
+            }
+        }
+    } @catch (...) {}
+    return orig_NSURLSession_dataTaskWithRequest(self, _cmd, request, completionHandler);
+}
+
+static BOOL gAuthHookInstalled = NO;
+static void NEInstallAuthCaptureHookIfNeeded(void) {
+    if (gAuthHookInstalled) return;
+    Class cls = objc_getClass("NSURLSession");
+    if (!cls || !class_getInstanceMethod(cls, @selector(dataTaskWithRequest:completionHandler:))) {
+        os_log(gLog, "[SIGN] NSURLSession/dataTaskWithRequest: 不存在，不装观察钩子");
+        return;
+    }
+    MSHookMessageEx(cls, @selector(dataTaskWithRequest:completionHandler:),
+                    (IMP)NE_NSURLSession_dataTaskWithRequest,
+                    (IMP *)&orig_NSURLSession_dataTaskWithRequest);
+    if (!orig_NSURLSession_dataTaskWithRequest) {
+        os_log(gLog, "[SIGN] NSURLSession 观察钩子安装失败（不影响签到，退回扫 defaults）");
+        return;
+    }
+    gAuthHookInstalled = YES;
+    os_log(gLog, "[SIGN] NSURLSession 观察钩子已装（只读 Authorization，不改请求）");
+}
+
+// defaults 里存的可能是裸 token（要补 Bearer），也可能已是完整头值；统一成完整头值
+static NSString *NEAuthHeaderFromStoredToken(NSString *stored) {
+    if (stored.length == 0) return nil;
+    if (stored.length >= 7) {
+        NSString *prefix = [[stored substringToIndex:7] lowercaseString];
+        if ([prefix isEqualToString:@"bearer "]) return stored;
+    }
+    return [@"Bearer " stringByAppendingString:stored];
+}
+
+// Authorization 头完整值（直接能 setValue:forHTTPHeaderField: 的）。
+// 先用钩子抓到的（App 正在用的，最可靠）；再扫 App 自己的 defaults。
+static NSString *NEFindSignInAuthHeader(void) {
+    [gAuthLock lock];
+    NSString *captured = gCapturedAuthToken;
+    [gAuthLock unlock];
+    if (captured.length >= 20) return captured;
+    NSDictionary *all = [[NSUserDefaults standardUserDefaults] dictionaryRepresentation];
+    NSString *best = nil;
+    for (NSString *key in all) {
+        NSString *lk = [key lowercaseString];
+        if ([lk containsString:@"token"] || [lk isEqualToString:@"authorization"]) {
+            id v = all[key];
+            if ([v isKindOfClass:[NSString class]] && [(NSString *)v length] >= 20) {
+                if ([lk isEqualToString:@"token"] || [lk isEqualToString:@"accesstoken"] ||
+                    [lk isEqualToString:@"access_token"] || [lk isEqualToString:@"authorization"])
+                    return NEAuthHeaderFromStoredToken((NSString *)v);
+                if (!best) best = (NSString *)v;
+            }
+        }
+    }
+    return best ? NEAuthHeaderFromStoredToken(best) : nil;
+}
+
+static NSString *NEFindDeviceId(void) {
+    NSDictionary *all = [[NSUserDefaults standardUserDefaults] dictionaryRepresentation];
+    for (NSString *key in all) {
+        NSString *lk = [key lowercaseString];
+        if ([lk containsString:@"device"]) {
+            id v = all[key];
+            if ([v isKindOfClass:[NSString class]] && [(NSString *)v length] >= 8) return (NSString *)v;
+        }
+    }
+    NSString *idfv = [[[UIDevice currentDevice] identifierForVendor] UUIDString];
+    return idfv.length >= 8 ? idfv : nil;
+}
+
+static NSURLSession *NESignInSession(void) {
+    static NSURLSession *s = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        NSURLSessionConfiguration *cfg = [NSURLSessionConfiguration defaultSessionConfiguration];
+        cfg.timeoutIntervalForRequest = 15;
+        s = [NSURLSession sessionWithConfiguration:cfg];
+    });
+    return s;
+}
+
+// 调签到接口（body 只有 deviceId）。code 0 成功；540004 今天已签过（不重复领）。
+static void NEAutoSignInDoSignWithAuth(NSString *auth, NSString *deviceId) {
+    NSURL *url = [NSURL URLWithString:@"https://cn-cbu-gateway.ninebot.com/portal/api/user-sign/v2/sign"];
+    if (!url) return;
+    NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:url];
+    req.HTTPMethod = @"POST";
+    [req setValue:auth forHTTPHeaderField:@"Authorization"];
+    [req setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
+    req.HTTPBody = [NSJSONSerialization dataWithJSONObject:@{@"deviceId": deviceId}
+                                                   options:0 error:nil];
+    NSURLSessionDataTask *task = [NESignInSession() dataTaskWithRequest:req
+        completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
+        if (err || !data) {
+            os_log(gLog, "[SIGN] 签到请求失败：%{public}s",
+                   err ? err.localizedDescription.UTF8String : "no data");
+            return;
+        }
+        NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+        NSNumber *code = json[@"code"];
+        int c = code ? [code intValue] : -1;
+        if (c == 0) {
+            NENoteSignInDoneToday();
+            os_log(gLog, "[SIGN] 签到成功（code 0）");
+        } else if (c == 540004) {
+            NENoteSignInDoneToday();
+            os_log(gLog, "[SIGN] 今天已签到（签到接口报 540004），不重复签");
+        } else {
+            os_log(gLog, "[SIGN] 签到返回 code=%d（下次打开 App 再试）", c);
+        }
+    }];
+    [task resume];
+}
+
+// 静默签到（后台跑，无 UI、无弹窗）：先查状态，再按需签。只记 code，不记 token。
+static void NEAutoSignInRun(void) {
+    if (!NEAutoSignInEnabled()) return;
+    NSString *auth = NEFindSignInAuthHeader();
+    NSString *deviceId = NEFindDeviceId();
+    if (auth.length < 20 || deviceId.length < 8) {
+        os_log(gLog, "[SIGN] 跳过：token 或 deviceId 未找到（token:%s deviceId:%s）",
+               auth.length >= 20 ? "有" : "无", deviceId.length >= 8 ? "有" : "无");
+        return;
+    }
+    NSURL *statusURL = [NSURL URLWithString:@"https://cn-cbu-gateway.ninebot.com/portal/api/user-sign/v2/status"];
+    if (!statusURL) return;
+    NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:statusURL];
+    req.HTTPMethod = @"GET";
+    [req setValue:auth forHTTPHeaderField:@"Authorization"];
+    NSURLSessionDataTask *task = [NESignInSession() dataTaskWithRequest:req
+        completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
+        if (err || !data) {
+            os_log(gLog, "[SIGN] 查状态失败：%{public}s",
+                   err ? err.localizedDescription.UTF8String : "no data");
+            return;
+        }
+        NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+        NSNumber *code = json[@"code"];
+        if (code && [code intValue] == 540004) {
+            NENoteSignInDoneToday();
+            os_log(gLog, "[SIGN] 今天已签到（状态接口报 540004），不重复签");
+            return;
+        }
+        // 状态正常（code 0）或未明确 → 调签到接口，签过会回 540004，不会重复领
+        NEAutoSignInDoSignWithAuth(auth, deviceId);
+    }];
+    [task resume];
+}
+
+// 本次启动只排一次：开关开着才排；等 6 秒让 App 自己的登录/请求先跑（钩子先抓到 token）。
+static void NEAutoSignInScheduleOnce(void) {
+    if (gAutoSignInAttempted) return;
+    gAutoSignInAttempted = YES;
+    if (!NEAutoSignInEnabled()) return;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(6 * NSEC_PER_SEC)),
+                   dispatch_get_global_queue(QOS_CLASS_BACKGROUND, 0), ^{
+        NEAutoSignInRun();
+    });
+}
+
+// 首次进前台时触发一次（本次启动只试一次，不在每次切回前台时重复）。
+// 万一注入时 App 已在前台（become-active 已发过），直接排一次。
+static void NEAutoSignInTriggerIfNeeded(void) {
+    if (gAutoSignInObserver) return;
+    gAutoSignInObserver = [[NSNotificationCenter defaultCenter]
+        addObserverForName:UIApplicationDidBecomeActiveNotification object:nil
+        queue:[NSOperationQueue mainQueue] usingBlock:^(NSNotification *note) {
+        NEAutoSignInScheduleOnce();
+    }];
+    if ([[UIApplication sharedApplication] applicationState] == UIApplicationStateActive)
+        NEAutoSignInScheduleOnce();
+}
+
 // ---------------- HUD 设置界面 ----------------
 // 九号 App 的“我的”页右上角会出现一个“Ninebot pro+”按钮。
 // 找页面的办法：每 3 秒看一次最上层 ViewController，只在“我的”页
@@ -3716,6 +3969,7 @@ static void NoteFrame(size_t w, size_t h) {
 static const char NEHUDButtonKey = 0;
 static const char NEBeautyGroupKey = 0; // 设置页：“美化娱乐”折叠容器
 static const char NENavGroupKey = 0;    // 设置页：“导航增强”折叠容器
+static const char NESignInRecordKey = 0; // 设置页：自动签到记录 label
 static const char NESpeedLimitValueKey = 0;
 
 @interface NEHUDSettingsVC : UIViewController
@@ -3917,6 +4171,31 @@ static void NECheckSettingsButton(void) {
     }
     [stack addArrangedSubview:[self ne_cardWrappingStack:tipsStack]];
 
+    // ---- 自动签到卡（v0.4.0，快捷指令的保险；单独一行，不折叠）----
+    UIStackView *signStack = [UIStackView new];
+    signStack.axis = UILayoutConstraintAxisVertical;
+    signStack.spacing = 0;
+    [signStack addArrangedSubview:[self switchRow:@"自动签到（打开 App 时静默签到）" key:@"NEAutoSignIn" on:NEAutoSignInEnabled()]];
+    UILabel *signRecord = [UILabel new];
+    signRecord.text = NEAutoSignInRecordText();
+    signRecord.font = [UIFont systemFontOfSize:13];
+    signRecord.textColor = [UIColor secondaryLabelColor];
+    signRecord.numberOfLines = 0;
+    objc_setAssociatedObject(self, &NESignInRecordKey, signRecord, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    [signStack addArrangedSubview:[self ne_footnoteView:signRecord]];
+    UILabel *signNote = [UILabel new];
+    signNote.text = @"快捷指令每天 08:00 已自动签到，这里是保险：万一快捷指令没跑起来，打开 App 时插件会静默补签；今天已签过就什么也不做。";
+    signNote.font = [UIFont systemFontOfSize:13];
+    signNote.textColor = [UIColor secondaryLabelColor];
+    signNote.numberOfLines = 0;
+    [signStack addArrangedSubview:[self ne_footnoteView:signNote]];
+    [self ne_styleSeparatorsInStack:signStack];
+    [stack addArrangedSubview:[self ne_cardWrappingStack:signStack]];
+    // 签到跑完（成功或已签）会发通知，设置页开着时也刷新记录行
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(onSignInRecordChanged:)
+                                                 name:@"NEAutoSignInRecordChanged" object:nil];
+
     // ---- 美化娱乐组（默认折叠，只改显示不改真数据）----
     UIStackView *beautyStack = [UIStackView new];
     beautyStack.axis = UILayoutConstraintAxisVertical;
@@ -4012,7 +4291,7 @@ static void NECheckSettingsButton(void) {
     aboutName.text = @"NinebotEnhance";
     aboutName.font = [UIFont boldSystemFontOfSize:16];
     UILabel *aboutVer = [UILabel new];
-    aboutVer.text = @"0.3.9";
+    aboutVer.text = @"0.4.0";
     aboutVer.font = [UIFont systemFontOfSize:15];
     aboutVer.textColor = [UIColor secondaryLabelColor];
     [aboutTitleRow addArrangedSubview:aboutName];
@@ -4053,6 +4332,26 @@ static void NECheckSettingsButton(void) {
     byline.textAlignment = NSTextAlignmentCenter;
     byline.numberOfLines = 0;
     [stack addArrangedSubview:byline];
+}
+
+- (void)viewWillAppear:(BOOL)animated {
+    [super viewWillAppear:animated];
+    [self refreshSignInRecord];
+}
+
+// 签到记录行：打开设置页时按最新存值刷一遍（签到可能在设置页打开前已跑完）
+- (void)refreshSignInRecord {
+    UILabel *record = objc_getAssociatedObject(self, &NESignInRecordKey);
+    if (record) record.text = NEAutoSignInRecordText();
+}
+
+// 签到跑完发来的通知（成功或今天已签过都发）：设置页开着时也刷新记录行
+- (void)onSignInRecordChanged:(NSNotification *)note {
+    [self refreshSignInRecord];
+}
+
+- (void)dealloc {
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
 }
 
 - (UILabel *)sectionLabel:(NSString *)text {
@@ -4267,6 +4566,8 @@ static void NECheckSettingsButton(void) {
         NEForceRefreshLabels(); // v0.3.9 修复：同上
         NEForceRedrawRNText();
     }
+    // v0.4.0 自动签到：打开开关就排一次静默签到（本次启动还没试过时）
+    if ([key isEqualToString:@"NEAutoSignIn"] && sw.isOn) NEAutoSignInScheduleOnce();
 }
 
 // 限速行：左边“限速”+ 中间值 + 右边步进器（30–120，每 5 一档）
@@ -5024,6 +5325,10 @@ static void NEProbeStart(void) {
     gLock     = [NSLock new];
     gDataLock = [NSLock new];
     gImageLock = [NSLock new];
+    gAuthLock = [NSLock new]; // v0.4.0 自动签到：捕获到的 token 只读缓存用
+
+    // v0.4.0 自动签到：装 NSURLSession 只读观察钩子（抓 App 自己的 Authorization）
+    NEInstallAuthCaptureHookIfNeeded();
 
     // v0.3.9：有效期 9999 / 五个自定义显示项——开关开着就装 UILabel 钩子；主页已选自定义图就装图片钩子
     gValidity9999 = NEValidity9999();
@@ -5077,7 +5382,7 @@ static void NEProbeStart(void) {
                hasSel ? "YES" : "NO");
     }
 
-    os_log(gLog, "NinebotEnhance iOS 0.3.9 已加载（小胶囊 HUD：日期/天气/信号/音量/电量/来电/超速 + 翻页时钟 + 车辆数据探测 + 有效期9999/主页换图/自定义显示）");
+    os_log(gLog, "NinebotEnhance iOS 0.4.0 已加载（小胶囊 HUD：日期/天气/信号/音量/电量/来电/超速 + 翻页时钟 + 车辆数据探测 + 有效期9999/主页换图/自定义显示 + 自动签到）");
 
     // 电量监听 + 定位 + 来电观察，全部在主队列 / 后台队列做，不阻塞加载
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -5086,6 +5391,9 @@ static void NEProbeStart(void) {
         gLocMgr = [CLLocationManager new];
         gLocMgr.delegate = gLocDelegate;
         NEApplySpeedLocationMode(); // 提醒开着 → 连续定位；关着 → 单次定位（只够天气用）
+
+        // v0.4.0 自动签到（保险）：首次进前台时静默补签一次（开关默认开）
+        NEAutoSignInTriggerIfNeeded();
 
         // v0.3.9 修复：启动 3 秒后强制刷新一次文字+图片——页面可能在钩子装好前已加载，
         // 或主题图在钩子装好前已设好，靠刷新再补一次。
