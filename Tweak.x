@@ -866,6 +866,413 @@ static void NEInstallLabelHookIfNeeded(void) {
     NEInstallAppearHookIfNeeded();
 }
 
+// ---------------- RN Fabric 文字覆盖（v0.3.9 RN 数字）----------------
+// “我的”/“服务”页是 React Native（Fabric），文字不是 UILabel，setText 钩子
+// 够不着。Fabric 段落 view（RCTParagraphComponentView；旧版自己画字，新版
+// 画字移到子 view RCTParagraphTextView）有个纯 ObjC getter -attributedText
+// （C++ 字符串转出来的；页面还在加载、_state 为 nil 时返回 nil）。没有
+// setter，所以不改数据，只在 drawRect: 里拦下来：读到原文是目标值，就画
+// 一份改过的 attributed string（属性原样保留）盖上去，不调原 draw；不是
+// 目标值、或读不到原文，就走原实现。只改显示，不改真数据，不碰网络。
+// 短字符串（"8"、"3"、"124"）只在“我的”/“服务” tab 里、且满足独立段落 /
+// 复合句式 / 兄弟段落上下文时才换，宁可不换也不误伤。
+// 前向声明：NEPageNameForVC、NEAppTabBarController 定义在后面。
+static NSString *NEPageNameForVC(UIViewController *vc);
+static UITabBarController *NEAppTabBarController(void);
+
+// 编译器可见的 RN getter 声明（只有声明，没有实现，不注册分类，运行时无影响）。
+@interface RCTParagraphComponentView (NE)
+- (NSAttributedString *)attributedText;
+@end
+
+// 这个 view 所在的 tab 页名（“我的”/“服务”/“设备”/…）。
+// 沿响应链找到 VC，用 NEPageNameForVC 判；找不到 VC 时退回当前选中 tab 的标题。
+static NSString *NEPageNameForView(UIView *v) {
+    if (!v) return nil;
+    UIResponder *r = v.nextResponder;
+    UIViewController *vc = nil;
+    while (r) {
+        if ([r isKindOfClass:[UIViewController class]]) { vc = (UIViewController *)r; break; }
+        r = r.nextResponder;
+    }
+    if (vc) return NEPageNameForVC(vc);
+    UITabBarController *tab = NEAppTabBarController();
+    if (!tab) return nil;
+    return tab.selectedViewController.tabBarItem.title;
+}
+
+// 收集兄弟段落的文本：同一父视图下的 RCTParagraphComponentView 的
+// attributedText，再往上找一层父视图的兄弟段落。只读，不改。用于
+// “分开 label”式匹配（N币旁边的数字、km 旁边的数字、Lv 旁边的数字、
+// 连续签到旁边的数字、服务有效期旁边的日期）。最多两层、每层最多 40 条；
+// drawRect 里只在需要上下文时才调，成本可控。
+static NSArray<NSString *> *NERNSiblingParagraphTexts(UIView *view) {
+    if (!view) return @[];
+    Class paraCls = objc_getClass("RCTParagraphComponentView");
+    if (!paraCls) return @[];
+    NSMutableArray<NSString *> *out = [NSMutableArray array];
+    UIView *cur = view;
+    for (int level = 0; level < 2 && cur.superview && out.count < 40; level++) {
+        UIView *parent = cur.superview;
+        for (UIView *sub in parent.subviews) {
+            if (sub == view) continue;
+            if (![sub isKindOfClass:paraCls]) continue;
+            @try {
+                NSAttributedString *a = [(RCTParagraphComponentView *)sub attributedText];
+                if (a.string.length) [out addObject:a.string];
+            } @catch (...) {}
+        }
+        cur = parent;
+    }
+    return out;
+}
+
+static BOOL NERNSiblingContains(NSArray<NSString *> *sibs, NSString *kw) {
+    if (!kw.length) return NO;
+    for (NSString *s in sibs) {
+        if (s.length && [s rangeOfString:kw].location != NSNotFound) return YES;
+    }
+    return NO;
+}
+
+// 值里可能带了单位（如用户填了 "9999 km"）：只换数字部分时先去掉值末尾的
+// km 单位，避免画出 "9999 km km"。
+static NSString *NERNDigitsOnlyValue(NSString *v) {
+    if (!v.length) return v;
+    NSString *t = [v stringByTrimmingCharactersInSet:
+                   [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if ([t.lowercaseString hasSuffix:@"km"]) {
+        t = [t substringToIndex:t.length - 2];
+        t = [t stringByTrimmingCharactersInSet:
+             [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    }
+    return t.length ? t : v;
+}
+
+// RN 段落文本替换：只按段落自己的文本 + 有限的兄弟段落上下文匹配。
+// 返回替换后的完整字符串（nil = 不换；与原文相同也返回 nil）。
+// 只在“我的”/“服务”页调用；开关关着、值为空时一律不换。
+static NSString *NEFixedRNText(NSString *text, UIView *view, NSString *page, NSString **fieldOut) {
+    if (fieldOut) *fieldOut = nil;
+    if (!text.length || !view || !page.length) return nil;
+    BOOL isMine = [page isEqualToString:@"我的"];
+    BOOL isService = [page isEqualToString:@"服务"];
+    if (!isMine && !isService) return nil;
+    NSString *trim = [text stringByTrimmingCharactersInSet:
+                      [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    BOOL isNum = NEIsPureNumberString(trim);
+    NSArray<NSString *> *sibs = nil;
+    BOOL sibsDone = NO;
+
+    // 1. 服务有效期 9999（只在服务页）
+    if (gValidity9999 && isService) {
+        static NSRegularExpression *sRNDateRe = nil;
+        static dispatch_once_t sRNDateOnce;
+        dispatch_once(&sRNDateOnce, ^{
+            sRNDateRe = [NSRegularExpression regularExpressionWithPattern:
+                         @"\\d{4}[.\\-/年]\\d{1,2}[.\\-/月]\\d{1,2}日?"
+                         options:0 error:nil];
+        });
+        NSRange keyRange = [text rangeOfString:@"服务有效期"];
+        if (keyRange.location != NSNotFound && sRNDateRe) {
+            NSRange search = NSMakeRange(keyRange.location, text.length - keyRange.location);
+            NSRange m = [sRNDateRe rangeOfFirstMatchInString:text options:0 range:search];
+            if (m.location != NSNotFound) {
+                if (fieldOut) *fieldOut = @"NEValidity9999";
+                return [text stringByReplacingCharactersInRange:m withString:@"9999.12.31"];
+            }
+        } else if (sRNDateRe) {
+            // 分开段落：整段就是一个日期。只换已知的当前有效期，或兄弟段落
+            // 里有“服务有效期”的日期（服务页上别的日期不碰）。
+            NSRange m = [sRNDateRe rangeOfFirstMatchInString:trim options:0
+                                                       range:NSMakeRange(0, trim.length)];
+            if (m.location != NSNotFound && m.length == trim.length) {
+                BOOL known = [trim isEqualToString:@"2027.01.07"];
+                if (!known) {
+                    if (!sibsDone) { sibs = NERNSiblingParagraphTexts(view); sibsDone = YES; }
+                    known = NERNSiblingContains(sibs, @"服务有效期");
+                }
+                if (known) {
+                    if (fieldOut) *fieldOut = @"NEValidity9999";
+                    return @"9999.12.31";
+                }
+            }
+        }
+    }
+
+    // 2. 总里程（只在我的页）
+    if (gMileage && gMileageValue.length > 0 && isMine) {
+        // 当前真值（distinctive）：只换数字部分，保留 " km" 等单位
+        if ([text rangeOfString:@"35624.6"].location != NSNotFound) {
+            if (fieldOut) *fieldOut = @"NEMileage";
+            return [text stringByReplacingOccurrencesOfString:@"35624.6"
+                                                   withString:NERNDigitsOnlyValue(gMileageValue)];
+        }
+        // 通用：整段就是“数字 km”，且数字够大（总里程，不是单次骑行）
+        static NSRegularExpression *sRNKmRe = nil;
+        static dispatch_once_t sRNKmOnce;
+        dispatch_once(&sRNKmOnce, ^{
+            sRNKmRe = [NSRegularExpression regularExpressionWithPattern:
+                       @"^\\s*([\\d,]+(\\.\\d+)?)\\s*km\\s*$"
+                       options:0 error:nil];
+        });
+        if (sRNKmRe) {
+            NSTextCheckingResult *m = [sRNKmRe firstMatchInString:text options:0
+                                                            range:NSMakeRange(0, text.length)];
+            if (m && m.numberOfRanges > 1) {
+                NSString *num = [text substringWithRange:[m rangeAtIndex:1]];
+                double v = [[num stringByReplacingOccurrencesOfString:@"," withString:@""] doubleValue];
+                if (v >= 1000) {
+                    if (fieldOut) *fieldOut = @"NEMileage";
+                    return [text stringByReplacingCharactersInRange:[m rangeAtIndex:1]
+                                                         withString:NERNDigitsOnlyValue(gMileageValue)];
+                }
+            }
+        }
+        // 分开段落：纯数字 + 兄弟段落有 km（不是 km/h），数字够大，
+        // 且自己/兄弟段落里没有续航/最近骑行等词（那是别的数）。
+        if (isNum) {
+            double v = [[trim stringByReplacingOccurrencesOfString:@"," withString:@""] doubleValue];
+            if (v >= 1000) {
+                if (!sibsDone) { sibs = NERNSiblingParagraphTexts(view); sibsDone = YES; }
+                static NSArray<NSString *> *sRNMileSkip = nil;
+                static dispatch_once_t sRNMileSkipOnce;
+                dispatch_once(&sRNMileSkipOnce, ^{
+                    sRNMileSkip = @[@"续航", @"最近骑行", @"骑行", @"剩余", @"续航里程", @"本次", @"单次", @"%"];
+                });
+                BOOL skip = NO;
+                for (NSString *kw in sRNMileSkip) {
+                    if ([text rangeOfString:kw].location != NSNotFound) { skip = YES; break; }
+                }
+                if (!skip) {
+                    BOOL hasKm = NO, hasKmh = NO;
+                    for (NSString *s in sibs) {
+                        if (!s.length) continue;
+                        if ([s rangeOfString:@"km/h"].location != NSNotFound) { hasKmh = YES; break; }
+                        if ([s rangeOfString:@"km"].location != NSNotFound) hasKm = YES;
+                        for (NSString *kw in sRNMileSkip) {
+                            if ([s rangeOfString:kw].location != NSNotFound) { skip = YES; break; }
+                        }
+                        if (skip) break;
+                    }
+                    if (!skip && hasKm && !hasKmh) {
+                        if (fieldOut) *fieldOut = @"NEMileage";
+                        return gMileageValue;
+                    }
+                }
+            }
+        }
+    }
+
+    // 3. 等级：段落以 Lv. 开头，或短段落里含 Lv.<数字>
+    if (gLevel && gLevelValue.length > 0) {
+        NSString *lv = gLevelValue;
+        if (![lv hasPrefix:@"Lv."] && ![lv hasPrefix:@"lv."])
+            lv = [@"Lv." stringByAppendingString:lv];
+        if ([text hasPrefix:@"Lv."] || [text hasPrefix:@"lv."]) {
+            if (fieldOut) *fieldOut = @"NELevel";
+            return lv;
+        }
+        if (text.length <= 12) {
+            static NSRegularExpression *sRNLvRe = nil;
+            static dispatch_once_t sRNLvOnce;
+            dispatch_once(&sRNLvOnce, ^{
+                sRNLvRe = [NSRegularExpression regularExpressionWithPattern:@"[Ll]v\\.\\d+"
+                                                                    options:0 error:nil];
+            });
+            if (sRNLvRe) {
+                NSRange m = [sRNLvRe rangeOfFirstMatchInString:text options:0
+                                                       range:NSMakeRange(0, text.length)];
+                if (m.location != NSNotFound) {
+                    if (fieldOut) *fieldOut = @"NELevel";
+                    return [text stringByReplacingCharactersInRange:m withString:lv];
+                }
+            }
+        }
+        // 分开段落：纯数字 + 兄弟段落有 Lv
+        if (isNum) {
+            if (!sibsDone) { sibs = NERNSiblingParagraphTexts(view); sibsDone = YES; }
+            if (NERNSiblingContains(sibs, @"Lv") || NERNSiblingContains(sibs, @"lv")) {
+                if (fieldOut) *fieldOut = @"NELevel";
+                NSString *v = gLevelValue;
+                if ([v hasPrefix:@"Lv."] || [v hasPrefix:@"lv."]) v = [v substringFromIndex:3];
+                return v;
+            }
+        }
+    }
+
+    // 4. 称号
+    if (gTitle && gTitleValue.length > 0 && [trim isEqualToString:@"暂无称号"]) {
+        if (fieldOut) *fieldOut = @"NETitle";
+        return gTitleValue;
+    }
+
+    // 5. 连续签到天数
+    if (gSignDays && gSignDaysValue.length > 0) {
+        if ([text rangeOfString:@"连续签到"].location != NSNotFound) {
+            static NSRegularExpression *sRNDayRe = nil;
+            static dispatch_once_t sRNDayOnce;
+            dispatch_once(&sRNDayOnce, ^{
+                sRNDayRe = [NSRegularExpression regularExpressionWithPattern:
+                            @"连续签到\\D*(\\d+)\\D*天"
+                            options:0 error:nil];
+            });
+            if (sRNDayRe) {
+                NSTextCheckingResult *m = [sRNDayRe firstMatchInString:text options:0
+                                                                range:NSMakeRange(0, text.length)];
+                if (m && m.numberOfRanges > 1) {
+                    if (fieldOut) *fieldOut = @"NESignDays";
+                    return [text stringByReplacingCharactersInRange:[m rangeAtIndex:1]
+                                                         withString:gSignDaysValue];
+                }
+            }
+        }
+        // 分开段落：纯数字 + 兄弟段落有“连续签到”
+        if (isNum) {
+            if (!sibsDone) { sibs = NERNSiblingParagraphTexts(view); sibsDone = YES; }
+            if (NERNSiblingContains(sibs, @"连续签到")) {
+                if (fieldOut) *fieldOut = @"NESignDays";
+                return gSignDaysValue;
+            }
+        }
+    }
+
+    // 6. N币（只在我的页）：纯数字，且是已知的当前值，或兄弟段落有“N币”；
+    // 兄弟段落有 % 就是电量，不换。认不出宁可不换。
+    if (gNCoins && gNCoinsValue.length > 0 && isNum && isMine) {
+        if (!sibsDone) { sibs = NERNSiblingParagraphTexts(view); sibsDone = YES; }
+        BOOL hasPercent = NERNSiblingContains(sibs, @"%");
+        if (!hasPercent &&
+            ([trim isEqualToString:@"124"] || NERNSiblingContains(sibs, @"N币"))) {
+            if (fieldOut) *fieldOut = @"NENCoins";
+            return gNCoinsValue;
+        }
+    }
+    return nil;
+}
+
+// drawRect 覆盖的共用逻辑：view 是正在画字的 view（段落 view 或其子文本 view）。
+// 读原文，匹配到目标值就画改过的 string；否则返回 NO（调用方调原实现）。
+// 段落 view 自己不画字时（新版 RN：画字在子文本 view 里）也返回 NO。
+static BOOL NETryDrawRNTextOverride(UIView *view) {
+    @try {
+        if (!view) return NO;
+        Class paraCls = objc_getClass("RCTParagraphComponentView");
+        if (!paraCls) return NO;
+        UIView *pv = view;
+        if (![pv isKindOfClass:paraCls]) {
+            while (pv && ![pv isKindOfClass:paraCls]) pv = pv.superview;
+        }
+        if (!pv) return NO;
+        // 新版 RN：段落 view 有个 RCTParagraphTextView 子 view 负责画字，
+        // 段落 view 自己不画——段落 view 的钩子直接放行，让子 view 的钩子处理，
+        // 避免同一段文字画两次。
+        Class textCls = objc_getClass("RCTParagraphTextView");
+        if (textCls && pv == view) {
+            for (UIView *sub in pv.subviews) {
+                if ([sub isKindOfClass:textCls]) return NO;
+            }
+        }
+        NSAttributedString *orig = nil;
+        @try { orig = [(RCTParagraphComponentView *)pv attributedText]; } @catch (...) { orig = nil; }
+        if (!orig || orig.length == 0) return NO;
+        NSString *page = NEPageNameForView(view);
+        if (!page) return NO;
+        NSString *field = nil;
+        NSString *fixed = NEFixedRNText(orig.string, pv, page, &field);
+        if (!fixed || [fixed isEqualToString:orig.string]) return NO;
+        NSAttributedString *m = NEAttributedStringByReplacing(orig, orig.string, fixed);
+        if (!m) return NO;
+        [m drawInRect:view.bounds];
+        // 每字段只记一次命中日志（定位用，不刷屏）
+        static NSMutableSet<NSString *> *sRNLogged = nil;
+        static dispatch_once_t sRNLogOnce;
+        dispatch_once(&sRNLogOnce, ^{ sRNLogged = [NSMutableSet set]; });
+        if (field.length && ![sRNLogged containsObject:field]) {
+            [sRNLogged addObject:field];
+            os_log(gLog, "[RN] 段落文字已覆盖：%{public}@（%{public}@ 页）",
+                   field, page);
+        }
+        return YES;
+    } @catch (...) {
+        return NO;
+    }
+}
+
+static void (*orig_RCTParagraphComponentView_drawRect)(id, SEL, CGRect);
+static void NE_RCTParagraphComponentView_drawRect(id self, SEL _cmd, CGRect rect) {
+    if (!NETryDrawRNTextOverride((UIView *)self)) {
+        if (orig_RCTParagraphComponentView_drawRect)
+            orig_RCTParagraphComponentView_drawRect(self, _cmd, rect);
+    }
+}
+
+static void (*orig_RCTParagraphTextView_drawRect)(id, SEL, CGRect);
+static void NE_RCTParagraphTextView_drawRect(id self, SEL _cmd, CGRect rect) {
+    if (!NETryDrawRNTextOverride((UIView *)self)) {
+        if (orig_RCTParagraphTextView_drawRect)
+            orig_RCTParagraphTextView_drawRect(self, _cmd, rect);
+    }
+}
+
+// RN 段落 drawRect 钩子：两个类都可能存在时都装（各只对自己的类生效）；
+// 段落 view 的钩子在新版 RN 里会自己让路给子文本 view，不会重画。
+// 类/方法不存在只记日志绝不崩。
+static BOOL gRNTextHookInstalled = NO;
+static void NEInstallRNTextHookIfNeeded(void) {
+    if (gRNTextHookInstalled) return;
+    if (!gValidity9999 && !gNCoins && !gMileage && !gLevel && !gTitle && !gSignDays) return;
+    BOOL any = NO;
+    Class textCls = objc_getClass("RCTParagraphTextView");
+    if (textCls && class_getInstanceMethod(textCls, @selector(drawRect:))) {
+        MSHookMessageEx(textCls, @selector(drawRect:),
+                        (IMP)NE_RCTParagraphTextView_drawRect,
+                        (IMP *)&orig_RCTParagraphTextView_drawRect);
+        if (orig_RCTParagraphTextView_drawRect) {
+            any = YES;
+            os_log(gLog, "[RN] RCTParagraphTextView drawRect: 钩子已装");
+        } else {
+            os_log(gLog, "[RN] RCTParagraphTextView drawRect: 钩子安装失败");
+        }
+    }
+    Class paraCls = objc_getClass("RCTParagraphComponentView");
+    if (paraCls && class_getInstanceMethod(paraCls, @selector(drawRect:))) {
+        MSHookMessageEx(paraCls, @selector(drawRect:),
+                        (IMP)NE_RCTParagraphComponentView_drawRect,
+                        (IMP *)&orig_RCTParagraphComponentView_drawRect);
+        if (orig_RCTParagraphComponentView_drawRect) {
+            any = YES;
+            os_log(gLog, "[RN] RCTParagraphComponentView drawRect: 钩子已装");
+        } else {
+            os_log(gLog, "[RN] RCTParagraphComponentView drawRect: 钩子安装失败");
+        }
+    }
+    if (!textCls && !paraCls) os_log(gLog, "[RN] RCTParagraph* 类不存在，不装钩子");
+    if (any) gRNTextHookInstalled = YES;
+}
+
+// 开关/值改了，已显示的 RN 段落不会自动重画，强制重画一次
+// （原值/假值随开关走；没换的段落重画后还是原样）。
+static void NEForceRedrawRNTextInView(UIView *view) {
+    if (!view) return;
+    Class paraCls = objc_getClass("RCTParagraphComponentView");
+    Class textCls = objc_getClass("RCTParagraphTextView");
+    for (UIView *sub in view.subviews) {
+        if ((paraCls && [sub isKindOfClass:paraCls]) ||
+            (textCls && [sub isKindOfClass:textCls])) {
+            @try { [sub setNeedsDisplay]; } @catch (...) {}
+        }
+        NEForceRedrawRNTextInView(sub);
+    }
+}
+
+static void NEForceRedrawRNText(void) {
+    if (!gRNTextHookInstalled) return;
+    UIWindow *w = NEKeyWindow();
+    if (!w) return;
+    NEForceRedrawRNTextInView(w);
+}
+
 // 之前被替换过的 label 按当前值重设（开关还开着且值非空才换）。
 // 有效期/签到天数不走这里——它们换完还保留原句式，正常重设就能再匹配上。
 static NSString *NEFieldCurrentValue(NSString *field, BOOL separate) {
@@ -1689,6 +2096,7 @@ static void NE_UIViewController_viewDidAppear(id self, SEL _cmd, BOOL animated) 
     @try {
         NEForceRefreshLabels();
         NEForceRefreshImages();
+        NEForceRedrawRNText(); // RN 段落：切回页面时强制重画，开关状态变化时生效
     } @catch (...) {}
 }
 
@@ -3199,7 +3607,9 @@ static void NECheckSettingsButton(void) {
     // 空值时开关开也不换（避免显示空白），所以值改完同步一次缓存
     NESyncCustomDisplayCache();
     NEInstallLabelHookIfNeeded();
+    NEInstallRNTextHookIfNeeded();
     NEForceRefreshLabels(); // v0.3.9 修复：值改了，已显示的 label 不会自动重设，强制刷新立刻生效
+    NEForceRedrawRNText(); // RN 段落同理：值改了，已显示的段落强制重画
 }
 
 - (void)dismissKeyboard {
@@ -3241,16 +3651,18 @@ static void NECheckSettingsButton(void) {
     // v0.3.9：有效期 9999 开关——同步缓存并按需装钩子（关掉后钩子留着但直接走原实现）
     if ([key isEqualToString:@"NEValidity9999"]) {
         gValidity9999 = sw.isOn;
-        if (sw.isOn) NEInstallLabelHookIfNeeded();
+        if (sw.isOn) { NEInstallLabelHookIfNeeded(); NEInstallRNTextHookIfNeeded(); }
         NEForceRefreshLabels(); // v0.3.9 修复：开关变了，已显示的 label 不会自动重设，强制刷新
+        NEForceRedrawRNText();
     }
     // v0.3.9 追加：五个自定义显示项开关——同步缓存并按需装钩子
     if ([key isEqualToString:@"NENCoins"] || [key isEqualToString:@"NEMileage"] ||
         [key isEqualToString:@"NELevel"] || [key isEqualToString:@"NETitle"] ||
         [key isEqualToString:@"NESignDays"]) {
         NESyncCustomDisplayCache();
-        if (sw.isOn) NEInstallLabelHookIfNeeded();
+        if (sw.isOn) { NEInstallLabelHookIfNeeded(); NEInstallRNTextHookIfNeeded(); }
         NEForceRefreshLabels(); // v0.3.9 修复：同上
+        NEForceRedrawRNText();
     }
 }
 
@@ -3996,6 +4408,8 @@ static void NEProbeStart(void) {
     NESyncCustomDisplayCache();
     if (gValidity9999 || gNCoins || gMileage || gLevel || gTitle || gSignDays)
         NEInstallLabelHookIfNeeded();
+    if (gValidity9999 || gNCoins || gMileage || gLevel || gTitle || gSignDays)
+        NEInstallRNTextHookIfNeeded();
     gHasVehicleImage = NEVehicleImagePath().length > 0;
     gHasBgImage = NEBackgroundImagePath().length > 0;
     if (gHasVehicleImage || gHasBgImage) NEInstallImageHooksIfNeeded();
