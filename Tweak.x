@@ -3856,7 +3856,8 @@ static void NECheckSettingsButton(void) {
 
 - (void)viewDidLoad {
     [super viewDidLoad];
-    self.view.backgroundColor = [UIColor systemBackgroundColor];
+    // v0.3.9 美化：分组表样式——浅灰底 + 白色圆角卡片（iOS 系统分组表观感）。
+    self.view.backgroundColor = [UIColor systemGroupedBackgroundColor];
     self.title = @"Ninebot pro+";
     self.navigationItem.rightBarButtonItem =
         [[UIBarButtonItem alloc] initWithTitle:@"关闭" style:UIBarButtonItemStyleDone
@@ -3869,8 +3870,8 @@ static void NECheckSettingsButton(void) {
     [NSLayoutConstraint activateConstraints:@[
         [scroll.topAnchor constraintEqualToAnchor:guide.topAnchor],
         [scroll.bottomAnchor constraintEqualToAnchor:guide.bottomAnchor],
-        [scroll.leadingAnchor constraintEqualToAnchor:guide.leadingAnchor constant:16],
-        [scroll.trailingAnchor constraintEqualToAnchor:guide.trailingAnchor constant:-16]
+        [scroll.leadingAnchor constraintEqualToAnchor:guide.leadingAnchor],
+        [scroll.trailingAnchor constraintEqualToAnchor:guide.trailingAnchor]
     ]];
 
     UIStackView *stack = [UIStackView new];
@@ -3878,12 +3879,16 @@ static void NECheckSettingsButton(void) {
     stack.spacing = 18;
     stack.translatesAutoresizingMaskIntoConstraints = NO;
     [scroll addSubview:stack];
+    // 内容横向用 frameLayoutGuide 定宽（可见宽 - 32，左右各 16 边距），
+    // 纵向用 contentLayoutGuide：这是 scroll view 的标准写法，内容宽
+    // 严格等于可见宽减边距，开关/按钮离右边缘永远有 16pt，不会贴边。
+    UILayoutGuide *frame = scroll.frameLayoutGuide;
+    UILayoutGuide *content = scroll.contentLayoutGuide;
     [NSLayoutConstraint activateConstraints:@[
-        [stack.topAnchor constraintEqualToAnchor:scroll.topAnchor constant:12],
-        [stack.bottomAnchor constraintEqualToAnchor:scroll.bottomAnchor constant:-12],
-        [stack.leadingAnchor constraintEqualToAnchor:scroll.leadingAnchor],
-        [stack.trailingAnchor constraintEqualToAnchor:scroll.trailingAnchor],
-        [stack.widthAnchor constraintEqualToAnchor:scroll.widthAnchor]
+        [stack.topAnchor constraintEqualToAnchor:content.topAnchor constant:12],
+        [stack.bottomAnchor constraintEqualToAnchor:content.bottomAnchor constant:-12],
+        [stack.leadingAnchor constraintEqualToAnchor:frame.leadingAnchor constant:16],
+        [stack.trailingAnchor constraintEqualToAnchor:frame.trailingAnchor constant:-16]
     ]];
 
     UILabel *hint = [UILabel new];
@@ -3902,10 +3907,7 @@ static void NECheckSettingsButton(void) {
     // ---- 美化娱乐组（默认折叠，只改显示不改真数据）----
     UIStackView *beautyStack = [UIStackView new];
     beautyStack.axis = UILayoutConstraintAxisVertical;
-    beautyStack.spacing = 18;
-    beautyStack.hidden = YES;
-    objc_setAssociatedObject(self, &NEBeautyGroupKey, beautyStack,
-                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    beautyStack.spacing = 0; // 卡片内行与行直接贴合，中间用底部分隔线分开
     NSUserDefaults *defs = [NSUserDefaults standardUserDefaults];
     [beautyStack addArrangedSubview:[self customDisplayRow:@"服务有效期" toggleKey:@"NEValidity9999" valueKey:@"NEValidityValue" on:NEValidity9999() value:[defs stringForKey:@"NEValidityValue"] placeholder:@"留空显示真实日期"]];
     [beautyStack addArrangedSubview:[self sectionLabel:@"主页车辆图"]];
@@ -3919,7 +3921,7 @@ static void NECheckSettingsButton(void) {
     imgNote.font = [UIFont systemFontOfSize:13];
     imgNote.textColor = [UIColor secondaryLabelColor];
     imgNote.numberOfLines = 0;
-    [beautyStack addArrangedSubview:imgNote];
+    [beautyStack addArrangedSubview:[self ne_footnoteView:imgNote]];
     // v0.3.9 追加：五个自定义显示项（开关 + 输入框，自己填想显示的值）
     [beautyStack addArrangedSubview:[self customDisplayRow:@"N币余额" toggleKey:@"NENCoins" valueKey:@"NENCoinsValue" on:NEBoolDefault(@"NENCoins") value:[defs stringForKey:@"NENCoinsValue"] placeholder:@"如 99999"]];
     [beautyStack addArrangedSubview:[self customDisplayRow:@"总里程" toggleKey:@"NEMileage" valueKey:@"NEMileageValue" on:NEBoolDefault(@"NEMileage") value:[defs stringForKey:@"NEMileageValue"] placeholder:@"如 99999.9 km"]];
@@ -3928,16 +3930,18 @@ static void NECheckSettingsButton(void) {
     [beautyStack addArrangedSubview:[self customDisplayRow:@"签到天数" toggleKey:@"NESignDays" valueKey:@"NESignDaysValue" on:NEBoolDefault(@"NESignDays") value:[defs stringForKey:@"NESignDaysValue"] placeholder:@"如 365"]];
     // v0.3.9 诊断：手动导出当前页的界面结构（设置页底下的那个 tab 页面）
     [beautyStack addArrangedSubview:[self diagExportRow]];
+    [self ne_styleSeparatorsInStack:beautyStack];
+    UIView *beautyCard = [self ne_cardWrappingStack:beautyStack];
+    beautyCard.hidden = YES; // 默认折叠，折叠状态存在卡片上
+    objc_setAssociatedObject(self, &NEBeautyGroupKey, beautyCard,
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     [stack addArrangedSubview:[self groupHeader:@"美化娱乐" tag:0]];
-    [stack addArrangedSubview:beautyStack];
+    [stack addArrangedSubview:beautyCard];
 
     // ---- 导航增强组（默认折叠，以前的 HUD/翻页时钟/超速等功能）----
     UIStackView *navStack = [UIStackView new];
     navStack.axis = UILayoutConstraintAxisVertical;
-    navStack.spacing = 18;
-    navStack.hidden = YES;
-    objc_setAssociatedObject(self, &NENavGroupKey, navStack,
-                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    navStack.spacing = 0; // 卡片内行与行直接贴合，中间用底部分隔线分开
     [navStack addArrangedSubview:[self switchRow:@"日期" key:@"NEHUDShowDate" on:NEHUDShowDate()]];
     [navStack addArrangedSubview:[self switchRow:@"天气温度" key:@"NEHUDShowWeather" on:NEHUDShowWeather()]];
     [navStack addArrangedSubview:[self switchRow:@"信号（WiFi/5G）" key:@"NEHUDShowSignal" on:NEHUDShowSignal()]];
@@ -3970,16 +3974,86 @@ static void NECheckSettingsButton(void) {
     note.font = [UIFont systemFontOfSize:13];
     note.textColor = [UIColor secondaryLabelColor];
     note.numberOfLines = 0;
-    [navStack addArrangedSubview:note];
+    [navStack addArrangedSubview:[self ne_footnoteView:note]];
+    [self ne_styleSeparatorsInStack:navStack];
+    UIView *navCard = [self ne_cardWrappingStack:navStack];
+    navCard.hidden = YES; // 默认折叠，折叠状态存在卡片上
+    objc_setAssociatedObject(self, &NENavGroupKey, navCard,
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     [stack addArrangedSubview:[self groupHeader:@"导航增强" tag:1]];
-    [stack addArrangedSubview:navStack];
+    [stack addArrangedSubview:navCard];
 }
 
 - (UILabel *)sectionLabel:(NSString *)text {
     UILabel *l = [UILabel new];
     l.text = text;
-    l.font = [UIFont boldSystemFontOfSize:15];
+    l.font = [UIFont systemFontOfSize:13 weight:UIFontWeightSemibold];
+    l.textColor = [UIColor secondaryLabelColor];
+    [l.heightAnchor constraintEqualToConstant:30].active = YES;
     return l;
+}
+
+// v0.3.9 美化：把一组行包进白色圆角卡片（iOS 分组表样式）。卡片内边距
+// 上下 8、左右 16；行高 44 + 底部分隔线，开关/按钮离卡片右沿还有 16pt，
+// 再也不会贴着屏幕右边缘。
+- (UIView *)ne_cardWrappingStack:(UIStackView *)inner {
+    UIView *card = [UIView new];
+    card.backgroundColor = [UIColor secondarySystemGroupedBackgroundColor];
+    card.layer.cornerRadius = 12;
+    card.clipsToBounds = YES;
+    card.translatesAutoresizingMaskIntoConstraints = NO;
+    inner.translatesAutoresizingMaskIntoConstraints = NO;
+    [card addSubview:inner];
+    [NSLayoutConstraint activateConstraints:@[
+        [inner.topAnchor constraintEqualToAnchor:card.topAnchor constant:8],
+        [inner.bottomAnchor constraintEqualToAnchor:card.bottomAnchor constant:-8],
+        [inner.leadingAnchor constraintEqualToAnchor:card.leadingAnchor constant:16],
+        [inner.trailingAnchor constraintEqualToAnchor:card.trailingAnchor constant:-16]
+    ]];
+    return card;
+}
+
+// v0.3.9 美化：行底部的 1px 分隔线（tag 1002）。只有下一行也是行时才显示，
+// 小标题/备注/分段控件前后不画线，卡片底那行也不画。
+- (void)ne_addBottomHairlineToRow:(UIView *)row {
+    UIView *line = [UIView new];
+    line.backgroundColor = [UIColor separatorColor];
+    line.tag = 1002;
+    line.translatesAutoresizingMaskIntoConstraints = NO;
+    [row addSubview:line];
+    [NSLayoutConstraint activateConstraints:@[
+        [line.leadingAnchor constraintEqualToAnchor:row.leadingAnchor],
+        [line.trailingAnchor constraintEqualToAnchor:row.trailingAnchor],
+        [line.bottomAnchor constraintEqualToAnchor:row.bottomAnchor],
+        [line.heightAnchor constraintEqualToConstant:(1.0 / [UIScreen mainScreen].scale)]
+    ]];
+}
+
+// v0.3.9 美化：按“下一行也是行才显示分隔线”的规则，刷一遍组内所有行的底线。
+// 行用 tag 1001 标记（见各行工厂方法），小标题/备注/分段控件不参与。
+- (void)ne_styleSeparatorsInStack:(UIStackView *)stack {
+    NSArray<UIView *> *views = [stack.arrangedSubviews copy];
+    for (NSInteger i = 0; i < (NSInteger)views.count; i++) {
+        UIView *v = views[i];
+        if (v.tag != 1001) continue;
+        UIView *line = [v viewWithTag:1002];
+        BOOL nextIsRow = (i + 1 < (NSInteger)views.count) && (views[i + 1].tag == 1001);
+        if (line) line.hidden = !nextIsRow;
+    }
+}
+
+// v0.3.9 美化：备注文字包一层容器，上下留白（8/4），左右由卡片内边距管。
+- (UIView *)ne_footnoteView:(UILabel *)label {
+    UIView *wrap = [UIView new];
+    label.translatesAutoresizingMaskIntoConstraints = NO;
+    [wrap addSubview:label];
+    [NSLayoutConstraint activateConstraints:@[
+        [label.topAnchor constraintEqualToAnchor:wrap.topAnchor constant:8],
+        [label.bottomAnchor constraintEqualToAnchor:wrap.bottomAnchor constant:-4],
+        [label.leadingAnchor constraintEqualToAnchor:wrap.leadingAnchor],
+        [label.trailingAnchor constraintEqualToAnchor:wrap.trailingAnchor]
+    ]];
+    return wrap;
 }
 
 // v0.3.9 追加：折叠分组头（标题 + ▸/▾ 箭头），点一下展开/收起。
@@ -3998,7 +4072,7 @@ static void NECheckSettingsButton(void) {
 
 - (void)groupHeaderTapped:(UIButton *)sender {
     const char *key = (sender.tag == 0) ? &NEBeautyGroupKey : &NENavGroupKey;
-    UIStackView *container = objc_getAssociatedObject(self, key);
+    UIView *container = objc_getAssociatedObject(self, key); // 卡片（折叠状态存在卡片上）
     if (!container) return;
     container.hidden = !container.hidden;
     NSString *title = (sender.tag == 0) ? @"美化娱乐" : @"导航增强";
@@ -4044,8 +4118,10 @@ static void NECheckSettingsButton(void) {
         [field.leadingAnchor constraintEqualToAnchor:label.trailingAnchor constant:8],
         [field.trailingAnchor constraintEqualToAnchor:sw.leadingAnchor constant:-8],
         [field.centerYAnchor constraintEqualToAnchor:row.centerYAnchor],
-        [row.heightAnchor constraintEqualToConstant:32]
+        [row.heightAnchor constraintEqualToConstant:44]
     ]];
+    row.tag = 1001; // 美化：行标记，分隔线只画在两行之间
+    [self ne_addBottomHairlineToRow:row];
     return row;
 }
 
@@ -4089,8 +4165,10 @@ static void NECheckSettingsButton(void) {
         [label.centerYAnchor constraintEqualToAnchor:row.centerYAnchor],
         [sw.trailingAnchor constraintEqualToAnchor:row.trailingAnchor],
         [sw.centerYAnchor constraintEqualToAnchor:row.centerYAnchor],
-        [row.heightAnchor constraintEqualToConstant:32]
+        [row.heightAnchor constraintEqualToConstant:44]
     ]];
+    row.tag = 1001; // 美化：行标记，分隔线只画在两行之间
+    [self ne_addBottomHairlineToRow:row];
     return row;
 }
 
@@ -4151,8 +4229,10 @@ static void NECheckSettingsButton(void) {
         [step.centerYAnchor constraintEqualToAnchor:row.centerYAnchor],
         [value.trailingAnchor constraintEqualToAnchor:step.leadingAnchor constant:-12],
         [value.centerYAnchor constraintEqualToAnchor:row.centerYAnchor],
-        [row.heightAnchor constraintEqualToConstant:32]
+        [row.heightAnchor constraintEqualToConstant:44]
     ]];
+    row.tag = 1001; // 美化：行标记，分隔线只画在两行之间
+    [self ne_addBottomHairlineToRow:row];
     return row;
 }
 
@@ -4186,7 +4266,7 @@ static void NECheckSettingsButton(void) {
     status.translatesAutoresizingMaskIntoConstraints = NO;
     UIButton *btn = [UIButton buttonWithType:UIButtonTypeSystem];
     [btn setTitle:@"选择" forState:UIControlStateNormal];
-    btn.titleLabel.font = [UIFont systemFontOfSize:16];
+    btn.titleLabel.font = [UIFont systemFontOfSize:16 weight:UIFontWeightSemibold];
     btn.tag = kind;
     btn.translatesAutoresizingMaskIntoConstraints = NO;
     [btn addTarget:self action:@selector(pickImageTapped:)
@@ -4201,11 +4281,13 @@ static void NECheckSettingsButton(void) {
         [btn.centerYAnchor constraintEqualToAnchor:row.centerYAnchor],
         [status.trailingAnchor constraintEqualToAnchor:btn.leadingAnchor constant:-12],
         [status.centerYAnchor constraintEqualToAnchor:row.centerYAnchor],
-        [row.heightAnchor constraintEqualToConstant:32]
+        [row.heightAnchor constraintEqualToConstant:44]
     ]];
     const char *key = (kind == 0) ? &NEVehicleStatusKey : &NEBackgroundStatusKey;
     objc_setAssociatedObject(self, key, status, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     [self refreshImageStatus];
+    row.tag = 1001; // 美化：行标记，分隔线只画在两行之间
+    [self ne_addBottomHairlineToRow:row];
     return row;
 }
 
@@ -4217,7 +4299,7 @@ static void NECheckSettingsButton(void) {
     label.translatesAutoresizingMaskIntoConstraints = NO;
     UIButton *btn = [UIButton buttonWithType:UIButtonTypeSystem];
     [btn setTitle:@"恢复" forState:UIControlStateNormal];
-    btn.titleLabel.font = [UIFont systemFontOfSize:16];
+    btn.titleLabel.font = [UIFont systemFontOfSize:16 weight:UIFontWeightSemibold];
     btn.tag = kind;
     btn.translatesAutoresizingMaskIntoConstraints = NO;
     [btn addTarget:self action:@selector(clearImageTapped:)
@@ -4229,8 +4311,10 @@ static void NECheckSettingsButton(void) {
         [label.centerYAnchor constraintEqualToAnchor:row.centerYAnchor],
         [btn.trailingAnchor constraintEqualToAnchor:row.trailingAnchor],
         [btn.centerYAnchor constraintEqualToAnchor:row.centerYAnchor],
-        [row.heightAnchor constraintEqualToConstant:32]
+        [row.heightAnchor constraintEqualToConstant:44]
     ]];
+    row.tag = 1001; // 美化：行标记，分隔线只画在两行之间
+    [self ne_addBottomHairlineToRow:row];
     return row;
 }
 
@@ -4251,7 +4335,7 @@ static void NECheckSettingsButton(void) {
     label.translatesAutoresizingMaskIntoConstraints = NO;
     UIButton *btn = [UIButton buttonWithType:UIButtonTypeSystem];
     [btn setTitle:@"导出" forState:UIControlStateNormal];
-    btn.titleLabel.font = [UIFont systemFontOfSize:16];
+    btn.titleLabel.font = [UIFont systemFontOfSize:16 weight:UIFontWeightSemibold];
     btn.translatesAutoresizingMaskIntoConstraints = NO;
     [btn addTarget:self action:@selector(exportDiagTapped:)
         forControlEvents:UIControlEventTouchUpInside];
@@ -4262,8 +4346,10 @@ static void NECheckSettingsButton(void) {
         [label.centerYAnchor constraintEqualToAnchor:row.centerYAnchor],
         [btn.trailingAnchor constraintEqualToAnchor:row.trailingAnchor],
         [btn.centerYAnchor constraintEqualToAnchor:row.centerYAnchor],
-        [row.heightAnchor constraintEqualToConstant:32]
+        [row.heightAnchor constraintEqualToConstant:44]
     ]];
+    row.tag = 1001; // 美化：行标记，分隔线只画在两行之间
+    [self ne_addBottomHairlineToRow:row];
     return row;
 }
 
