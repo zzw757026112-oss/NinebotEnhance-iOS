@@ -1,4 +1,19 @@
-// NinebotEnhance iOS v0.4.5 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
+// NinebotEnhance iOS v0.4.6 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
+//
+// v0.4.6 修复（0.4.5 实测：6 个 token 组合（三个来源 × Bearer 有/无）全在
+//  查状态那步回 code 2 “Params error”，签到 POST 一次都没跑——token 来源
+//  与格式已排除，问题在请求本身）：用户发回能跑通的快捷指令截图，签到
+//  POST 除了 Authorization（裸 JWT，无 Bearer 前缀）+ Content-Type +
+//  User-Agent（浏览器样式）外，还带了四个插件没带的头——Origin:
+//  https://h5-bj.ninebot.com、Referer: https://h5-bj.ninebot.com/、
+//  language: zh、from_platform: 1。签到页是 H5（h5-bj.ninebot.com），网关
+//  很可能验这几个 H5 头，缺了就报 Params error。本版查状态 GET 与签到
+//  POST 的拼法都补上这四个头（GET 不加 Content-Type；POST 保留
+//  Content-Type 与 {"deviceId":…} 体）；User-Agent 先不动（不猜完整浏览器
+//  UA）；token 六组合轮试、模板抓取、deviceId 找法全保留。快捷指令的
+//  deviceId 是 UUID（498CF171…），插件找的是 backup_id，值是否一致未知——
+//  若本版查状态通了但签到还 code 2，下一步查 deviceId。其余不变（单独
+//  开关、记录行、重试、不加分享）。
 //
 // v0.4.5 修复（0.4.4 实测：用户打开签到页后模板仍“未捕获”——App 调
 //  user-sign 不走 NSURLSession（签到页大概率是 WKWebView，请求走 WebKit
@@ -3800,6 +3815,14 @@ static void NoteFrame(size_t w, size_t h) {
 //  值），下次检查排最前；54019 清赢家 + 模板。诊断行显示当前在用的
 //  （来源·格式）。模板抓取与重放保留，以后 App 万一走 NSURLSession 调
 //  user-sign 还能用上。
+// v0.4.6 修复：0.4.5 实测 6 个 token 组合全在查状态那步回 code 2，签到
+//  POST 一次都没跑——token 来源与格式已排除，问题在请求本身。用户发回
+//  能跑通的快捷指令截图：签到 POST 除了 Authorization + Content-Type +
+//  User-Agent 外，还带 Origin: https://h5-bj.ninebot.com、Referer:
+//  https://h5-bj.ninebot.com/、language: zh、from_platform: 1 四个头，
+//  插件一个都没带（签到页是 H5，网关很可能验这几个头）。本版查状态 GET
+//  与签到 POST 的拼法都补上这四个头（GET 不加 Content-Type）；User-Agent
+//  先不动；token 六组合轮试、模板、deviceId 找法全保留。
 // v0.4.3 修复：0.4.2 实测 deviceId 落到 IDFV，状态与签到两步都回 code 2
 //  “Params error”。deviceId 找得更广（见上）；状态 GET 仍只发 Authorization
 //  + Accept + App 的 User-Agent，不带 deviceId——0.4.2 起已是这样，状态 2
@@ -4727,6 +4750,8 @@ static void NEAutoSignInTryNextCandidate(void) {
 // v0.4.2：记下签到接口的 code 与服务端 message（供诊断分清是哪一步报的）；
 // 请求头对齐已知能用的快捷指令：加 Accept: application/json，并复用 App
 // 自己请求的 User-Agent（抓到才带，没抓到不伪造）。
+// v0.4.6：再补四个 H5 头（Origin / Referer / language / from_platform，
+// 值照快捷指令；签到页是 H5，网关验它们，缺了报 Params error）。
 // v0.4.4：有 App 的签到请求模板时按模板重发（URL、头原样，体只换 deviceId）；
 // 没模板时用 0.4.3 的拼法。54019 会话失效时清模板，下次用拼法+新 token。
 static void NEAutoSignInDoSignAttempt(void) {
@@ -4759,6 +4784,13 @@ static void NEAutoSignInDoSignAttempt(void) {
         [req setValue:auth forHTTPHeaderField:@"Authorization"];
         [req setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
         [req setValue:@"application/json" forHTTPHeaderField:@"Accept"];
+        // v0.4.6：补上能跑通的快捷指令带的四个 H5 头（签到页是 H5，
+        // h5-bj.ninebot.com；缺了它们网关报 Params error）。User-Agent
+        // 先不动（不猜完整浏览器 UA），仍复用 App 自己的。
+        [req setValue:@"https://h5-bj.ninebot.com" forHTTPHeaderField:@"Origin"];
+        [req setValue:@"https://h5-bj.ninebot.com/" forHTTPHeaderField:@"Referer"];
+        [req setValue:@"zh" forHTTPHeaderField:@"language"];
+        [req setValue:@"1" forHTTPHeaderField:@"from_platform"];
         [gAuthLock lock];
         NSString *ua = gCapturedUserAgent;
         [gAuthLock unlock];
@@ -4849,7 +4881,8 @@ static void NEAutoSignInRunAttempt(void) {
     gSignInDiagTokenSource = NEAuthCandidateLabel(cand[@"source"], [cand[@"bearer"] boolValue]);
     // v0.4.4：有 App 的状态请求模板就按模板重发（完整 URL 含查询串、全部头
     // 原样，包括 App 自己的 Authorization）；没模板时用 0.4.3 的拼法
-    // （Authorization + Accept + App 的 User-Agent，不带 deviceId）。
+    // （Authorization + Accept + App 的 User-Agent，不带 deviceId），
+    // v0.4.6 起再补四个 H5 头（Origin / Referer / language / from_platform）。
     [gAuthLock lock];
     NSURL *tplURL = gTplStatusCaptured ? gTplStatusURL : nil;
     NSDictionary *tplHeaders = gTplStatusCaptured ? gTplStatusHeaders : nil;
@@ -4870,6 +4903,12 @@ static void NEAutoSignInRunAttempt(void) {
         req.HTTPMethod = @"GET";
         [req setValue:auth forHTTPHeaderField:@"Authorization"];
         [req setValue:@"application/json" forHTTPHeaderField:@"Accept"];
+        // v0.4.6：同签到 POST，补上快捷指令带的四个 H5 头（Origin /
+        // Referer / language / from_platform）；GET 没 body，不加 Content-Type。
+        [req setValue:@"https://h5-bj.ninebot.com" forHTTPHeaderField:@"Origin"];
+        [req setValue:@"https://h5-bj.ninebot.com/" forHTTPHeaderField:@"Referer"];
+        [req setValue:@"zh" forHTTPHeaderField:@"language"];
+        [req setValue:@"1" forHTTPHeaderField:@"from_platform"];
         [gAuthLock lock];
         NSString *ua = gCapturedUserAgent;
         [gAuthLock unlock];
@@ -5290,7 +5329,7 @@ static void NECheckSettingsButton(void) {
     aboutName.text = @"NinebotEnhance";
     aboutName.font = [UIFont boldSystemFontOfSize:16];
     UILabel *aboutVer = [UILabel new];
-    aboutVer.text = @"0.4.5";
+    aboutVer.text = @"0.4.6";
     aboutVer.font = [UIFont systemFontOfSize:15];
     aboutVer.textColor = [UIColor secondaryLabelColor];
     [aboutTitleRow addArrangedSubview:aboutName];
@@ -6383,7 +6422,7 @@ static void NEProbeStart(void) {
                hasSel ? "YES" : "NO");
     }
 
-    os_log(gLog, "NinebotEnhance iOS 0.4.5 已加载（小胶囊 HUD：日期/天气/信号/音量/电量/来电/超速 + 翻页时钟 + 车辆数据探测 + 有效期9999/主页换图/自定义显示 + 自动签到）");
+    os_log(gLog, "NinebotEnhance iOS 0.4.6 已加载（小胶囊 HUD：日期/天气/信号/音量/电量/来电/超速 + 翻页时钟 + 车辆数据探测 + 有效期9999/主页换图/自定义显示 + 自动签到）");
 
     // 电量监听 + 定位 + 来电观察，全部在主队列 / 后台队列做，不阻塞加载
     dispatch_async(dispatch_get_main_queue(), ^{
