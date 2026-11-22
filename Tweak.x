@@ -9,9 +9,9 @@
 //     图片够大时换。用户选的图存沙盒 Documents/ne-vehicle.png（key NEVehicleImagePath），
 //     没选图时不装钩子、不改动。
 //  3. 主页背景图自定义：和车辆图同一套拦截；“设备”主页那张满屏背景图（车图下面那张）也能换，
-//     存 Documents/ne-bg.png（key NEBackgroundImagePath）。背景若是本地 asset，
-//     再 hook +[UIImage imageNamed:] 按名字匹配（bg/background/banner 等关键字，
-//     匹配不上就不换）。设置里“更换车辆图 / 更换背景图”用 PHPicker 选图（不用相册权限，
+//     存 Documents/ne-bg.png（key NEBackgroundImagePath）。背景/车辆只按满屏 view 的同级顺序分
+//     （容器里最后一个满屏 UIImageView 是车辆层，之前的是背景层），不按名字/URL 关键字分
+//     （关键字误伤卡片图和顶部背景，第六修已删）。设置里“更换车辆图 / 更换背景图”用 PHPicker 选图（不用相册权限，
 //     不可用时回退 UIImagePickerController），另有“恢复原图 / 恢复原背景”清除。
 //  三个钩子都用 MSHookMessageEx 在运行时装，类/方法不存在只记日志绝不崩；
 //  UILabel setText 是高频调用，开关先走缓存 BOOL 再做字符串匹配，不拖性能。
@@ -85,6 +85,25 @@
 //  到当前 Documents 目录下的同名文件并把存的路径修好；刷新换图时把
 //  layer.contents 也同步成自定义图（App 若绕开 setImage: 直接写了图层
 //  内容，只换 iv.image 显示换不上）。
+// v0.3.9 第六修（用户视频实测：主页往下滚，“新手任务”三个卡片全被换成
+//  车辆图；连设备页顶部背景也显示车辆图而非背景图）：
+//  根因不是页面范围（卡片就在根页面上），是分类根本没看 view 有多大——
+//  ① NEClassifyDeviceImage 只按图片像素尺寸跳过小图（w<200 && h<200），
+//     卡片缩略图的素材本身是高清图，根本拦不住；近似正方形 fallback
+//     （ratio 0.98–1.02 → 背景）更是没有任何 view 尺寸 gate，任何小 view
+//     上的近似正方形素材都会被换；② SDWebImage 按 URL 关键字分背景/车辆
+//     （vehicle/car/bike…），新手任务卡片的图 URL 里就有这类词，直接换成
+//     车辆图；③ +[UIImage imageNamed:] 按名字关键字换，且它根本没有 view
+//     可查，只能靠“根页面正显示”这个全局条件放行——根页面显示时，任何
+//     名字带 vehicle/car/bike 的素材（卡片图、甚至顶部背景图）全被换成
+//     车辆图，这就是顶部背景显示车辆图的根因。改：换图只允许满屏大视图
+//     （view 宽 ≥ 屏宽 0.9 且高 ≥ 屏高 0.5），这道 gate 放到分类器最前面，
+//     setImage: / SDWebImage / 强制刷新三处共用；SDWebImage 不再按 URL
+//     关键字分，一律走同级顺序；imageNamed 钩子整个删掉（它没有 view，
+//     永远分不清卡片和背景；本地 asset 走 setImage: 时一样能被满屏 gate
+//     拦住，不丢覆盖）；同级顺序只在满屏 view 之间找“最后一个”，且父容
+//     器里满屏 view 不足 2 个时不判、等刷新时再判（图先设、view 后加的
+//     竞态会把背景 view 暂时当成“最后一个”错换成车辆图）。
 // v0.3.8 改动：超速红行改成“请勿超速行驶！”，字比普通行大但绝不超胶囊边框；
 //  超速那一刻中文语音读一次“您已超速行驶，请注意安全”（跟着超速提醒开关走，不另设开关）。
 // v0.3.7 改动：设置页“日期时间”改叫“日期”（时间只在翻页时钟里显示）；和 App 1.3.19 同款。
@@ -1266,13 +1285,6 @@ static void NEClearImageCache(void) {
     [gImageLock unlock];
 }
 
-static BOOL NEStringHasAny(NSString *s, NSArray<NSString *> *keys) {
-    for (NSString *k in keys) {
-        if ([s rangeOfString:k].location != NSNotFound) return YES;
-    }
-    return NO;
-}
-
 // 这个 view 是不是在“设备”tab 里（响应链上溯找所属 VC，再看它是不是设备 tab
 // 的根页面或其子页面）。NEIsDeviceTabSelected 跟 presented 链，设置 modal 盖着
 // 时永远返回 NO，用在 set-time 拦截里是错的——图正在被设的时候，modal 可能正
@@ -1281,8 +1293,6 @@ static BOOL NEViewIsOnDeviceTab(UIView *v);
 // 只认“设备”tab 的根页面（不含 push 出去的子页面，如仪表/骑行页）：
 // 换图管太宽会把自定义车辆图错换到仪表页背景上。定义在后面，这里先声明。
 static BOOL NEViewIsOnDeviceRootPage(UIView *v);
-// imageNamed 没有 view 可查：只在设备根页面正显示在最上层时才换。
-static BOOL NEIsDeviceRootPageVisible(void);
 
 // 背景 vs 车辆：主信号是 view 在同级里的顺序，不是图片尺寸。
 // 诊断（ne-diag.txt，两次）证明：设备页容器里有三张满屏 UIImageView，
@@ -1305,16 +1315,33 @@ static UIImage *NEImageBySiblingOrder(UIImageView *iv, UIImage *bg, UIImage *veh
     CGFloat sw = [UIScreen mainScreen].bounds.size.width;
     CGFloat sh = [UIScreen mainScreen].bounds.size.height;
     if (bs.width < sw * 0.9 || bs.height < sh * 0.5) return nil;
+    // “最后一个”只在满屏 view 之间找：同级里可能还有小图标 view，按全部
+    // UIImageView 找最后一个会错。父容器里满屏 view 不足 2 个时不判、等
+    // 刷新时再判——图先设、view 后加的竞态下，背景 view 会暂时成为
+    // “最后一个”而被错换成车辆图（顶部背景显示车辆图的另一可能根因）。
     UIImageView *last = nil;
+    NSInteger fullCount = 0;
     for (UIView *sub in parent.subviews) {
-        if ([sub isKindOfClass:[UIImageView class]]) last = (UIImageView *)sub;
+        if (![sub isKindOfClass:[UIImageView class]]) continue;
+        CGSize s = sub.bounds.size;
+        if (s.width < sw * 0.9 || s.height < sh * 0.5) continue;
+        fullCount++;
+        last = (UIImageView *)sub;
     }
-    if (!last) return nil;
+    if (!last || fullCount < 2) return nil;
     return (last == iv) ? veh : bg;
 }
 
 static UIImage *NEClassifyDeviceImage(UIImageView *iv, UIImage *image) {
-    if (!image) return nil;
+    if (!image || !iv) return nil;
+    // 只换满屏大视图：卡片缩略图/图标的 view 很小，哪怕素材本身是高清图
+    // 也不换（新手任务卡片就是这么被换掉的：素材高清，view 只有一百多像素，
+    // 旧代码只按图片像素尺寸跳过小图，根本拦不住）。view 还没布局好
+    // （bounds 还是 0）时也不换，等刷新时 bounds 正常了再判。
+    CGSize bs = iv.bounds.size;
+    CGFloat sw = [UIScreen mainScreen].bounds.size.width;
+    CGFloat sh = [UIScreen mainScreen].bounds.size.height;
+    if (bs.width < sw * 0.9 || bs.height < sh * 0.5) return nil;
     UIImage *bg = NECustomBackgroundImage();
     UIImage *veh = NECustomVehicleImage();
     if (!bg && !veh) return nil;
@@ -1334,18 +1361,19 @@ static UIImage *NEClassifyDeviceImage(UIImageView *iv, UIImage *image) {
     return nil;
 }
 
-// SDWebImage 的 URL 判定：URL 关键字优先；没关键字时按同级顺序。
-// 以前满屏 bounds 先判（车辆 view 的 bounds 也是满屏），车辆 URL 也会被当成背景。
-// 小图（图标）直接放行；判定不出就返回 nil，等图片下完走 setImage: 兜底再判。
+// SDWebImage 的 URL 判定：只按同级顺序，不再按 URL 关键字分背景/车辆。
+// 关键字误伤太多——新手任务卡片的图 URL 里就有 vehicle/car 这类词，
+// 顶部背景图的 URL 也可能含 vehicle，都会被错换成车辆图。
+// 小 view（卡片缩略图）直接放行；判定不出就返回 nil，等图片下完走
+// setImage: 兜底再判。
 static UIImage *NEImageForSDURL(UIImageView *iv, NSURL *url) {
     if (!NEViewIsOnDeviceRootPage(iv)) return nil;
-    NSString *u = [[url absoluteString] lowercaseString];
-    if (!u.length) return nil;
-    if (NEStringHasAny(u, @[@"vehicle", @"veh", @"car", @"bike", @"scooter",
-                            @"motor", @"m395", @"model"]))
-        return NECustomVehicleImage();
-    if (NEStringHasAny(u, @[@"bg", @"background", @"banner", @"wallpaper", @"theme"]))
-        return NECustomBackgroundImage();
+    if (!iv || !url) return nil;
+    // 只换满屏大视图：卡片缩略图再匹配什么也不换。
+    CGSize bs = iv.bounds.size;
+    CGFloat sw = [UIScreen mainScreen].bounds.size.width;
+    CGFloat sh = [UIScreen mainScreen].bounds.size.height;
+    if (bs.width < sw * 0.9 || bs.height < sh * 0.5) return nil;
     return NEImageBySiblingOrder(iv, NECustomBackgroundImage(), NECustomVehicleImage());
 }
 
@@ -1407,50 +1435,25 @@ static void NE_UIButton_setBackgroundImage(id self, SEL _cmd, UIImage *image, UI
         CGFloat sw = [UIScreen mainScreen].bounds.size.width;
         CGFloat sh = [UIScreen mainScreen].bounds.size.height;
         if (sz.width >= sw * 0.9 && sz.height >= sh * 0.5) {
-            UIImage *custom = NECustomBackgroundImage();
-            if (custom && NEViewIsOnDeviceRootPage((UIView *)self)) {
-                orig_UIButton_setBackgroundImage(self, _cmd, custom, state);
-                return;
+            // 按钮本身也得是满屏大按钮：卡片按钮也可能配大图素材，只看图片尺寸不够。
+            CGSize bs = ((UIView *)self).bounds.size;
+            if (bs.width >= sw * 0.9 && bs.height >= sh * 0.5) {
+                UIImage *custom = NECustomBackgroundImage();
+                if (custom && NEViewIsOnDeviceRootPage((UIView *)self)) {
+                    orig_UIButton_setBackgroundImage(self, _cmd, custom, state);
+                    return;
+                }
             }
         }
     }
     orig_UIButton_setBackgroundImage(self, _cmd, image, state);
 }
 
-// 本地 asset 兜底：+[UIImage imageNamed:]，按名字关键字匹配。
-// 名字是运行时实际看到的才准：命中关键字的名字只记一次日志，方便以后收紧。
-static id (*orig_UIImage_imageNamed)(id, SEL, NSString *);
-static id NE_UIImage_imageNamed(id self, SEL _cmd, NSString *name) {
-    id img = orig_UIImage_imageNamed(self, _cmd, name);
-    if (!name.length || (!gHasVehicleImage && !gHasBgImage)) return img;
-    NSString *lower = [name lowercaseString];
-    BOOL isBg = NEStringHasAny(lower, @[@"bg", @"background", @"banner"]);
-    BOOL isVeh = !isBg && NEStringHasAny(lower, @[@"vehicle", @"car", @"bike",
-                                                  @"scooter", @"motor", @"m3"]);
-    if (!isBg && !isVeh) return img;
-    // 只在设备根页面换：imageNamed 可能在后台线程调，同步回主线程查 tab；
-    // 仪表/骑行页 push 上来时不换（它的背景会被错当成车辆层）。
-    __block BOOL onDeviceTab = YES;
-    if ([NSThread isMainThread]) {
-        onDeviceTab = NEIsDeviceRootPageVisible();
-    } else {
-        dispatch_sync(dispatch_get_main_queue(), ^{ onDeviceTab = NEIsDeviceRootPageVisible(); });
-    }
-    if (!onDeviceTab) return img;
-    UIImage *custom = isBg ? NECustomBackgroundImage() : NECustomVehicleImage();
-    if (!custom) return img;
-    static NSMutableSet *sLoggedNames = nil;
-    static dispatch_once_t sOnce;
-    dispatch_once(&sOnce, ^{ sLoggedNames = [NSMutableSet new]; });
-    @synchronized (sLoggedNames) {
-        if (![sLoggedNames containsObject:name]) {
-            [sLoggedNames addObject:name];
-            os_log(gLog, "[IMG] imageNamed 命中 %{public}@ → 换成自定义%{public}@",
-                   name, isBg ? @"背景图" : @"车辆图");
-        }
-    }
-    return custom;
-}
+// 注意：+[UIImage imageNamed:] 的钩子在第六修里整个删掉了——它没有 view 可查，
+// 只能靠名字关键字 +“根页面正显示”这个全局条件放行，根本分不清卡片缩略图
+// 和顶部背景图（新手任务卡片、甚至顶部背景图的名字/URL 里带 vehicle/car
+// 这类词时，全被错换成车辆图）。本地 asset 走 setImage: 时一样能被满屏
+// gate + 同级顺序拦住，不丢覆盖。
 
 static BOOL gImageHooksInstalled = NO;
 static void NEInstallImageHooksIfNeeded(void) {
@@ -1497,13 +1500,6 @@ static void NEInstallImageHooksIfNeeded(void) {
         if (orig_UIButton_setBackgroundImage)
             os_log(gLog, "[IMG] UIButton setBackgroundImage:forState: 钩子已装");
     }
-    Class ui = objc_getClass("UIImage");
-    if (ui && class_getClassMethod(ui, @selector(imageNamed:))) {
-        MSHookMessageEx(object_getClass(ui), @selector(imageNamed:),
-                        (IMP)NE_UIImage_imageNamed, (IMP *)&orig_UIImage_imageNamed);
-        if (orig_UIImage_imageNamed)
-            os_log(gLog, "[IMG] UIImage imageNamed: 钩子已装（本地 asset 兜底）");
-    }
     gImageHooksInstalled = YES;
     // 页面显示时也要刷新图片（tab 懒加载，切过去才加载）
     NEInstallAppearHookIfNeeded();
@@ -1515,7 +1511,7 @@ static void NEInstallImageHooksIfNeeded(void) {
 // 它跟 presentedViewController 会走到设置页 nav，永远返回 NO；
 // 这里直接从根控制器取 tab bar（不跟 presented 链），再看当前选中的是不是设备 tab。
 // 主题图若不是 UIImageView 的 image（而是 view 背景色/图层内容），这招换不上，
-// 那时只能看日志里的 imageNamed 名字再收紧——先按 UIImageView 处理。
+// 那时再看诊断里的结构另想办法——先按 UIImageView 处理。
 static UITabBarController *NEAppTabBarController(void) {
     UIWindow *w = NEKeyWindow();
     UIViewController *root = w.rootViewController;
@@ -1617,21 +1613,6 @@ static BOOL NEViewIsOnDeviceRootPage(UIView *v) {
     if ([deviceRoot isKindOfClass:[UINavigationController class]]) {
         UINavigationController *nav = (UINavigationController *)deviceRoot;
         return nav.topViewController == rootPage;
-    }
-    return YES;
-}
-
-// imageNamed 没有 view 可查：只在设备根页面正显示在最上层时才换
-//（导航栈顶就是根页面；仪表/骑行页 push 上来时不换）。
-static BOOL NEIsDeviceRootPageVisible(void) {
-    UITabBarController *tab = NEAppTabBarController();
-    if (!tab) return NO;
-    UIViewController *deviceRoot = NEDeviceTabRoot();
-    if (!deviceRoot) return NO;
-    if (tab.selectedViewController != deviceRoot) return NO;
-    if ([deviceRoot isKindOfClass:[UINavigationController class]]) {
-        UINavigationController *nav = (UINavigationController *)deviceRoot;
-        return nav.topViewController == NEDeviceRootPageVC();
     }
     return YES;
 }
@@ -4062,7 +4043,7 @@ static void NEProbeStart(void) {
         NEApplySpeedLocationMode(); // 提醒开着 → 连续定位；关着 → 单次定位（只够天气用）
 
         // v0.3.9 修复：启动 3 秒后强制刷新一次文字+图片——页面可能在钩子装好前已加载，
-        // 或主题图走 imageNamed 时名字没命中关键字，靠尺寸启发式再补一次。
+        // 或主题图在钩子装好前已设好，靠刷新再补一次。
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
             NEForceRefreshLabels();
