@@ -1,4 +1,15 @@
-// NinebotEnhance iOS v0.4.2 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
+// NinebotEnhance iOS v0.4.3 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
+//
+// v0.4.3 修复（0.4.2 实测：token 已抓到（NSURLSession），但 deviceId 落到
+//  IDFV，状态与签到两步都回 code 2 “Params error”）：签到 POST 的 deviceId
+//  仍不对（IDFV 不是 App 用的那个值）。本版把 deviceId 找得更广：App 自己
+//  请求的 JSON 体里也找（deviceId/device_id/did/uuid/clientId），请求头再
+//  多认几个名字；AsyncStorage/defaults 的精确键扩到 udid/did/clientId/
+//  device_id_v2/androidId/openudid/idfa，再加一遍“任意键、值是 UUID 形状”
+//  的兜底（记下是哪个 key 出的）；IDFV 仍是最后兜底。状态 GET 仍只发
+//  Authorization + Accept + App 的 User-Agent，不带 deviceId（0.4.2 起
+//  已是这样，状态 2 的原因待实测确认）。其余不变（单独开关、记录行、重试、
+//  不加分享）。
 //
 // v0.4.2 修复（0.4.1 实测：token 已抓到（NSURLSession），但签到接口回 code 2，
 //  记录一直“暂无签到记录”）：code 2 不在已知集合（0 成功 / 540004 已签 /
@@ -3747,9 +3758,14 @@ static void NoteFrame(size_t w, size_t h) {
 //  ② 拿不到时扫 App 自己的 NSUserDefaults，找含 token 的键（值够长才算）。
 // deviceId：v0.4.2 改按 App 自己的值取（0.4.1 扫任意含 device 的键、取第
 // 一个 ≥8 字符的字符串，字典顺序未定，可能拿到设备名，签到接口回 code 2）：
-// App 自己请求里带的 deviceId > AsyncStorage 存的 > defaults 精确键
-// （deviceId/device_id/uniqueId）> 含 device 键中 UUID 形状的值 > IDFV。
-// 来源记在 gSignInDiagDeviceSource 里，供诊断行显示。
+// App 自己请求里带的 deviceId（头/URL/JSON 体）> AsyncStorage 存的 >
+// defaults 精确键（deviceId/device_id/uniqueId/udid/did/clientId 等）>
+// 含 device 键中 UUID 形状的值 > 任意键的 UUID 形状值 > IDFV。
+// 来源记在 gSignInDiagDeviceSource 里（带出自哪个 key/请求部位），供诊断行显示。
+// v0.4.3 修复：0.4.2 实测 deviceId 落到 IDFV，状态与签到两步都回 code 2
+//  “Params error”。deviceId 找得更广（见上）；状态 GET 仍只发 Authorization
+//  + Accept + App 的 User-Agent，不带 deviceId——0.4.2 起已是这样，状态 2
+//  的原因待实测确认。
 // 找不到 token 或 deviceId 就静默跳过（只记一行不含敏感值的日志），绝不猜、
 // 绝不写死、绝不问用户要。整个过程无 UI、无弹窗，后台跑、不阻塞。
 // 签到记录（NEAutoSignInLastDate，YYYY-MM-DD）存 NSUserDefaults，设置页开关
@@ -3822,6 +3838,7 @@ static NSString *gSignInDiagLastMessage = nil; // 服务端 message，截断 ≤
 static NSString *gSignInDiagDeviceSource = nil; // 本次用的 deviceId 来源
 static NSString *gCapturedUserAgent = nil; // App 自己请求的 UA（仅内存）
 static NSString *gCapturedDeviceId = nil; // App 自己请求里带的 deviceId（仅内存）
+static NSString *gCapturedDeviceIdOrigin = nil; // deviceId 从请求哪来的：header/query/body（仅内存，v0.4.3）
 
 static NSString *NEAutoSignInNowHHmm(void) {
     static NSDateFormatter *fmt = nil;
@@ -3929,9 +3946,11 @@ static NSURLSessionDataTask *NE_NSURLSession_dataTaskWithRequest(id self, SEL _c
                 }
             }
             // v0.4.2：顺带记 App 自己请求的 User-Agent 和 deviceId（只读）。
-            // deviceId 是签到接口要的那个值：App 自己请求里带的，比扫 defaults
-            // 猜的可靠。只记，不改请求。deviceId 形状：≥8 字符、仅字母数字和 -，
-            // 避免把设备名之类的值当成 deviceId。
+            // v0.4.3：deviceId 再多找两个地方——请求头多认几个名字，JSON 请求
+            // 体里也找（deviceId/device_id/did/uuid/clientId）。deviceId 是签
+            // 到接口要的那个值：App 自己请求里带的，比扫 defaults 猜的可靠。
+            // 只记，不改请求。deviceId 形状：≥8 字符、仅字母数字和 -，避免把
+            // 设备名之类的值当成 deviceId。
             [gAuthLock lock];
             if (!gCapturedUserAgent) {
                 for (NSString *hk in request.allHTTPHeaderFields) {
@@ -3944,11 +3963,18 @@ static NSURLSessionDataTask *NE_NSURLSession_dataTaskWithRequest(id self, SEL _c
             }
             if (!gCapturedDeviceId) {
                 NSString *found = nil;
+                NSString *foundFrom = nil; // header / query / body（v0.4.3，记来源）
                 for (NSString *hk in request.allHTTPHeaderFields) {
                     NSString *lk = [hk lowercaseString];
                     if ([lk isEqualToString:@"deviceid"] || [lk isEqualToString:@"device-id"] ||
-                        [lk isEqualToString:@"device_id"]) {
+                        [lk isEqualToString:@"device_id"] || [lk isEqualToString:@"deviceuuid"] ||
+                        [lk isEqualToString:@"device-uuid"] || [lk isEqualToString:@"did"] ||
+                        [lk isEqualToString:@"udid"] || [lk isEqualToString:@"uuid"] ||
+                        [lk isEqualToString:@"clientid"] || [lk isEqualToString:@"client-id"] ||
+                        [lk isEqualToString:@"client_id"] || [lk isEqualToString:@"x-device-id"] ||
+                        [lk isEqualToString:@"x-deviceid"]) {
                         found = request.allHTTPHeaderFields[hk];
+                        foundFrom = @"header";
                         break;
                     }
                 }
@@ -3960,7 +3986,69 @@ static NSURLSessionDataTask *NE_NSURLSession_dataTaskWithRequest(id self, SEL _c
                                 stringByRemovingPercentEncoding] ?: [kv[0] lowercaseString];
                             if ([k isEqualToString:@"deviceid"] || [k isEqualToString:@"device_id"]) {
                                 found = [kv[1] stringByRemovingPercentEncoding] ?: kv[1];
+                                foundFrom = @"query";
                                 break;
+                            }
+                        }
+                    }
+                }
+                // v0.4.3：请求体里也找 deviceId（App 可能把它放 JSON body 里）。
+                // 只在头/URL 没找到时看；先精确键、再宽松键，再看一层嵌套；体太
+                // 大（上传类）不碰。只读，不改请求。
+                if (!found.length && request.HTTPBody.length && request.HTTPBody.length < 64 * 1024) {
+                    id bodyJson = [NSJSONSerialization JSONObjectWithData:request.HTTPBody options:0 error:nil];
+                    if ([bodyJson isKindOfClass:[NSDictionary class]]) {
+                        NSArray *exactBodyKeys = @[@"deviceid", @"device_id", @"deviceuuid", @"uniqueid", @"unique_id"];
+                        NSArray *looseBodyKeys = @[@"did", @"uuid", @"clientid", @"client_id", @"udid"];
+                        for (NSArray *keyList in @[exactBodyKeys, looseBodyKeys]) {
+                            for (NSString *bk in keyList) {
+                                for (NSString *jk in (NSDictionary *)bodyJson) {
+                                    if ([[jk lowercaseString] isEqualToString:bk]) {
+                                        id bv = bodyJson[jk];
+                                        if ([bv isKindOfClass:[NSString class]] && [(NSString *)bv length] >= 8) {
+                                            found = (NSString *)bv;
+                                            foundFrom = @"body";
+                                            break;
+                                        }
+                                    }
+                                }
+                                if (found.length) break;
+                            }
+                            if (found.length) break;
+                        }
+                        if (!found.length) {
+                            for (NSString *jk in (NSDictionary *)bodyJson) {
+                                id nv = bodyJson[jk];
+                                if (![nv isKindOfClass:[NSDictionary class]]) continue;
+                                for (NSString *nk in (NSDictionary *)nv) {
+                                    NSString *nlk = [nk lowercaseString];
+                                    if ([nlk isEqualToString:@"deviceid"] || [nlk isEqualToString:@"device_id"] ||
+                                        [nlk isEqualToString:@"did"] || [nlk isEqualToString:@"uuid"] ||
+                                        [nlk isEqualToString:@"clientid"] || [nlk isEqualToString:@"client_id"]) {
+                                        id bv = nv[nk];
+                                        if ([bv isKindOfClass:[NSString class]] && [(NSString *)bv length] >= 8) {
+                                            found = (NSString *)bv;
+                                            foundFrom = @"body";
+                                            break;
+                                        }
+                                    }
+                                }
+                                if (found.length) break;
+                            }
+                        }
+                    } else {
+                        NSString *raw = [[NSString alloc] initWithData:request.HTTPBody encoding:NSUTF8StringEncoding];
+                        if (raw.length) {
+                            for (NSString *pair in [raw componentsSeparatedByString:@"&"]) {
+                                NSArray *kv = [pair componentsSeparatedByString:@"="];
+                                if (kv.count == 2) {
+                                    NSString *k = [[kv[0] lowercaseString] stringByRemovingPercentEncoding] ?: [kv[0] lowercaseString];
+                                    if ([k isEqualToString:@"deviceid"] || [k isEqualToString:@"device_id"]) {
+                                        found = [kv[1] stringByRemovingPercentEncoding] ?: kv[1];
+                                        foundFrom = @"body";
+                                        break;
+                                    }
+                                }
                             }
                         }
                     }
@@ -3968,8 +4056,10 @@ static NSURLSessionDataTask *NE_NSURLSession_dataTaskWithRequest(id self, SEL _c
                 if (found.length >= 8) {
                     NSCharacterSet *bad = [[NSCharacterSet characterSetWithCharactersInString:
                         @"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-"] invertedSet];
-                    if ([found rangeOfCharacterFromSet:bad].location == NSNotFound)
+                    if ([found rangeOfCharacterFromSet:bad].location == NSNotFound) {
                         gCapturedDeviceId = [found copy];
+                        if (foundFrom.length) gCapturedDeviceIdOrigin = [foundFrom copy];
+                    }
                 }
             }
             [gAuthLock unlock];
@@ -4226,10 +4316,14 @@ static BOOL NEIsUUIDShapedDeviceId(NSString *s) {
     return NO;
 }
 
-// RN AsyncStorage 里找 deviceId（v0.4.2）：复用 token 那套目录查找，
-// 只读 manifest。先扫 deviceId/device_id/uniqueId/deviceUUID 精确键，
-// 再扫含 device 的键（值须 UUID 形状）。本次启动只扫一次，记内存。
+// RN AsyncStorage 里找 deviceId（v0.4.2：复用 token 那套目录查找；
+// v0.4.3：精确键扩到 udid/did/clientId/device_id_v2/androidId/openudid/
+// idfa，再加第三遍“任意键、值是 UUID 形状”的兜底）。只读 manifest。
+// 先扫精确键，再扫含 device 的键（值须 UUID 形状），最后扫任意键的
+// UUID 形状值（token/会话类键排除）。出自哪个 key 记在
+// gAsyncStorageDeviceKey 里（供诊断显示）。本次启动只扫一次，记内存。
 static NSString *gAsyncStorageDeviceId = nil;
+static NSString *gAsyncStorageDeviceKey = nil; // 出 deviceId 的 AsyncStorage key（仅内存）
 static BOOL gAsyncStorageDeviceScanned = NO;
 static NSString *NEFindDeviceIdInAsyncStorage(void) {
     if (gAsyncStorageDeviceScanned) return gAsyncStorageDeviceId;
@@ -4241,15 +4335,23 @@ static NSString *NEFindDeviceIdInAsyncStorage(void) {
     NSDictionary *manifest = [NSJSONSerialization JSONObjectWithData:manifestData options:0 error:nil];
     if (![manifest isKindOfClass:[NSDictionary class]]) return nil;
     NSFileManager *fm = [NSFileManager defaultManager];
-    for (int pass = 0; pass < 2 && !gAsyncStorageDeviceId; pass++) {
+    for (int pass = 0; pass < 3 && !gAsyncStorageDeviceId; pass++) {
         for (NSString *key in manifest) {
             NSString *lk = [key lowercaseString];
             BOOL exact = [lk isEqualToString:@"deviceid"] || [lk isEqualToString:@"device_id"] ||
                          [lk isEqualToString:@"deviceuuid"] || [lk isEqualToString:@"uniqueid"] ||
-                         [lk isEqualToString:@"unique_id"];
+                         [lk isEqualToString:@"unique_id"] || [lk isEqualToString:@"udid"] ||
+                         [lk isEqualToString:@"did"] || [lk isEqualToString:@"clientid"] ||
+                         [lk isEqualToString:@"client_id"] || [lk isEqualToString:@"device_id_v2"] ||
+                         [lk isEqualToString:@"androidid"] || [lk isEqualToString:@"openudid"] ||
+                         [lk isEqualToString:@"idfa"];
             BOOL loose = [lk containsString:@"device"];
+            BOOL sensitive = [lk containsString:@"token"] || [lk containsString:@"authorization"] ||
+                             [lk containsString:@"session"] || [lk containsString:@"password"] ||
+                             [lk containsString:@"secret"];
             if (pass == 0 && !exact) continue;
             if (pass == 1 && (exact || !loose)) continue;
+            if (pass == 2 && (exact || loose || sensitive)) continue;
             NSString *file = manifest[key];
             if (![file isKindOfClass:[NSString class]]) continue;
             NSString *path = [dir stringByAppendingPathComponent:file];
@@ -4276,9 +4378,9 @@ static NSString *NEFindDeviceIdInAsyncStorage(void) {
             }
             if (!val.length) continue;
             if (pass == 0) {
-                if (NEIsPlausibleDeviceId(val)) { gAsyncStorageDeviceId = val; break; }
+                if (NEIsPlausibleDeviceId(val)) { gAsyncStorageDeviceId = val; gAsyncStorageDeviceKey = key; break; }
             } else {
-                if (NEIsUUIDShapedDeviceId(val)) { gAsyncStorageDeviceId = val; break; }
+                if (NEIsUUIDShapedDeviceId(val)) { gAsyncStorageDeviceId = val; gAsyncStorageDeviceKey = key; break; }
             }
         }
     }
@@ -4289,27 +4391,40 @@ static NSString *NEFindDeviceId(void) {
     // ① App 自己发给网关的请求里带的 deviceId（最可靠，就是 App 在用的值）
     [gAuthLock lock];
     NSString *captured = gCapturedDeviceId;
+    NSString *origin = gCapturedDeviceIdOrigin;
     [gAuthLock unlock];
     if (captured.length >= 8) {
-        gSignInDiagDeviceSource = @"App 请求";
+        if (origin.length)
+            gSignInDiagDeviceSource = [NSString stringWithFormat:@"App 请求:%@", origin];
+        else
+            gSignInDiagDeviceSource = @"App 请求";
         return captured;
     }
-    // ② RN AsyncStorage 存的 deviceId
+    // ② RN AsyncStorage 存的 deviceId（v0.4.3：精确键扩到 udid/did/clientId
+    // 等，再加“任意键、值是 UUID 形状”的兜底；出自哪个 key 记在来源里）
     NSString *async = NEFindDeviceIdInAsyncStorage();
     if (async.length >= 8) {
-        gSignInDiagDeviceSource = @"AsyncStorage";
+        if (gAsyncStorageDeviceKey.length)
+            gSignInDiagDeviceSource = [NSString stringWithFormat:@"AsyncStorage:%@", gAsyncStorageDeviceKey];
+        else
+            gSignInDiagDeviceSource = @"AsyncStorage";
         return async;
     }
-    // ③ NSUserDefaults 精确键（deviceId/device_id/uniqueId/deviceUUID）
+    // ③ NSUserDefaults 精确键（v0.4.3：扩到 udid/did/clientId/device_id_v2/
+    // androidId/openudid/idfa；出自哪个 key 记在来源里）
     NSDictionary *all = [[NSUserDefaults standardUserDefaults] dictionaryRepresentation];
     for (NSString *key in all) {
         NSString *lk = [key lowercaseString];
         if ([lk isEqualToString:@"deviceid"] || [lk isEqualToString:@"device_id"] ||
             [lk isEqualToString:@"deviceuuid"] || [lk isEqualToString:@"uniqueid"] ||
-            [lk isEqualToString:@"unique_id"]) {
+            [lk isEqualToString:@"unique_id"] || [lk isEqualToString:@"udid"] ||
+            [lk isEqualToString:@"did"] || [lk isEqualToString:@"clientid"] ||
+            [lk isEqualToString:@"client_id"] || [lk isEqualToString:@"device_id_v2"] ||
+            [lk isEqualToString:@"androidid"] || [lk isEqualToString:@"openudid"] ||
+            [lk isEqualToString:@"idfa"]) {
             id v = all[key];
             if ([v isKindOfClass:[NSString class]] && NEIsPlausibleDeviceId((NSString *)v)) {
-                gSignInDiagDeviceSource = @"NSUserDefaults";
+                gSignInDiagDeviceSource = [NSString stringWithFormat:@"NSUserDefaults:%@", key];
                 return (NSString *)v;
             }
         }
@@ -4320,12 +4435,26 @@ static NSString *NEFindDeviceId(void) {
         if ([lk containsString:@"device"]) {
             id v = all[key];
             if ([v isKindOfClass:[NSString class]] && NEIsUUIDShapedDeviceId((NSString *)v)) {
-                gSignInDiagDeviceSource = @"NSUserDefaults";
+                gSignInDiagDeviceSource = [NSString stringWithFormat:@"NSUserDefaults:%@", key];
                 return (NSString *)v;
             }
         }
     }
-    // ⑤ 兜底：IDFV（RN 的 getUniqueId 在 iOS 上就是 IDFV，很可能就是 App 用的值）
+    // ⑤ v0.4.3：任意键、值是 UUID 形状的（36 位 UUID / 32 位 hex）也认，
+    // 键名不含 device 时的最后一搏；token/会话类键排除（token 不该当
+    // deviceId）。出自哪个 key 记在来源里。
+    for (NSString *key in all) {
+        NSString *lk = [key lowercaseString];
+        if ([lk containsString:@"token"] || [lk containsString:@"authorization"] ||
+            [lk containsString:@"session"] || [lk containsString:@"password"] ||
+            [lk containsString:@"secret"]) continue;
+        id v = all[key];
+        if ([v isKindOfClass:[NSString class]] && NEIsUUIDShapedDeviceId((NSString *)v)) {
+            gSignInDiagDeviceSource = [NSString stringWithFormat:@"NSUserDefaults:%@", key];
+            return (NSString *)v;
+        }
+    }
+    // ⑥ 兜底：IDFV（RN 的 getUniqueId 在 iOS 上就是 IDFV，很可能就是 App 用的值）
     NSString *idfv = [[[UIDevice currentDevice] identifierForVendor] UUIDString];
     if (idfv.length >= 8) {
         gSignInDiagDeviceSource = @"IDFV";
@@ -4822,7 +4951,7 @@ static void NECheckSettingsButton(void) {
     aboutName.text = @"NinebotEnhance";
     aboutName.font = [UIFont boldSystemFontOfSize:16];
     UILabel *aboutVer = [UILabel new];
-    aboutVer.text = @"0.4.2";
+    aboutVer.text = @"0.4.3";
     aboutVer.font = [UIFont systemFontOfSize:15];
     aboutVer.textColor = [UIColor secondaryLabelColor];
     [aboutTitleRow addArrangedSubview:aboutName];
@@ -5915,7 +6044,7 @@ static void NEProbeStart(void) {
                hasSel ? "YES" : "NO");
     }
 
-    os_log(gLog, "NinebotEnhance iOS 0.4.2 已加载（小胶囊 HUD：日期/天气/信号/音量/电量/来电/超速 + 翻页时钟 + 车辆数据探测 + 有效期9999/主页换图/自定义显示 + 自动签到）");
+    os_log(gLog, "NinebotEnhance iOS 0.4.3 已加载（小胶囊 HUD：日期/天气/信号/音量/电量/来电/超速 + 翻页时钟 + 车辆数据探测 + 有效期9999/主页换图/自定义显示 + 自动签到）");
 
     // 电量监听 + 定位 + 来电观察，全部在主队列 / 后台队列做，不阻塞加载
     dispatch_async(dispatch_get_main_queue(), ^{
