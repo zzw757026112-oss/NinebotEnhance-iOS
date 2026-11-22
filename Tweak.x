@@ -1675,7 +1675,7 @@ static NSString *gBgImageLoadedPath = nil;
 // 哪个 view 尺寸裁的。只裁不拉伸；换图时 NEClearImageCache 一起清。
 static UIImage *gBgDisplayImage = nil;
 static UIImage *gBgDisplaySource = nil;
-static CGSize gBgDisplayForSize = CGSizeZero;
+static CGSize gBgDisplayForSize = {0, 0};
 
 // 路径没变就用缓存；路径变了/文件没了就重读（失败返回 nil，不崩）
 // 注意：cacheSlot/pathSlot 指向的是全局 strong 变量，形参必须标 __strong，
