@@ -1,5 +1,21 @@
-// NinebotEnhance iOS v0.3.8 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
+// NinebotEnhance iOS v0.3.9 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
 //
+// v0.3.9 改动：三个只改显示、不改真数据的样子货（照搬安卓 ninebot-sign-lsp 的思路）：
+//  1. 服务有效期显示 9999：hook -[UILabel setText:]，文本含“服务有效期”且带日期时，
+//     只把日期部分换成 9999.12.31，其他日期不动。设置里加开关，默认关（key NEValidity9999）。
+//  2. 主页车辆图自定义：九号 App“设备”主页那张车图是远端加载的，hook 图片加载换成用户自选的图。
+//     SDWebImage 存在就 hook UIImageView 的 sd_setImageWithURL:（+ 带 context 的全量变体），
+//     按 URL 特征只拦车辆图；不存在就退回 hook -[UIImageView setImage:]，只在“设备”主页、
+//     图片够大时换。用户选的图存沙盒 Documents/ne-vehicle.png（key NEVehicleImagePath），
+//     没选图时不装钩子、不改动。
+//  3. 主页背景图自定义：和车辆图同一套拦截；“设备”主页那张满屏背景图（车图下面那张）也能换，
+//     存 Documents/ne-bg.png（key NEBackgroundImagePath）。背景若是本地 asset，
+//     再 hook +[UIImage imageNamed:] 按名字匹配（bg/background/banner 等关键字，
+//     匹配不上就不换）。设置里“更换车辆图 / 更换背景图”用 PHPicker 选图（不用相册权限，
+//     不可用时回退 UIImagePickerController），另有“恢复原图 / 恢复原背景”清除。
+//  三个钩子都用 MSHookMessageEx 在运行时装，类/方法不存在只记日志绝不崩；
+//  UILabel setText 是高频调用，开关先走缓存 BOOL 再做字符串匹配，不拖性能。
+//  不碰任何 BLE、车辆写入、签到相关东西。
 // v0.3.8 改动：超速红行改成“请勿超速行驶！”，字比普通行大但绝不超胶囊边框；
 //  超速那一刻中文语音读一次“您已超速行驶，请注意安全”（跟着超速提醒开关走，不另设开关）。
 // v0.3.7 改动：设置页“日期时间”改叫“日期”（时间只在翻页时钟里显示）；和 App 1.3.19 同款。
@@ -136,6 +152,8 @@
 #import <objc/message.h>
 #import <objc/runtime.h>
 #import <substrate.h>
+#import <PhotosUI/PhotosUI.h>
+#import <dlfcn.h>
 // 翻页时钟不依赖任何图片资源（卡片和数字全是运行时画的）。
 // RiderImage.h / RiderMotion.h（v0.2.0 像素骑行小人）已不用，留在仓库里。
 
@@ -225,6 +243,284 @@ static CGFloat NEHUDFontRefPt(void) {
     if (s == 0) return 16;
     if (s == 2) return 24;
     return 20;
+}
+
+// ---------------- v0.3.9：服务有效期 9999 + 主页车辆图/背景图自定义 ----------------
+// 都只改显示，不改真数据。三个钩子都用 MSHookMessageEx 在运行时装：
+// 类/方法不存在时 orig 为 NULL，只记日志绝不崩（shim 的行为，见 substrate_shim.m）。
+// 前向声明：NEKeyWindow 定义在后面（设置按钮那节），这里先声明。
+static UIWindow *NEKeyWindow(void);
+static const char NEPickKindKey = 0;        // 设置页：当前选图是车辆图(0)/背景图(1)
+static const char NEVehicleStatusKey = 0;   // 设置页：车辆图状态 label
+static const char NEBackgroundStatusKey = 0;// 设置页：背景图状态 label
+
+// --- 服务有效期 9999（默认关）---
+static BOOL NEValidity9999(void) {
+    id v = [[NSUserDefaults standardUserDefaults] objectForKey:@"NEValidity9999"];
+    return v ? [v boolValue] : NO;
+}
+// setText 高频调用：开关缓存一份，钩子里先查这个 BOOL 再做字符串匹配
+static BOOL gValidity9999 = NO;
+
+static void (*orig_UILabel_setText)(id, SEL, NSString *);
+static void NE_UILabel_setText(id self, SEL _cmd, NSString *text) {
+    if (gValidity9999 && text.length > 0) {
+        // 快筛：只有含“服务有效期”的 label 才往下走，其余直接原实现
+        NSRange keyRange = [text rangeOfString:@"服务有效期"];
+        if (keyRange.location != NSNotFound) {
+            // 日期只在“服务有效期”后面找，避免换到同一行里别的日期
+            static NSRegularExpression *sDateRe = nil;
+            static dispatch_once_t sOnce;
+            dispatch_once(&sOnce, ^{
+                sDateRe = [NSRegularExpression regularExpressionWithPattern:
+                           @"\\d{4}[.\\-/年]\\d{1,2}[.\\-/月]\\d{1,2}日?"
+                           options:0 error:nil];
+            });
+            if (sDateRe) {
+                NSRange search = NSMakeRange(keyRange.location, text.length - keyRange.location);
+                NSRange m = [sDateRe rangeOfFirstMatchInString:text options:0 range:search];
+                if (m.location != NSNotFound) {
+                    NSString *fixed = [text stringByReplacingCharactersInRange:m
+                                                                    withString:@"9999.12.31"];
+                    orig_UILabel_setText(self, _cmd, fixed);
+                    return;
+                }
+            }
+        }
+    }
+    orig_UILabel_setText(self, _cmd, text);
+}
+
+static BOOL gValidityHookInstalled = NO;
+static void NEInstallValidityHookIfNeeded(void) {
+    if (gValidityHookInstalled || !gValidity9999) return;
+    Class cls = objc_getClass("UILabel");
+    if (!cls || !class_getInstanceMethod(cls, @selector(setText:))) {
+        os_log(gLog, "[V9999] UILabel/setText: 不存在，不装钩子");
+        return;
+    }
+    MSHookMessageEx(cls, @selector(setText:), (IMP)NE_UILabel_setText,
+                    (IMP *)&orig_UILabel_setText);
+    if (!orig_UILabel_setText) {
+        os_log(gLog, "[V9999] UILabel setText 钩子安装失败");
+        return;
+    }
+    gValidityHookInstalled = YES;
+    os_log(gLog, "[V9999] UILabel setText 钩子已装");
+}
+
+// --- 主页车辆图 / 背景图自定义 ---
+static NSString *NEVehicleImagePath(void) {
+    return [[NSUserDefaults standardUserDefaults] stringForKey:@"NEVehicleImagePath"];
+}
+static NSString *NEBackgroundImagePath(void) {
+    return [[NSUserDefaults standardUserDefaults] stringForKey:@"NEBackgroundImagePath"];
+}
+// 高频钩子（setImage:）的快筛缓存：设置页改动时同步更新
+static BOOL gHasVehicleImage = NO;
+static BOOL gHasBgImage = NO;
+
+static NSLock *gImageLock = nil; // %ctor 里建；图片缓存读写用
+static UIImage *gVehicleImage = nil;
+static NSString *gVehicleImageLoadedPath = nil;
+static UIImage *gBgImage = nil;
+static NSString *gBgImageLoadedPath = nil;
+
+// 路径没变就用缓存；路径变了/文件没了就重读（失败返回 nil，不崩）
+static UIImage *NELoadCustomImage(NSString *path, UIImage **cacheSlot, NSString **pathSlot) {
+    if (!path.length) return nil;
+    [gImageLock lock];
+    UIImage *img = nil;
+    if (*cacheSlot && [*pathSlot isEqualToString:path]) {
+        img = *cacheSlot;
+    } else {
+        @try { img = [UIImage imageWithContentsOfFile:path]; } @catch (...) { img = nil; }
+        *cacheSlot = img;
+        *pathSlot = img ? path : nil;
+    }
+    [gImageLock unlock];
+    return img;
+}
+static UIImage *NECustomVehicleImage(void) {
+    return NELoadCustomImage(NEVehicleImagePath(), &gVehicleImage, &gVehicleImageLoadedPath);
+}
+static UIImage *NECustomBackgroundImage(void) {
+    return NELoadCustomImage(NEBackgroundImagePath(), &gBgImage, &gBgImageLoadedPath);
+}
+static void NEClearImageCache(void) {
+    [gImageLock lock];
+    gVehicleImage = nil; gVehicleImageLoadedPath = nil;
+    gBgImage = nil; gBgImageLoadedPath = nil;
+    [gImageLock unlock];
+}
+
+// 是不是“设备”tab（第一个 tab，标题“设备”）：图片只在设备主页换。
+// 只看选中的 tab，不要求是根页面——车辆图/背景图所在的页面就是该 tab 的根页面，
+// 而拦截发生时可能正有 modal（比如设置页）盖在上面。
+static BOOL NEIsDeviceTabSelected(void) {
+    UIWindow *keyWindow = NEKeyWindow();
+    UIViewController *root = keyWindow.rootViewController;
+    while (root.presentedViewController) root = root.presentedViewController;
+    if (![root isKindOfClass:[UITabBarController class]]) return NO;
+    UITabBarController *tab = (UITabBarController *)root;
+    UIViewController *sel = tab.selectedViewController;
+    return [sel.tabBarItem.title isEqualToString:@"设备"] || tab.selectedIndex == 0;
+}
+
+static BOOL NEStringHasAny(NSString *s, NSArray<NSString *> *keys) {
+    for (NSString *k in keys) {
+        if ([s rangeOfString:k].location != NSNotFound) return YES;
+    }
+    return NO;
+}
+
+// SDWebImage 的 URL 判定：满屏大图位 → 背景；小图（图标）直接放行；
+// 其余按 URL 关键字分车辆图 / 背景图。view 的 bounds 在自动布局完成前可能为 0，
+// 那时只按 URL 关键字判定。
+static UIImage *NEImageForSDURL(UIImageView *iv, NSURL *url) {
+    if (!NEIsDeviceTabSelected()) return nil;
+    NSString *u = [[url absoluteString] lowercaseString];
+    if (!u.length) return nil;
+    CGSize vs = iv.bounds.size;
+    CGFloat sw = [UIScreen mainScreen].bounds.size.width;
+    CGFloat sh = [UIScreen mainScreen].bounds.size.height;
+    if (vs.width >= sw * 0.9 && vs.height >= sh * 0.5)
+        return NECustomBackgroundImage();
+    if (vs.width > 0 && vs.width < 150) return nil; // 图标/头像不碰
+    if (NEStringHasAny(u, @[@"vehicle", @"veh", @"car", @"bike", @"scooter",
+                            @"motor", @"m395", @"model"]))
+        return NECustomVehicleImage();
+    if (NEStringHasAny(u, @[@"bg", @"background", @"banner", @"wallpaper", @"theme"]))
+        return NECustomBackgroundImage();
+    return nil;
+}
+
+static void (*orig_sd_setImageWithURL)(id, SEL, NSURL *);
+static void NE_sd_setImageWithURL(id self, SEL _cmd, NSURL *url) {
+    if (url && (gHasVehicleImage || gHasBgImage)) {
+        UIImage *custom = NEImageForSDURL((UIImageView *)self, url);
+        if (custom) {
+            // setImage: 兜底钩子与 SDWebImage 钩子互斥安装，这里直接调不会递归
+            [(UIImageView *)self setImage:custom];
+            return;
+        }
+    }
+    orig_sd_setImageWithURL(self, _cmd, url);
+}
+
+// SDWebImage 5.x 全量变体（带 context 的是核心入口，带 placeholder 的便捷方法最终也走它）
+static void (*orig_sd_setImageWithURL_ctx)(id, SEL, NSURL *, id, NSUInteger, id, id, id);
+static void NE_sd_setImageWithURL_ctx(id self, SEL _cmd, NSURL *url, id placeholder,
+                                      NSUInteger options, id context, id progress, id completed) {
+    if (url && (gHasVehicleImage || gHasBgImage)) {
+        UIImage *custom = NEImageForSDURL((UIImageView *)self, url);
+        if (custom) {
+            [(UIImageView *)self setImage:custom];
+            if (completed) {
+                void (^cb)(id, id, NSInteger, id) = completed;
+                @try { cb(custom, nil, 0, url); } @catch (...) {}
+            }
+            return;
+        }
+    }
+    orig_sd_setImageWithURL_ctx(self, _cmd, url, placeholder, options, context, progress, completed);
+}
+
+// 兜底：无 SDWebImage 时 hook -[UIImageView setImage:]，按图片尺寸分车辆图/背景图
+static void (*orig_UIImageView_setImage)(id, SEL, UIImage *);
+static void NE_UIImageView_setImage(id self, SEL _cmd, UIImage *image) {
+    if (image && (gHasVehicleImage || gHasBgImage)) {
+        CGSize sz = image.size;
+        CGFloat sw = [UIScreen mainScreen].bounds.size.width;
+        CGFloat sh = [UIScreen mainScreen].bounds.size.height;
+        UIImage *custom = nil;
+        if (sz.width >= sw * 0.9 && sz.height >= sh * 0.5) {
+            custom = NECustomBackgroundImage(); // 满屏大图 → 背景
+        } else if (sz.width >= 200) {
+            custom = NECustomVehicleImage();    // 大图 → 车辆图；小图不碰
+        }
+        if (custom && NEIsDeviceTabSelected()) {
+            orig_UIImageView_setImage(self, _cmd, custom);
+            return;
+        }
+    }
+    orig_UIImageView_setImage(self, _cmd, image);
+}
+
+// 本地 asset 兜底：+[UIImage imageNamed:]，按名字关键字匹配。
+// 名字是运行时实际看到的才准：命中关键字的名字只记一次日志，方便以后收紧。
+static id (*orig_UIImage_imageNamed)(id, SEL, NSString *);
+static id NE_UIImage_imageNamed(id self, SEL _cmd, NSString *name) {
+    id img = orig_UIImage_imageNamed(self, _cmd, name);
+    if (!name.length || (!gHasVehicleImage && !gHasBgImage)) return img;
+    NSString *lower = [name lowercaseString];
+    BOOL isBg = NEStringHasAny(lower, @[@"bg", @"background", @"banner"]);
+    BOOL isVeh = !isBg && NEStringHasAny(lower, @[@"vehicle", @"car", @"bike",
+                                                  @"scooter", @"motor", @"m3"]);
+    if (!isBg && !isVeh) return img;
+    // 只在设备 tab 换：imageNamed 可能在后台线程调，同步回主线程查 tab
+    __block BOOL onDeviceTab = YES;
+    if ([NSThread isMainThread]) {
+        onDeviceTab = NEIsDeviceTabSelected();
+    } else {
+        dispatch_sync(dispatch_get_main_queue(), ^{ onDeviceTab = NEIsDeviceTabSelected(); });
+    }
+    if (!onDeviceTab) return img;
+    UIImage *custom = isBg ? NECustomBackgroundImage() : NECustomVehicleImage();
+    if (!custom) return img;
+    static NSMutableSet *sLoggedNames = nil;
+    static dispatch_once_t sOnce;
+    dispatch_once(&sOnce, ^{ sLoggedNames = [NSMutableSet new]; });
+    @synchronized (sLoggedNames) {
+        if (![sLoggedNames containsObject:name]) {
+            [sLoggedNames addObject:name];
+            os_log(gLog, "[IMG] imageNamed 命中 %{public}@ → 换成自定义%{public}@",
+                   name, isBg ? @"背景图" : @"车辆图");
+        }
+    }
+    return custom;
+}
+
+static BOOL gImageHooksInstalled = NO;
+static void NEInstallImageHooksIfNeeded(void) {
+    if (gImageHooksInstalled) return;
+    Class iv = objc_getClass("UIImageView");
+    if (!iv) {
+        os_log(gLog, "[IMG] UIImageView 类未找到，不装图片钩子");
+        return;
+    }
+    if (class_getInstanceMethod(iv, @selector(sd_setImageWithURL:))) {
+        MSHookMessageEx(iv, @selector(sd_setImageWithURL:),
+                        (IMP)NE_sd_setImageWithURL, (IMP *)&orig_sd_setImageWithURL);
+        if (!orig_sd_setImageWithURL) {
+            os_log(gLog, "[IMG] sd_setImageWithURL: 钩子安装失败");
+        } else {
+            os_log(gLog, "[IMG] SDWebImage 钩子已装（sd_setImageWithURL:）");
+        }
+        SEL ctxSel = @selector(sd_setImageWithURL:placeholderImage:options:context:progress:completed:);
+        if (class_getInstanceMethod(iv, ctxSel)) {
+            MSHookMessageEx(iv, ctxSel, (IMP)NE_sd_setImageWithURL_ctx,
+                            (IMP *)&orig_sd_setImageWithURL_ctx);
+            if (orig_sd_setImageWithURL_ctx)
+                os_log(gLog, "[IMG] SDWebImage 钩子已装（sd_setImageWithURL:…context:）");
+        }
+    } else {
+        MSHookMessageEx(iv, @selector(setImage:),
+                        (IMP)NE_UIImageView_setImage, (IMP *)&orig_UIImageView_setImage);
+        if (!orig_UIImageView_setImage) {
+            os_log(gLog, "[IMG] UIImageView setImage: 钩子安装失败");
+        } else {
+            os_log(gLog, "[IMG] 无 SDWebImage，改用 UIImageView setImage: 兜底钩子");
+        }
+    }
+    Class ui = objc_getClass("UIImage");
+    if (ui && class_getClassMethod(ui, @selector(imageNamed:))) {
+        MSHookMessageEx(object_getClass(ui), @selector(imageNamed:),
+                        (IMP)NE_UIImage_imageNamed, (IMP *)&orig_UIImage_imageNamed);
+        if (orig_UIImage_imageNamed)
+            os_log(gLog, "[IMG] UIImage imageNamed: 钩子已装（本地 asset 兜底）");
+    }
+    gImageHooksInstalled = YES;
 }
 
 // ---------------- 天气（Open-Meteo，免费、无 key）----------------
@@ -1372,6 +1668,7 @@ static const char NEHUDButtonKey = 0;
 static const char NESpeedLimitValueKey = 0;
 
 @interface NEHUDSettingsVC : UIViewController
+    <PHPickerViewControllerDelegate, UIImagePickerControllerDelegate, UINavigationControllerDelegate>
 @end
 
 @interface NEHUDButtonHandler : NSObject
@@ -1572,6 +1869,22 @@ static void NECheckSettingsButton(void) {
     [stack addArrangedSubview:[self switchRow:@"超速提醒" key:@"NEHUDSpeedAlert" on:NEHUDSpeedAlert()]];
     [stack addArrangedSubview:[self speedLimitRow]];
 
+    // v0.3.9：只改显示的样子货（不改真数据）
+    [stack addArrangedSubview:[self sectionLabel:@"显示"]];
+    [stack addArrangedSubview:[self switchRow:@"服务有效期 9999" key:@"NEValidity9999" on:NEValidity9999()]];
+    [stack addArrangedSubview:[self sectionLabel:@"主页车辆图"]];
+    [stack addArrangedSubview:[self imagePickRow:@"更换车辆图" kind:0]];
+    [stack addArrangedSubview:[self imageClearRow:@"恢复原图" kind:0]];
+    [stack addArrangedSubview:[self sectionLabel:@"主页背景图"]];
+    [stack addArrangedSubview:[self imagePickRow:@"更换背景图" kind:1]];
+    [stack addArrangedSubview:[self imageClearRow:@"恢复原背景" kind:1]];
+    UILabel *imgNote = [UILabel new];
+    imgNote.text = @"换图只换“设备”主页上的显示，不改车辆数据。选完回设备页就能看到；如果还是原图，切换一下 tab 或重启九号 App（图片可能已被缓存）。";
+    imgNote.font = [UIFont systemFontOfSize:13];
+    imgNote.textColor = [UIColor secondaryLabelColor];
+    imgNote.numberOfLines = 0;
+    [stack addArrangedSubview:imgNote];
+
     UILabel *note = [UILabel new];
     note.text = @"提示：仪表右上角是车子自己的表盘区，HUD 放右上会被盖住一部分，一般用右下。";
     note.font = [UIFont systemFontOfSize:13];
@@ -1619,6 +1932,11 @@ static void NECheckSettingsButton(void) {
     // 超速提醒或翻页时钟开关变化时，立刻切换定位模式（连续定位开/关）
     if ([key isEqualToString:@"NEHUDSpeedAlert"] ||
         [key isEqualToString:@"NEHUDShowSlot"]) NEApplySpeedLocationMode();
+    // v0.3.9：有效期 9999 开关——同步缓存并按需装钩子（关掉后钩子留着但直接走原实现）
+    if ([key isEqualToString:@"NEValidity9999"]) {
+        gValidity9999 = sw.isOn;
+        if (sw.isOn) NEInstallValidityHookIfNeeded();
+    }
 }
 
 // 限速行：左边“限速”+ 中间值 + 右边步进器（30–120，每 5 一档）
@@ -1670,6 +1988,176 @@ static void NECheckSettingsButton(void) {
 
 - (void)fontChanged:(UISegmentedControl *)seg {
     [[NSUserDefaults standardUserDefaults] setInteger:seg.selectedSegmentIndex forKey:@"NEHUDFontSize"];
+}
+
+// ---------------- v0.3.9：主页车辆图 / 背景图自定义 ----------------
+// kind：0 车辆图，1 背景图。选图用 PHPicker（iOS 14+，不用相册权限）；
+// 拿不到 PHPicker 类时回退 UIImagePickerController（走系统常规相册授权）。
+- (UIView *)imagePickRow:(NSString *)title kind:(NSInteger)kind {
+    UIView *row = [UIView new];
+    UILabel *label = [UILabel new];
+    label.text = title;
+    label.font = [UIFont systemFontOfSize:16];
+    label.translatesAutoresizingMaskIntoConstraints = NO;
+    UILabel *status = [UILabel new];
+    status.font = [UIFont systemFontOfSize:13];
+    status.textColor = [UIColor secondaryLabelColor];
+    status.translatesAutoresizingMaskIntoConstraints = NO;
+    UIButton *btn = [UIButton buttonWithType:UIButtonTypeSystem];
+    [btn setTitle:@"选择" forState:UIControlStateNormal];
+    btn.titleLabel.font = [UIFont systemFontOfSize:16];
+    btn.tag = kind;
+    btn.translatesAutoresizingMaskIntoConstraints = NO;
+    [btn addTarget:self action:@selector(pickImageTapped:)
+        forControlEvents:UIControlEventTouchUpInside];
+    [row addSubview:label];
+    [row addSubview:status];
+    [row addSubview:btn];
+    [NSLayoutConstraint activateConstraints:@[
+        [label.leadingAnchor constraintEqualToAnchor:row.leadingAnchor],
+        [label.centerYAnchor constraintEqualToAnchor:row.centerYAnchor],
+        [btn.trailingAnchor constraintEqualToAnchor:row.trailingAnchor],
+        [btn.centerYAnchor constraintEqualToAnchor:row.centerYAnchor],
+        [status.trailingAnchor constraintEqualToAnchor:btn.leadingAnchor constant:-12],
+        [status.centerYAnchor constraintEqualToAnchor:row.centerYAnchor],
+        [row.heightAnchor constraintEqualToConstant:32]
+    ]];
+    const char *key = (kind == 0) ? &NEVehicleStatusKey : &NEBackgroundStatusKey;
+    objc_setAssociatedObject(self, key, status, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    [self refreshImageStatus];
+    return row;
+}
+
+- (UIView *)imageClearRow:(NSString *)title kind:(NSInteger)kind {
+    UIView *row = [UIView new];
+    UILabel *label = [UILabel new];
+    label.text = title;
+    label.font = [UIFont systemFontOfSize:16];
+    label.translatesAutoresizingMaskIntoConstraints = NO;
+    UIButton *btn = [UIButton buttonWithType:UIButtonTypeSystem];
+    [btn setTitle:@"恢复" forState:UIControlStateNormal];
+    btn.titleLabel.font = [UIFont systemFontOfSize:16];
+    btn.tag = kind;
+    btn.translatesAutoresizingMaskIntoConstraints = NO;
+    [btn addTarget:self action:@selector(clearImageTapped:)
+        forControlEvents:UIControlEventTouchUpInside];
+    [row addSubview:label];
+    [row addSubview:btn];
+    [NSLayoutConstraint activateConstraints:@[
+        [label.leadingAnchor constraintEqualToAnchor:row.leadingAnchor],
+        [label.centerYAnchor constraintEqualToAnchor:row.centerYAnchor],
+        [btn.trailingAnchor constraintEqualToAnchor:row.trailingAnchor],
+        [btn.centerYAnchor constraintEqualToAnchor:row.centerYAnchor],
+        [row.heightAnchor constraintEqualToConstant:32]
+    ]];
+    return row;
+}
+
+- (void)refreshImageStatus {
+    UILabel *v = objc_getAssociatedObject(self, &NEVehicleStatusKey);
+    if (v) v.text = NEVehicleImagePath().length ? @"已自定义" : @"原图";
+    UILabel *b = objc_getAssociatedObject(self, &NEBackgroundStatusKey);
+    if (b) b.text = NEBackgroundImagePath().length ? @"已自定义" : @"原图";
+}
+
+- (void)pickImageTapped:(UIButton *)sender {
+    NSInteger kind = sender.tag;
+    objc_setAssociatedObject(self, &NEPickKindKey, @(kind),
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    Class pickerCls = NSClassFromString(@"PHPickerViewController");
+    if (pickerCls) {
+        PHPickerConfiguration *config = [[PHPickerConfiguration alloc] init];
+        config.selectionLimit = 1;
+        config.filter = [PHPickerFilter imagesFilter];
+        PHPickerViewController *picker =
+            [[PHPickerViewController alloc] initWithConfiguration:config];
+        picker.delegate = self;
+        [self presentViewController:picker animated:YES completion:nil];
+    } else {
+        // 回退：UIImagePickerController（系统常规相册授权流程）
+        UIImagePickerController *picker = [[UIImagePickerController alloc] init];
+        picker.sourceType = UIImagePickerControllerSourceTypePhotoLibrary;
+        picker.delegate = self;
+        [self presentViewController:picker animated:YES completion:nil];
+    }
+}
+
+- (void)clearImageTapped:(UIButton *)sender {
+    NSInteger kind = sender.tag;
+    NSString *key = (kind == 0) ? @"NEVehicleImagePath" : @"NEBackgroundImagePath";
+    NSString *path = [[NSUserDefaults standardUserDefaults] stringForKey:key];
+    if (path.length) {
+        [[NSFileManager defaultManager] removeItemAtPath:path error:nil];
+        [[NSUserDefaults standardUserDefaults] removeObjectForKey:key];
+    }
+    if (kind == 0) gHasVehicleImage = NO; else gHasBgImage = NO;
+    NEClearImageCache();
+    [self refreshImageStatus];
+    os_log(gLog, "[IMG] 已恢复原%{public}@", kind == 0 ? @"车辆图" : @"背景图");
+}
+
+- (void)savePickedImage:(UIImage *)img kind:(NSInteger)kind {
+    if (!img) return;
+    NSString *name = (kind == 0) ? @"ne-vehicle.png" : @"ne-bg.png";
+    NSString *key = (kind == 0) ? @"NEVehicleImagePath" : @"NEBackgroundImagePath";
+    NSString *doc = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory,
+                                                        NSUserDomainMask, YES).firstObject;
+    if (!doc) return;
+    NSString *path = [doc stringByAppendingPathComponent:name];
+    NSData *data = [img pngData];
+    if (!data) {
+        os_log(gLog, "[IMG] 选图转 PNG 失败");
+        return;
+    }
+    NSError *err = nil;
+    if (![data writeToFile:path options:NSDataWritingAtomic error:&err]) {
+        os_log(gLog, "[IMG] 选图保存失败 %{public}@",
+               err.localizedDescription ?: @"(未知)");
+        return;
+    }
+    [[NSUserDefaults standardUserDefaults] setObject:path forKey:key];
+    if (kind == 0) gHasVehicleImage = YES; else gHasBgImage = YES;
+    NEClearImageCache();
+    NEInstallImageHooksIfNeeded();
+    [self refreshImageStatus];
+    os_log(gLog, "[IMG] 已保存自定义%{public}@（%ldx%ld），回设备页可见",
+           kind == 0 ? @"车辆图" : @"背景图",
+           (long)img.size.width, (long)img.size.height);
+}
+
+// PHPicker 回调（主线程）
+- (void)picker:(PHPickerViewController *)picker
+    didFinishPicking:(NSArray<PHPickerResult *> *)results {
+    [picker dismissViewControllerAnimated:YES completion:nil];
+    PHPickerResult *r = results.firstObject;
+    if (!r) return;
+    NSNumber *kindNum = objc_getAssociatedObject(self, &NEPickKindKey);
+    NSInteger kind = kindNum ? kindNum.integerValue : 0;
+    NSItemProvider *provider = r.itemProvider;
+    if (![provider canLoadObjectOfClass:[UIImage class]]) return;
+    __weak typeof(self) weakSelf = self;
+    [provider loadObjectOfClass:[UIImage class]
+              completionHandler:^(__kindof id<NSItemProviderReading> _Nullable obj,
+                                  NSError * _Nullable error) {
+        if (![obj isKindOfClass:[UIImage class]]) return;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [weakSelf savePickedImage:(UIImage *)obj kind:kind];
+        });
+    }];
+}
+
+// UIImagePickerController 回调（回退路径）
+- (void)imagePickerController:(UIImagePickerController *)picker
+    didFinishPickingMediaWithInfo:(NSDictionary<UIImagePickerControllerInfoKey, id> *)info {
+    UIImage *img = info[UIImagePickerControllerOriginalImage];
+    NSNumber *kindNum = objc_getAssociatedObject(self, &NEPickKindKey);
+    NSInteger kind = kindNum ? kindNum.integerValue : 0;
+    [picker dismissViewControllerAnimated:YES completion:nil];
+    if (img) [self savePickedImage:img kind:kind];
+}
+
+- (void)imagePickerControllerDidCancel:(UIImagePickerController *)picker {
+    [picker dismissViewControllerAnimated:YES completion:nil];
 }
 
 - (void)closeTapped {
@@ -2130,6 +2618,16 @@ static void NEProbeStart(void) {
     gLog      = os_log_create("com.user.ninebotenhance", "general");
     gLock     = [NSLock new];
     gDataLock = [NSLock new];
+    gImageLock = [NSLock new];
+
+    // v0.3.9：有效期 9999 开关开着就装 UILabel 钩子；主页已选自定义图就装图片钩子
+    gValidity9999 = NEValidity9999();
+    if (gValidity9999) NEInstallValidityHookIfNeeded();
+    gHasVehicleImage = NEVehicleImagePath().length > 0;
+    gHasBgImage = NEBackgroundImagePath().length > 0;
+    if (gHasVehicleImage || gHasBgImage) NEInstallImageHooksIfNeeded();
+    // PHPicker（PhotosUI）运行时加载：dlopen 失败也不影响，回退 UIImagePickerController
+    dlopen("/System/Library/Frameworks/PhotosUI.framework/PhotosUI", RTLD_NOW | RTLD_LOCAL);
 
     // 天气：恢复上次拉到的结果（2 小时内直接用，冷启动不用等定位+拉取；
     // 超过 20 分钟的照常在后台刷新，见 RefreshWeatherIfNeeded）
@@ -2161,7 +2659,7 @@ static void NEProbeStart(void) {
                hasSel ? "YES" : "NO");
     }
 
-    os_log(gLog, "NinebotEnhance iOS 0.3.8 已加载（小胶囊 HUD：日期/天气/信号/音量/电量/来电/超速 + 翻页时钟 + 车辆数据探测）");
+    os_log(gLog, "NinebotEnhance iOS 0.3.9 已加载（小胶囊 HUD：日期/天气/信号/音量/电量/来电/超速 + 翻页时钟 + 车辆数据探测 + 有效期9999/主页换图）");
 
     // 电量监听 + 定位 + 来电观察，全部在主队列 / 后台队列做，不阻塞加载
     dispatch_async(dispatch_get_main_queue(), ^{
