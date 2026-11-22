@@ -16,6 +16,13 @@
 //  三个钩子都用 MSHookMessageEx 在运行时装，类/方法不存在只记日志绝不崩；
 //  UILabel setText 是高频调用，开关先走缓存 BOOL 再做字符串匹配，不拖性能。
 //  不碰任何 BLE、车辆写入、签到相关东西。
+// v0.3.9 追加：五个自定义显示项（N币余额 / 总里程 / 等级 / 称号 / 连续签到天数，
+//  每项“开关 + 输入框”，用户自己填想显示的值，开关开就按填的值显示，关就恢复原样；
+//  都走已有的 -[UILabel setText:] 钩子，不另装。N币是单独数字最难认，
+//  用兄弟视图里有没有“N币”label + 位置确认，认不出宁可不换）
+//  + 设置页分两组折叠（“美化娱乐”：9999/换图/五个自定义项；“导航增强”：以前的
+//  HUD/翻页时钟/超速等；进设置页默认两组都折叠，折叠状态不持久化）
+//  + 入口按钮“HUD设置”改叫“Ninebot pro+”（只改标题，位置和出现逻辑不动）。
 // v0.3.8 改动：超速红行改成“请勿超速行驶！”，字比普通行大但绝不超胶囊边框；
 //  超速那一刻中文语音读一次“您已超速行驶，请注意安全”（跟着超速提醒开关走，不另设开关）。
 // v0.3.7 改动：设置页“日期时间”改叫“日期”（时间只在翻页时钟里显示）；和 App 1.3.19 同款。
@@ -263,50 +270,180 @@ static BOOL NEValidity9999(void) {
 static BOOL gValidity9999 = NO;
 
 static void (*orig_UILabel_setText)(id, SEL, NSString *);
+
+// --- v0.3.9 追加：五个自定义显示项（开关 + 输入框，用户自己填值）---
+// 匹配先快后慢：每个开关先走缓存 BOOL，值为空时也不换。
+static BOOL NEBoolDefault(NSString *key) {
+    id v = [[NSUserDefaults standardUserDefaults] objectForKey:key];
+    return v ? [v boolValue] : NO;
+}
+static BOOL gNCoins = NO, gMileage = NO, gLevel = NO, gTitle = NO, gSignDays = NO;
+static NSString *gNCoinsValue = nil, *gMileageValue = nil, *gLevelValue = nil,
+                *gTitleValue = nil, *gSignDaysValue = nil;
+static void NESyncCustomDisplayCache(void) {
+    NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
+    gNCoins = NEBoolDefault(@"NENCoins");
+    gMileage = NEBoolDefault(@"NEMileage");
+    gLevel = NEBoolDefault(@"NELevel");
+    gTitle = NEBoolDefault(@"NETitle");
+    gSignDays = NEBoolDefault(@"NESignDays");
+    gNCoinsValue = [d stringForKey:@"NENCoinsValue"];
+    gMileageValue = [d stringForKey:@"NEMileageValue"];
+    gLevelValue = [d stringForKey:@"NELevelValue"];
+    gTitleValue = [d stringForKey:@"NETitleValue"];
+    gSignDaysValue = [d stringForKey:@"NESignDaysValue"];
+}
+
+// N币是单独一个数字（如 124），最难认：要求兄弟视图里有“N币”label，
+// 且它在数字 label 正下方相邻（同一列）、横向重叠；frame 还没布局出来时
+// （都是 CGRectZero）退回数一数：父视图里只有这一个纯数字 label 才认。
+// 认不出就返回 NO，宁可不换，绝不能把别处数字（创作/关注/粉丝）换了。
+static BOOL NEIsNCoinsNumberLabel(UILabel *label) {
+    NSString *t = label.text;
+    if (!t.length) return NO;
+    static NSRegularExpression *sNumRe = nil;
+    static dispatch_once_t sOnce;
+    dispatch_once(&sOnce, ^{
+        sNumRe = [NSRegularExpression regularExpressionWithPattern:@"^[\\d,]+$"
+                                                           options:0 error:nil];
+    });
+    if (!sNumRe ||
+        [sNumRe numberOfMatchesInString:t options:0 range:NSMakeRange(0, t.length)] == 0)
+        return NO;
+    UIView *sup = label.superview;
+    if (!sup) return NO;
+    UILabel *ncoin = nil;
+    NSInteger numCount = 0;
+    for (UIView *sib in sup.subviews) {
+        if (![sib isKindOfClass:[UILabel class]]) continue;
+        UILabel *sl = (UILabel *)sib;
+        if (sl == label) { numCount++; continue; }
+        if ([sl.text rangeOfString:@"N币"].location != NSNotFound) ncoin = sl;
+        else if (sl.text.length &&
+                 [sNumRe numberOfMatchesInString:sl.text options:0
+                                           range:NSMakeRange(0, sl.text.length)] > 0)
+            numCount++;
+    }
+    if (!ncoin) return NO;
+    BOOL framesLaidOut = !CGRectIsEmpty(label.frame) && !CGRectIsEmpty(ncoin.frame);
+    if (framesLaidOut) {
+        // “N币”在数字正下方相邻，横向重叠过半
+        CGFloat top = CGRectGetMinY(ncoin.frame);
+        CGFloat bottom = CGRectGetMaxY(label.frame);
+        if (top < bottom - 4 || top > bottom + 60) return NO;
+        CGFloat ox = MIN(CGRectGetMaxX(ncoin.frame), CGRectGetMaxX(label.frame))
+                   - MAX(CGRectGetMinX(ncoin.frame), CGRectGetMinX(label.frame));
+        CGFloat w = MIN(CGRectGetWidth(ncoin.frame), CGRectGetWidth(label.frame));
+        return w > 0 && ox > w * 0.5;
+    }
+    return numCount <= 1; // 还没布局：父视图里只有这一个纯数字 label 才认
+}
+
 static void NE_UILabel_setText(id self, SEL _cmd, NSString *text) {
-    if (gValidity9999 && text.length > 0) {
-        // 快筛：只有含“服务有效期”的 label 才往下走，其余直接原实现
-        NSRange keyRange = [text rangeOfString:@"服务有效期"];
-        if (keyRange.location != NSNotFound) {
-            // 日期只在“服务有效期”后面找，避免换到同一行里别的日期
-            static NSRegularExpression *sDateRe = nil;
-            static dispatch_once_t sOnce;
-            dispatch_once(&sOnce, ^{
-                sDateRe = [NSRegularExpression regularExpressionWithPattern:
-                           @"\\d{4}[.\\-/年]\\d{1,2}[.\\-/月]\\d{1,2}日?"
+    if (text.length > 0) {
+        // 1. 服务有效期 9999
+        if (gValidity9999) {
+            // 快筛：只有含“服务有效期”的 label 才往下走，其余直接原实现
+            NSRange keyRange = [text rangeOfString:@"服务有效期"];
+            if (keyRange.location != NSNotFound) {
+                // 日期只在“服务有效期”后面找，避免换到同一行里别的日期
+                static NSRegularExpression *sDateRe = nil;
+                static dispatch_once_t sOnce;
+                dispatch_once(&sOnce, ^{
+                    sDateRe = [NSRegularExpression regularExpressionWithPattern:
+                               @"\\d{4}[.\\-/年]\\d{1,2}[.\\-/月]\\d{1,2}日?"
+                               options:0 error:nil];
+                });
+                if (sDateRe) {
+                    NSRange search = NSMakeRange(keyRange.location, text.length - keyRange.location);
+                    NSRange m = [sDateRe rangeOfFirstMatchInString:text options:0 range:search];
+                    if (m.location != NSNotFound) {
+                        NSString *fixed = [text stringByReplacingCharactersInRange:m
+                                                                        withString:@"9999.12.31"];
+                        orig_UILabel_setText(self, _cmd, fixed);
+                        return;
+                    }
+                }
+            }
+        }
+        // 2. 总里程：整行就是数字+km（如 35624.6 km）→ 整行换成用户填的值（含单位一起填）。
+        // “60 km/h”这种带 /h 的不匹配（正则要求行尾就是 km），不会误换。
+        if (gMileage && gMileageValue.length > 0 &&
+            [text rangeOfString:@"km"].location != NSNotFound) {
+            static NSRegularExpression *sMileRe = nil;
+            static dispatch_once_t sMileOnce;
+            dispatch_once(&sMileOnce, ^{
+                sMileRe = [NSRegularExpression regularExpressionWithPattern:
+                           @"^\\s*[\\d,]+(\\.\\d+)?\\s*km\\s*$"
                            options:0 error:nil];
             });
-            if (sDateRe) {
-                NSRange search = NSMakeRange(keyRange.location, text.length - keyRange.location);
-                NSRange m = [sDateRe rangeOfFirstMatchInString:text options:0 range:search];
-                if (m.location != NSNotFound) {
-                    NSString *fixed = [text stringByReplacingCharactersInRange:m
-                                                                    withString:@"9999.12.31"];
+            if (sMileRe &&
+                [sMileRe numberOfMatchesInString:text options:0
+                                           range:NSMakeRange(0, text.length)] > 0) {
+                orig_UILabel_setText(self, _cmd, gMileageValue);
+                return;
+            }
+        }
+        // 3. 等级：Lv. 开头（如 Lv.8）→ 整行换成用户填的值（如 Lv.99）
+        if (gLevel && gLevelValue.length > 0 && [text hasPrefix:@"Lv."]) {
+            orig_UILabel_setText(self, _cmd, gLevelValue);
+            return;
+        }
+        // 4. 称号：正好是“暂无称号”→ 换成用户填的值
+        if (gTitle && gTitleValue.length > 0 && [text isEqualToString:@"暂无称号"]) {
+            orig_UILabel_setText(self, _cmd, gTitleValue);
+            return;
+        }
+        // 5. 连续签到天数：含“连续签到”且带天数（如 已连续签到3天）→ 只换其中的数字，保留句式
+        if (gSignDays && gSignDaysValue.length > 0 &&
+            [text rangeOfString:@"连续签到"].location != NSNotFound) {
+            static NSRegularExpression *sDayRe = nil;
+            static dispatch_once_t sDayOnce;
+            dispatch_once(&sDayOnce, ^{
+                sDayRe = [NSRegularExpression regularExpressionWithPattern:
+                          @"连续签到\\D*(\\d+)\\D*天"
+                          options:0 error:nil];
+            });
+            if (sDayRe) {
+                NSTextCheckingResult *m = [sDayRe firstMatchInString:text options:0
+                                                                range:NSMakeRange(0, text.length)];
+                if (m && m.numberOfRanges > 1) {
+                    NSString *fixed = [text stringByReplacingCharactersInRange:[m rangeAtIndex:1]
+                                                                    withString:gSignDaysValue];
                     orig_UILabel_setText(self, _cmd, fixed);
                     return;
                 }
             }
         }
+        // 6. N币余额：单独数字，兄弟视图确认，认不出不换
+        if (gNCoins && gNCoinsValue.length > 0 &&
+            [self isKindOfClass:[UILabel class]] &&
+            NEIsNCoinsNumberLabel((UILabel *)self)) {
+            orig_UILabel_setText(self, _cmd, gNCoinsValue);
+            return;
+        }
     }
     orig_UILabel_setText(self, _cmd, text);
 }
 
-static BOOL gValidityHookInstalled = NO;
-static void NEInstallValidityHookIfNeeded(void) {
-    if (gValidityHookInstalled || !gValidity9999) return;
+// UILabel setText 钩子由 9999 有效期和五个自定义项共用，只装一次。
+static BOOL gLabelHookInstalled = NO;
+static void NEInstallLabelHookIfNeeded(void) {
+    if (gLabelHookInstalled) return;
+    if (!gValidity9999 && !gNCoins && !gMileage && !gLevel && !gTitle && !gSignDays) return;
     Class cls = objc_getClass("UILabel");
     if (!cls || !class_getInstanceMethod(cls, @selector(setText:))) {
-        os_log(gLog, "[V9999] UILabel/setText: 不存在，不装钩子");
+        os_log(gLog, "[LBL] UILabel/setText: 不存在，不装钩子");
         return;
     }
     MSHookMessageEx(cls, @selector(setText:), (IMP)NE_UILabel_setText,
                     (IMP *)&orig_UILabel_setText);
     if (!orig_UILabel_setText) {
-        os_log(gLog, "[V9999] UILabel setText 钩子安装失败");
+        os_log(gLog, "[LBL] UILabel setText 钩子安装失败");
         return;
     }
-    gValidityHookInstalled = YES;
-    os_log(gLog, "[V9999] UILabel setText 钩子已装");
+    gLabelHookInstalled = YES;
+    os_log(gLog, "[LBL] UILabel setText 钩子已装");
 }
 
 // --- 主页车辆图 / 背景图自定义 ---
@@ -1657,7 +1794,7 @@ static void NoteFrame(size_t w, size_t h) {
 }
 
 // ---------------- HUD 设置界面 ----------------
-// 九号 App 的“我的”页右上角会出现一个“HUD设置”按钮。
+// 九号 App 的“我的”页右上角会出现一个“Ninebot pro+”按钮。
 // 找页面的办法：每 3 秒看一次最上层 ViewController，只在“我的”页
 // 显示（NEIsMineRootPage：当前 tab 是“我的”且是根页面；没有 tab
 // bar 时退回类名含 mine）。没匹配到就不出现，设置仍可用 defaults
@@ -1665,6 +1802,8 @@ static void NoteFrame(size_t w, size_t h) {
 // 只是不出按钮。
 
 static const char NEHUDButtonKey = 0;
+static const char NEBeautyGroupKey = 0; // 设置页：“美化娱乐”折叠容器
+static const char NENavGroupKey = 0;    // 设置页：“导航增强”折叠容器
 static const char NESpeedLimitValueKey = 0;
 
 @interface NEHUDSettingsVC : UIViewController
@@ -1776,7 +1915,7 @@ static void NECheckSettingsButton(void) {
     UIButton *btn = [UIButton buttonWithType:UIButtonTypeSystem];
     // contentEdgeInsets 在 iOS 15 已废弃（-Werror 下会编译失败），改用 UIButtonConfiguration（iOS 15+，本工程最低 16.0）。
     UIButtonConfiguration *cfg = [UIButtonConfiguration plainButtonConfiguration];
-    cfg.title = @"HUD设置";
+    cfg.title = @"Ninebot pro+";
     cfg.contentInsets = NSDirectionalEdgeInsetsMake(6, 10, 6, 10);
     cfg.background.backgroundColor = [[UIColor systemBlueColor] colorWithAlphaComponent:0.12];
     cfg.background.cornerRadius = 8;
@@ -1798,7 +1937,7 @@ static void NECheckSettingsButton(void) {
         [btn.topAnchor constraintEqualToAnchor:guide.topAnchor constant:56]
     ]];
     objc_setAssociatedObject(vc, &NEHUDButtonKey, btn, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    os_log(gLog, "[HUD] 已在 %{public}s 上加 HUD设置 按钮", NSStringFromClass([vc class]).UTF8String);
+    os_log(gLog, "[HUD] 已在 %{public}s 上加 Ninebot pro+ 按钮", NSStringFromClass([vc class]).UTF8String);
 }
 
 @implementation NEHUDSettingsVC
@@ -1806,7 +1945,7 @@ static void NECheckSettingsButton(void) {
 - (void)viewDidLoad {
     [super viewDidLoad];
     self.view.backgroundColor = [UIColor systemBackgroundColor];
-    self.title = @"HUD 设置";
+    self.title = @"Ninebot pro+";
     self.navigationItem.rightBarButtonItem =
         [[UIBarButtonItem alloc] initWithTitle:@"关闭" style:UIBarButtonItemStyleDone
                                          target:self action:@selector(closeTapped)];
@@ -1842,55 +1981,84 @@ static void NECheckSettingsButton(void) {
     hint.numberOfLines = 0;
     [stack addArrangedSubview:hint];
 
-    [stack addArrangedSubview:[self switchRow:@"日期" key:@"NEHUDShowDate" on:NEHUDShowDate()]];
-    [stack addArrangedSubview:[self switchRow:@"天气温度" key:@"NEHUDShowWeather" on:NEHUDShowWeather()]];
-    [stack addArrangedSubview:[self switchRow:@"信号（WiFi/5G）" key:@"NEHUDShowSignal" on:NEHUDShowSignal()]];
-    [stack addArrangedSubview:[self switchRow:@"电量" key:@"NEHUDShowBattery" on:NEHUDShowBattery()]];
-    [stack addArrangedSubview:[self switchRow:@"音量" key:@"NEHUDShowVolume" on:NEHUDShowVolume()]];
-    [stack addArrangedSubview:[self switchRow:@"翻页时钟" key:@"NEHUDShowSlot" on:NEHUDShowSlot()]];
+    // 点空白处收起输入框键盘（不拦截其他控件的点击）
+    UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc]
+        initWithTarget:self action:@selector(dismissKeyboard)];
+    tap.cancelsTouchesInView = NO;
+    [self.view addGestureRecognizer:tap];
 
-    [stack addArrangedSubview:[self sectionLabel:@"位置"]];
+    // ---- 美化娱乐组（默认折叠，只改显示不改真数据）----
+    UIStackView *beautyStack = [UIStackView new];
+    beautyStack.axis = UILayoutConstraintAxisVertical;
+    beautyStack.spacing = 18;
+    beautyStack.hidden = YES;
+    objc_setAssociatedObject(self, &NEBeautyGroupKey, beautyStack,
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    [beautyStack addArrangedSubview:[self switchRow:@"服务有效期 9999" key:@"NEValidity9999" on:NEValidity9999()]];
+    [beautyStack addArrangedSubview:[self sectionLabel:@"主页车辆图"]];
+    [beautyStack addArrangedSubview:[self imagePickRow:@"更换车辆图" kind:0]];
+    [beautyStack addArrangedSubview:[self imageClearRow:@"恢复原图" kind:0]];
+    [beautyStack addArrangedSubview:[self sectionLabel:@"主页背景图"]];
+    [beautyStack addArrangedSubview:[self imagePickRow:@"更换背景图" kind:1]];
+    [beautyStack addArrangedSubview:[self imageClearRow:@"恢复原背景" kind:1]];
+    UILabel *imgNote = [UILabel new];
+    imgNote.text = @"换图只换“设备”主页上的显示，不改车辆数据。选完回设备页就能看到；如果还是原图，切换一下 tab 或重启九号 App（图片可能已被缓存）。";
+    imgNote.font = [UIFont systemFontOfSize:13];
+    imgNote.textColor = [UIColor secondaryLabelColor];
+    imgNote.numberOfLines = 0;
+    [beautyStack addArrangedSubview:imgNote];
+    // v0.3.9 追加：五个自定义显示项（开关 + 输入框，自己填想显示的值）
+    NSUserDefaults *defs = [NSUserDefaults standardUserDefaults];
+    [beautyStack addArrangedSubview:[self customDisplayRow:@"N币余额" toggleKey:@"NENCoins" valueKey:@"NENCoinsValue" on:NEBoolDefault(@"NENCoins") value:[defs stringForKey:@"NENCoinsValue"] placeholder:@"如 99999"]];
+    [beautyStack addArrangedSubview:[self customDisplayRow:@"总里程" toggleKey:@"NEMileage" valueKey:@"NEMileageValue" on:NEBoolDefault(@"NEMileage") value:[defs stringForKey:@"NEMileageValue"] placeholder:@"如 99999.9 km"]];
+    [beautyStack addArrangedSubview:[self customDisplayRow:@"等级" toggleKey:@"NELevel" valueKey:@"NELevelValue" on:NEBoolDefault(@"NELevel") value:[defs stringForKey:@"NELevelValue"] placeholder:@"如 Lv.99"]];
+    [beautyStack addArrangedSubview:[self customDisplayRow:@"称号" toggleKey:@"NETitle" valueKey:@"NETitleValue" on:NEBoolDefault(@"NETitle") value:[defs stringForKey:@"NETitleValue"] placeholder:@"如 车神"]];
+    [beautyStack addArrangedSubview:[self customDisplayRow:@"连续签到天数" toggleKey:@"NESignDays" valueKey:@"NESignDaysValue" on:NEBoolDefault(@"NESignDays") value:[defs stringForKey:@"NESignDaysValue"] placeholder:@"如 365"]];
+    [stack addArrangedSubview:[self groupHeader:@"美化娱乐" tag:0]];
+    [stack addArrangedSubview:beautyStack];
+
+    // ---- 导航增强组（默认折叠，以前的 HUD/翻页时钟/超速等功能）----
+    UIStackView *navStack = [UIStackView new];
+    navStack.axis = UILayoutConstraintAxisVertical;
+    navStack.spacing = 18;
+    navStack.hidden = YES;
+    objc_setAssociatedObject(self, &NENavGroupKey, navStack,
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    [navStack addArrangedSubview:[self switchRow:@"日期" key:@"NEHUDShowDate" on:NEHUDShowDate()]];
+    [navStack addArrangedSubview:[self switchRow:@"天气温度" key:@"NEHUDShowWeather" on:NEHUDShowWeather()]];
+    [navStack addArrangedSubview:[self switchRow:@"信号（WiFi/5G）" key:@"NEHUDShowSignal" on:NEHUDShowSignal()]];
+    [navStack addArrangedSubview:[self switchRow:@"电量" key:@"NEHUDShowBattery" on:NEHUDShowBattery()]];
+    [navStack addArrangedSubview:[self switchRow:@"音量" key:@"NEHUDShowVolume" on:NEHUDShowVolume()]];
+    [navStack addArrangedSubview:[self switchRow:@"翻页时钟" key:@"NEHUDShowSlot" on:NEHUDShowSlot()]];
+
+    [navStack addArrangedSubview:[self sectionLabel:@"位置"]];
     UISegmentedControl *pos = [[UISegmentedControl alloc]
         initWithItems:@[ @"右下", @"左下", @"左上", @"右上" ]];
     pos.selectedSegmentIndex = NEHUDPosition();
     [pos addTarget:self action:@selector(positionChanged:)
         forControlEvents:UIControlEventValueChanged];
-    [stack addArrangedSubview:pos];
+    [navStack addArrangedSubview:pos];
 
-    [stack addArrangedSubview:[self sectionLabel:@"字号"]];
+    [navStack addArrangedSubview:[self sectionLabel:@"字号"]];
     UISegmentedControl *fs = [[UISegmentedControl alloc]
         initWithItems:@[ @"小", @"中", @"大" ]];
     CGFloat refPt = NEHUDFontRefPt();
     fs.selectedSegmentIndex = (refPt == 16) ? 0 : ((refPt == 24) ? 2 : 1);
     [fs addTarget:self action:@selector(fontChanged:)
         forControlEvents:UIControlEventValueChanged];
-    [stack addArrangedSubview:fs];
+    [navStack addArrangedSubview:fs];
 
-    [stack addArrangedSubview:[self switchRow:@"超速提醒" key:@"NEHUDSpeedAlert" on:NEHUDSpeedAlert()]];
-    [stack addArrangedSubview:[self speedLimitRow]];
-
-    // v0.3.9：只改显示的样子货（不改真数据）
-    [stack addArrangedSubview:[self sectionLabel:@"显示"]];
-    [stack addArrangedSubview:[self switchRow:@"服务有效期 9999" key:@"NEValidity9999" on:NEValidity9999()]];
-    [stack addArrangedSubview:[self sectionLabel:@"主页车辆图"]];
-    [stack addArrangedSubview:[self imagePickRow:@"更换车辆图" kind:0]];
-    [stack addArrangedSubview:[self imageClearRow:@"恢复原图" kind:0]];
-    [stack addArrangedSubview:[self sectionLabel:@"主页背景图"]];
-    [stack addArrangedSubview:[self imagePickRow:@"更换背景图" kind:1]];
-    [stack addArrangedSubview:[self imageClearRow:@"恢复原背景" kind:1]];
-    UILabel *imgNote = [UILabel new];
-    imgNote.text = @"换图只换“设备”主页上的显示，不改车辆数据。选完回设备页就能看到；如果还是原图，切换一下 tab 或重启九号 App（图片可能已被缓存）。";
-    imgNote.font = [UIFont systemFontOfSize:13];
-    imgNote.textColor = [UIColor secondaryLabelColor];
-    imgNote.numberOfLines = 0;
-    [stack addArrangedSubview:imgNote];
+    [navStack addArrangedSubview:[self switchRow:@"超速提醒" key:@"NEHUDSpeedAlert" on:NEHUDSpeedAlert()]];
+    [navStack addArrangedSubview:[self speedLimitRow]];
 
     UILabel *note = [UILabel new];
     note.text = @"提示：仪表右上角是车子自己的表盘区，HUD 放右上会被盖住一部分，一般用右下。";
     note.font = [UIFont systemFontOfSize:13];
     note.textColor = [UIColor secondaryLabelColor];
     note.numberOfLines = 0;
-    [stack addArrangedSubview:note];
+    [navStack addArrangedSubview:note];
+    [stack addArrangedSubview:[self groupHeader:@"导航增强" tag:1]];
+    [stack addArrangedSubview:navStack];
 }
 
 - (UILabel *)sectionLabel:(NSString *)text {
@@ -1898,6 +2066,90 @@ static void NECheckSettingsButton(void) {
     l.text = text;
     l.font = [UIFont boldSystemFontOfSize:15];
     return l;
+}
+
+// v0.3.9 追加：折叠分组头（标题 + ▸/▾ 箭头），点一下展开/收起。
+// tag：0 美化娱乐，1 导航增强。折叠状态不持久化，每次进设置页默认都折叠。
+- (UIButton *)groupHeader:(NSString *)title tag:(NSInteger)tag {
+    UIButton *btn = [UIButton buttonWithType:UIButtonTypeSystem];
+    [btn setTitle:[NSString stringWithFormat:@"▸ %@", title] forState:UIControlStateNormal];
+    btn.titleLabel.font = [UIFont boldSystemFontOfSize:16];
+    btn.contentHorizontalAlignment = UIControlContentHorizontalAlignmentLeft;
+    btn.tag = tag;
+    [btn addTarget:self action:@selector(groupHeaderTapped:)
+        forControlEvents:UIControlEventTouchUpInside];
+    [btn.heightAnchor constraintEqualToConstant:32].active = YES;
+    return btn;
+}
+
+- (void)groupHeaderTapped:(UIButton *)sender {
+    const char *key = (sender.tag == 0) ? &NEBeautyGroupKey : &NENavGroupKey;
+    UIStackView *container = objc_getAssociatedObject(self, key);
+    if (!container) return;
+    container.hidden = !container.hidden;
+    NSString *title = (sender.tag == 0) ? @"美化娱乐" : @"导航增强";
+    [sender setTitle:[NSString stringWithFormat:@"%@ %@", container.hidden ? @"▸" : @"▾", title]
+            forState:UIControlStateNormal];
+}
+
+// v0.3.9 追加：自定义显示项行——左边标题 + 中间输入框 + 右边开关。
+// 输入框失焦即存 NSUserDefaults；开关走通用的 switchChanged:。
+- (UIView *)customDisplayRow:(NSString *)title toggleKey:(NSString *)toggleKey
+                    valueKey:(NSString *)valueKey on:(BOOL)on value:(NSString *)value
+                 placeholder:(NSString *)placeholder {
+    UIView *row = [UIView new];
+    UILabel *label = [UILabel new];
+    label.text = title;
+    label.font = [UIFont systemFontOfSize:16];
+    label.translatesAutoresizingMaskIntoConstraints = NO;
+    UITextField *field = [UITextField new];
+    field.text = value;
+    field.placeholder = placeholder;
+    field.font = [UIFont systemFontOfSize:15];
+    field.borderStyle = UITextBorderStyleRoundedRect;
+    field.clearButtonMode = UITextFieldViewModeWhileEditing;
+    field.accessibilityIdentifier = valueKey;
+    field.translatesAutoresizingMaskIntoConstraints = NO;
+    [field addTarget:self action:@selector(customValueChanged:)
+        forControlEvents:UIControlEventEditingDidEnd];
+    UISwitch *sw = [UISwitch new];
+    sw.on = on;
+    sw.translatesAutoresizingMaskIntoConstraints = NO;
+    sw.accessibilityIdentifier = toggleKey;
+    [sw addTarget:self action:@selector(switchChanged:)
+        forControlEvents:UIControlEventValueChanged];
+    [row addSubview:label];
+    [row addSubview:field];
+    [row addSubview:sw];
+    [NSLayoutConstraint activateConstraints:@[
+        [label.leadingAnchor constraintEqualToAnchor:row.leadingAnchor],
+        [label.centerYAnchor constraintEqualToAnchor:row.centerYAnchor],
+        [label.widthAnchor constraintEqualToConstant:116],
+        [sw.trailingAnchor constraintEqualToAnchor:row.trailingAnchor],
+        [sw.centerYAnchor constraintEqualToAnchor:row.centerYAnchor],
+        [field.leadingAnchor constraintEqualToAnchor:label.trailingAnchor constant:8],
+        [field.trailingAnchor constraintEqualToAnchor:sw.leadingAnchor constant:-8],
+        [field.centerYAnchor constraintEqualToAnchor:row.centerYAnchor],
+        [row.heightAnchor constraintEqualToConstant:32]
+    ]];
+    return row;
+}
+
+- (void)customValueChanged:(UITextField *)field {
+    NSString *key = field.accessibilityIdentifier;
+    if (key.length == 0) return;
+    NSString *v = field.text ?: @"";
+    if (v.length > 0)
+        [[NSUserDefaults standardUserDefaults] setObject:v forKey:key];
+    else
+        [[NSUserDefaults standardUserDefaults] removeObjectForKey:key];
+    // 空值时开关开也不换（避免显示空白），所以值改完同步一次缓存
+    NESyncCustomDisplayCache();
+    NEInstallLabelHookIfNeeded();
+}
+
+- (void)dismissKeyboard {
+    [self.view endEditing:YES];
 }
 
 - (UIView *)switchRow:(NSString *)title key:(NSString *)key on:(BOOL)on {
@@ -1935,7 +2187,14 @@ static void NECheckSettingsButton(void) {
     // v0.3.9：有效期 9999 开关——同步缓存并按需装钩子（关掉后钩子留着但直接走原实现）
     if ([key isEqualToString:@"NEValidity9999"]) {
         gValidity9999 = sw.isOn;
-        if (sw.isOn) NEInstallValidityHookIfNeeded();
+        if (sw.isOn) NEInstallLabelHookIfNeeded();
+    }
+    // v0.3.9 追加：五个自定义显示项开关——同步缓存并按需装钩子
+    if ([key isEqualToString:@"NENCoins"] || [key isEqualToString:@"NEMileage"] ||
+        [key isEqualToString:@"NELevel"] || [key isEqualToString:@"NETitle"] ||
+        [key isEqualToString:@"NESignDays"]) {
+        NESyncCustomDisplayCache();
+        if (sw.isOn) NEInstallLabelHookIfNeeded();
     }
 }
 
@@ -2620,9 +2879,11 @@ static void NEProbeStart(void) {
     gDataLock = [NSLock new];
     gImageLock = [NSLock new];
 
-    // v0.3.9：有效期 9999 开关开着就装 UILabel 钩子；主页已选自定义图就装图片钩子
+    // v0.3.9：有效期 9999 / 五个自定义显示项——开关开着就装 UILabel 钩子；主页已选自定义图就装图片钩子
     gValidity9999 = NEValidity9999();
-    if (gValidity9999) NEInstallValidityHookIfNeeded();
+    NESyncCustomDisplayCache();
+    if (gValidity9999 || gNCoins || gMileage || gLevel || gTitle || gSignDays)
+        NEInstallLabelHookIfNeeded();
     gHasVehicleImage = NEVehicleImagePath().length > 0;
     gHasBgImage = NEBackgroundImagePath().length > 0;
     if (gHasVehicleImage || gHasBgImage) NEInstallImageHooksIfNeeded();
@@ -2659,7 +2920,7 @@ static void NEProbeStart(void) {
                hasSel ? "YES" : "NO");
     }
 
-    os_log(gLog, "NinebotEnhance iOS 0.3.9 已加载（小胶囊 HUD：日期/天气/信号/音量/电量/来电/超速 + 翻页时钟 + 车辆数据探测 + 有效期9999/主页换图）");
+    os_log(gLog, "NinebotEnhance iOS 0.3.9 已加载（小胶囊 HUD：日期/天气/信号/音量/电量/来电/超速 + 翻页时钟 + 车辆数据探测 + 有效期9999/主页换图/自定义显示）");
 
     // 电量监听 + 定位 + 来电观察，全部在主队列 / 后台队列做，不阻塞加载
     dispatch_async(dispatch_get_main_queue(), ^{
