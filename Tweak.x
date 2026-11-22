@@ -117,6 +117,19 @@
 //  要重查 layer.contents（App 可能把它覆盖回主题图）；③ 新装 CALayer
 //  setContents: 钩子（只对设备根页面满屏 UIImageView 的图层生效），
 //  App 绕开 setImage: 直接写图层内容时在写入时就换掉。
+// v0.3.9 第八修（用户实测 cf438018：主页自定义背景图位置不对，偏上了）：
+//  根因是纵横比——用户背景图是竖图（2160x4790，纵横比 0.45），设备页满屏
+//  view 是 430x521（纵横比 0.825）。插件只换 image 不碰 contentMode，
+//  App 的背景 view 是 scaleAspectFill：原图按宽放大到 430 后高 953pt，
+//  view 只有 521pt，上下各被居中裁掉 ~23%——绿块顶部的白边+圆角被切掉、
+//  卡通底部（Woodstock/足球/脚）被切掉，用户看就是“偏上了”。实测对得上：
+//  居中裁切时绿块底边应在 view y≈139pt，截图 IMG_3925 里正是 141pt。
+//  改：背景图不直接设原图，按 view 纵横比从顶部裁一张显示版（只裁不拉伸，
+//  CGImage 像素裁，不重采样）：绿块带白边+圆角完整留在画面顶部，狗头/主角
+//  也在画面里，满宽显示；卡通最底部本来就放不进 430x521（图比 view 高太多，
+//  填满宽度必然要裁掉一部分），优先保顶部。显示版按（原图对象 + view 尺寸）
+//  缓存，换图时 NEClearImageCache 一起清；“已是自定义图”的放行判定三处
+//  （setImage 分类、CALayer setContents、刷新同步）都认显示版。车辆图不动。
 // v0.3.8 改动：超速红行改成“请勿超速行驶！”，字比普通行大但绝不超胶囊边框；
 //  超速那一刻中文语音读一次“您已超速行驶，请注意安全”（跟着超速提醒开关走，不另设开关）。
 // v0.3.7 改动：设置页“日期时间”改叫“日期”（时间只在翻页时钟里显示）；和 App 1.3.19 同款。
@@ -1658,6 +1671,11 @@ static UIImage *gVehicleImage = nil;
 static NSString *gVehicleImageLoadedPath = nil;
 static UIImage *gBgImage = nil;
 static NSString *gBgImageLoadedPath = nil;
+// 背景图显示版缓存（第八修）：按 view 纵横比从顶部裁好的图 + 它是按哪张原图、
+// 哪个 view 尺寸裁的。只裁不拉伸；换图时 NEClearImageCache 一起清。
+static UIImage *gBgDisplayImage = nil;
+static UIImage *gBgDisplaySource = nil;
+static CGSize gBgDisplayForSize = CGSizeZero;
 
 // 路径没变就用缓存；路径变了/文件没了就重读（失败返回 nil，不崩）
 // 注意：cacheSlot/pathSlot 指向的是全局 strong 变量，形参必须标 __strong，
@@ -1733,7 +1751,41 @@ static void NEClearImageCache(void) {
     [gImageLock lock];
     gVehicleImage = nil; gVehicleImageLoadedPath = nil;
     gBgImage = nil; gBgImageLoadedPath = nil;
+    gBgDisplayImage = nil; gBgDisplaySource = nil; gBgDisplayForSize = CGSizeZero;
     [gImageLock unlock];
+}
+
+// 背景图显示版（第八修）：把用户竖图按目标 view 的纵横比从顶部裁成一张
+// 显示版再设上去。只裁不拉伸（CGImage 像素裁，不重采样，不丢清晰度）。
+// 原图比 view 更竖才裁（这时 aspectFill 会上下切）；纵横比已接近（±2%）
+// 或原图更宽时直接返回原图。view 还没布局好（bounds 是 0）时也返回原图，
+// 等刷新时 bounds 正常了再裁。按（原图对象 + view 尺寸）缓存，裁一次复用。
+static UIImage *NEBackgroundDisplayImage(UIImage *rawBg, CGSize viewSize) {
+    if (!rawBg || viewSize.width <= 0 || viewSize.height <= 0) return rawBg;
+    CGFloat imgAspect = rawBg.size.width / rawBg.size.height;
+    CGFloat viewAspect = viewSize.width / viewSize.height;
+    if (imgAspect <= 0 || viewAspect <= 0) return rawBg;
+    if (fabs(imgAspect - viewAspect) / viewAspect < 0.02 || imgAspect >= viewAspect) return rawBg;
+    if (gBgDisplayImage && gBgDisplaySource == rawBg && CGSizeEqualToSize(gBgDisplayForSize, viewSize))
+        return gBgDisplayImage;
+    CGImageRef cg = rawBg.CGImage;
+    if (!cg) return rawBg;
+    size_t pxW = CGImageGetWidth(cg);
+    size_t pxH = CGImageGetHeight(cg);
+    if (pxW == 0 || pxH == 0) return rawBg;
+    // 从顶部裁：裁后高度 = 宽 / viewAspect（像素）。绿块（原图顶部约 6%–37%）
+    // 和狗头/主角留在画面里；卡通最底部放不进，必然被裁掉，优先保顶部。
+    size_t cropH = (size_t)llround((double)pxW / (double)viewAspect);
+    if (cropH == 0 || cropH >= pxH) return rawBg;
+    CGImageRef sub = CGImageCreateWithImageInRect(cg, CGRectMake(0, 0, pxW, cropH));
+    if (!sub) return rawBg;
+    UIImage *out = [UIImage imageWithCGImage:sub scale:rawBg.scale orientation:rawBg.imageOrientation];
+    CGImageRelease(sub);
+    if (!out) return rawBg;
+    gBgDisplayImage = out;
+    gBgDisplaySource = rawBg;
+    gBgDisplayForSize = viewSize;
+    return out;
 }
 
 // 这个 view 是不是在“设备”tab 里（响应链上溯找所属 VC，再看它是不是设备 tab
@@ -1805,8 +1857,10 @@ static UIImage *NEImageBySiblingOrder(UIImageView *iv, UIImage *bg, UIImage *veh
     }
     if (!last || fullCount < 2) return nil;
     if (visibleCount == 0) return nil;
-    if (visibleCount == 1) return (lastVisible == iv) ? veh : bg;
-    return (lastVisible == iv) ? veh : bg;
+    UIImage *result = (lastVisible == iv) ? veh : bg;
+    // 背景图返回前按 view 纵横比裁好显示版（第八修）；车辆图不动。
+    if (result == bg) result = NEBackgroundDisplayImage(bg, iv.bounds.size);
+    return result;
 }
 
 static UIImage *NEClassifyDeviceImage(UIImageView *iv, UIImage *image) {
@@ -1823,7 +1877,8 @@ static UIImage *NEClassifyDeviceImage(UIImageView *iv, UIImage *image) {
     UIImage *veh = NECustomVehicleImage();
     if (!bg && !veh) return nil;
     // 已经是自定义图：放行。刷新/重设时再进钩子不会来回换。
-    if ((bg && image == bg) || (veh && image == veh)) return nil;
+    // 显示版（第八修裁过的背景图）也是自定义图，一样放行。
+    if ((bg && (image == bg || image == gBgDisplayImage)) || (veh && image == veh)) return nil;
     CGFloat w = image.size.width, h = image.size.height;
     // 小图（图标/头像）一概不碰
     if (w < 200 && h < 200) return nil;
@@ -1833,7 +1888,7 @@ static UIImage *NEClassifyDeviceImage(UIImageView *iv, UIImage *image) {
     // 拿不到顺序：只认近似正方形 → 背景；其余不换，等刷新时按顺序换。
     if (w > 0 && h > 0) {
         CGFloat ratio = w / h;
-        if (ratio >= 0.98 && ratio <= 1.02) return bg;
+        if (ratio >= 0.98 && ratio <= 1.02) return NEBackgroundDisplayImage(bg, iv.bounds.size);
     }
     return nil;
 }
@@ -1915,7 +1970,8 @@ static void NE_UIButton_setBackgroundImage(id self, SEL _cmd, UIImage *image, UI
             // 按钮本身也得是满屏大按钮：卡片按钮也可能配大图素材，只看图片尺寸不够。
             CGSize bs = ((UIView *)self).bounds.size;
             if (bs.width >= sw * 0.9 && bs.height >= sh * 0.5) {
-                UIImage *custom = NECustomBackgroundImage();
+                // 背景图一样按按钮尺寸裁显示版（第八修），别直接设原图。
+                UIImage *custom = NEBackgroundDisplayImage(NECustomBackgroundImage(), bs);
                 if (custom && NEViewIsOnDeviceRootPage((UIView *)self)) {
                     orig_UIButton_setBackgroundImage(self, _cmd, custom, state);
                     return;
@@ -1953,9 +2009,11 @@ static void NE_CALayer_setContents(id self, SEL _cmd, id contents) {
                         CGFloat sh = [UIScreen mainScreen].bounds.size.height;
                         if (bs.width >= sw * 0.9 && bs.height >= sh * 0.5) {
                             // 自己写的自定义图直接放行（别重复处理）。
+                            // 显示版（第八修裁过的背景图）也是自己写的，一样放行。
                             UIImage *bg = NECustomBackgroundImage();
                             UIImage *veh = NECustomVehicleImage();
-                            if (!((bg && contents == (__bridge id)bg.CGImage) ||
+                            if (!((bg && (contents == (__bridge id)bg.CGImage ||
+                                          (gBgDisplayImage && contents == (__bridge id)gBgDisplayImage.CGImage))) ||
                                   (veh && contents == (__bridge id)veh.CGImage))) {
                                 UIImage *incoming = [UIImage imageWithCGImage:(CGImageRef)contents];
                                 UIImage *custom = incoming ? NEClassifyDeviceImage(iv, incoming) : nil;
@@ -2171,7 +2229,8 @@ static void NEForceRefreshImagesInView(UIView *view) {
                         UIImage *expected = nil;
                         UIImage *bgNow = NECustomBackgroundImage();
                         UIImage *vehNow = NECustomVehicleImage();
-                        if (bgNow && img == bgNow) expected = bgNow;
+                        // 显示版也是自定义图：当前图是显示版时，按显示版同步图层。
+                        if (bgNow && (img == bgNow || img == gBgDisplayImage)) expected = img;
                         else if (vehNow && img == vehNow) expected = vehNow;
                         if (expected && expected.CGImage) {
                             @try {
