@@ -1,4 +1,16 @@
-// NinebotEnhance iOS v0.4.3 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
+// NinebotEnhance iOS v0.4.4 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
+//
+// v0.4.4 修复（0.4.3 实测：deviceId 已找到真值（NSUserDefaults:backup_id），
+//  但状态与签到两步仍回 code 2 “Params error”，且状态 GET 本来就不带
+//  deviceId）：问题不在 deviceId——是插件自己拼的请求和 App/快捷指令发
+//  的不一样（缺查询参数、头或 body 形状不对）。不再猜：App 自己调通
+//  user-sign 时，NSURLSession 钩子把它的完整请求（URL 含查询串、全部头、
+//  方法、POST 体）记下来当模板，静默检查直接按模板重发，只把签到体里的
+//  deviceId 换成当前找的那个值；没抓到模板时仍用 0.4.3 的拼法。插件自己
+//  的重发请求不进模板（按 session 排除），否则会把自己拼错的请求当成
+//  模板。诊断行末尾加“模板:已捕获/未捕获”（状态+签到分开记）。模板只放
+//  内存，不写盘、不打 token 值；服务端报 54019 会话失效时清掉模板，下次
+//  用拼法+新 token 重试。其余不变（单独开关、记录行、重试、不加分享）。
 //
 // v0.4.3 修复（0.4.2 实测：token 已抓到（NSURLSession），但 deviceId 落到
 //  IDFV，状态与签到两步都回 code 2 “Params error”）：签到 POST 的 deviceId
@@ -3840,6 +3852,23 @@ static NSString *gCapturedUserAgent = nil; // App 自己请求的 UA（仅内存
 static NSString *gCapturedDeviceId = nil; // App 自己请求里带的 deviceId（仅内存）
 static NSString *gCapturedDeviceIdOrigin = nil; // deviceId 从请求哪来的：header/query/body（仅内存，v0.4.3）
 
+// ---- user-sign 请求模板（v0.4.4）：App 自己调 user-sign 接口的完整请求，
+// 只读捕获、只放内存（gAuthLock 保护，钩子写、检查读、诊断读）。0.4.3 实测：
+// deviceId 已找到真值（NSUserDefaults:backup_id），但状态与签到两步仍回
+// code 2 “Params error”，且状态 GET 本来就不带 deviceId——问题不在
+// deviceId，是插件自己拼的请求和 App 发的不一样。App 调通 user-sign 时把
+// 它的完整请求记下来当模板，静默检查按模板重发（URL 含查询串、头原样、
+// 方法原样）；签到体只换里面的 deviceId 字段，其余原样。没模板时用拼法。
+static NSURL *gTplStatusURL = nil; // 状态请求的完整 URL（含查询串）
+static NSDictionary *gTplStatusHeaders = nil; // 状态请求的全部请求头（拷贝，已去 Content-Length/Host）
+static NSString *gTplStatusMethod = nil; // 状态请求的方法（一般是 GET）
+static NSURL *gTplSignURL = nil; // 签到请求的完整 URL
+static NSDictionary *gTplSignHeaders = nil; // 签到请求的全部请求头（拷贝，已去 Content-Length/Host）
+static NSString *gTplSignMethod = nil; // 签到请求的方法（一般是 POST）
+static NSData *gTplSignBody = nil; // 签到请求的原始体（deviceId 重发时换掉）
+static BOOL gTplStatusCaptured = NO; // 已抓到 App 的状态请求模板
+static BOOL gTplSignCaptured = NO; // 已抓到 App 的签到请求模板
+
 static NSString *NEAutoSignInNowHHmm(void) {
     static NSDateFormatter *fmt = nil;
     static dispatch_once_t onceToken;
@@ -3885,6 +3914,13 @@ static NSString *NEAutoSignInDiagText(void) {
     }
     NSMutableString *out = [NSMutableString stringWithFormat:@"token:%@ · %@ · 上次检查 %@ · %@", tok, dev, time, res];
     if (codes.length) [out appendFormat:@" · %@", codes];
+    // v0.4.4：模板状态（App 的 user-sign 请求有没有抓到；状态/签到分开记）
+    [gAuthLock lock];
+    BOOL tplStatus = gTplStatusCaptured;
+    BOOL tplSign = gTplSignCaptured;
+    [gAuthLock unlock];
+    NSString *tpl = (tplStatus && tplSign) ? @"状态+签到" : (tplStatus ? @"仅状态" : (tplSign ? @"仅签到" : @"未捕获"));
+    [out appendFormat:@" · 模板:%@", tpl];
     if (gSignInDiagLastMessage.length) [out appendFormat:@"（%@）", gSignInDiagLastMessage];
     return out;
 }
@@ -3925,6 +3961,9 @@ static NSURLSessionDataTask *(*orig_NSURLSession_dataTaskWithRequest)(id, SEL, N
 
 // 前向声明：排一次静默检查（定义在后面；钩子抓到新 token 时马上排一次）
 static void NEAutoSignInScheduleAfter(double seconds);
+// 前向声明：插件自己的签到 session（定义在后面；钩子用它排除插件自己的
+// 请求，不让重发请求进模板）
+static NSURLSession *NESignInSession(void);
 
 static NSURLSessionDataTask *NE_NSURLSession_dataTaskWithRequest(id self, SEL _cmd, NSURLRequest *request, void (^completionHandler)(NSData *, NSURLResponse *, NSError *)) {
     @try {
@@ -4059,6 +4098,43 @@ static NSURLSessionDataTask *NE_NSURLSession_dataTaskWithRequest(id self, SEL _c
                     if ([found rangeOfCharacterFromSet:bad].location == NSNotFound) {
                         gCapturedDeviceId = [found copy];
                         if (foundFrom.length) gCapturedDeviceIdOrigin = [foundFrom copy];
+                    }
+                }
+                // v0.4.4：App 自己调 user-sign 接口时，把完整请求记下来当模板
+                // （URL 含查询串、全部头、方法、POST 体）。插件自己的重发请求
+                // 不进模板（按 session 排除），否则会把自己拼错的请求当成模板。
+                // 只记带 Authorization 的真调用；只记，不改请求。
+                if (self != NESignInSession()) {
+                    NSString *path = url.path ?: @"";
+                    NSString *lowerPath = [path lowercaseString];
+                    if ([lowerPath containsString:@"user-sign"]) {
+                        NSString *reqAuth = request.allHTTPHeaderFields[@"Authorization"];
+                        if (reqAuth.length >= 20) {
+                            NSMutableDictionary *clean = [(request.allHTTPHeaderFields ?: @{}) mutableCopy];
+                            [clean removeObjectForKey:@"Content-Length"];
+                            [clean removeObjectForKey:@"content-length"];
+                            [clean removeObjectForKey:@"Host"];
+                            [clean removeObjectForKey:@"host"];
+                            NSString *method = request.HTTPMethod.length ? request.HTTPMethod : @"GET";
+                            if ([lowerPath hasSuffix:@"/status"]) {
+                                gTplStatusURL = url;
+                                gTplStatusHeaders = [clean copy];
+                                gTplStatusMethod = [method copy];
+                                if (!gTplStatusCaptured) {
+                                    gTplStatusCaptured = YES;
+                                    os_log(gLog, "[SIGN] 已捕获 App 的 user-sign 状态请求模板");
+                                }
+                            } else if ([lowerPath hasSuffix:@"/sign"]) {
+                                gTplSignURL = url;
+                                gTplSignHeaders = [clean copy];
+                                gTplSignMethod = [method copy];
+                                if (request.HTTPBody.length) gTplSignBody = [request.HTTPBody copy];
+                                if (!gTplSignCaptured) {
+                                    gTplSignCaptured = YES;
+                                    os_log(gLog, "[SIGN] 已捕获 App 的 user-sign 签到请求模板");
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -4475,25 +4551,78 @@ static NSURLSession *NESignInSession(void) {
     return s;
 }
 
+// 模板失效（服务端报 54019 会话失效）：清掉模板，下次重试用拼法+新 token；
+// App 下次自己调 user-sign 时钩子会重新抓。只清模板，不碰 token/deviceId。
+static void NEClearSignInTemplates(void) {
+    [gAuthLock lock];
+    gTplStatusURL = nil; gTplStatusHeaders = nil; gTplStatusMethod = nil;
+    gTplSignURL = nil; gTplSignHeaders = nil; gTplSignMethod = nil; gTplSignBody = nil;
+    gTplStatusCaptured = NO; gTplSignCaptured = NO;
+    [gAuthLock unlock];
+    os_log(gLog, "[SIGN] 模板已清（服务端报会话失效），下次用拼法重试");
+}
+
+// 签到体：App 模板的原体（JSON）里只换 deviceId 字段，其余原样；原体不是
+// JSON 时原样用（App 自己的体本来就是对的）；原体为空时拼 {"deviceId":…}。
+static NSData *NEAutoSignInSignBodyWithDeviceId(NSData *tplBody, NSString *deviceId) {
+    if (tplBody.length == 0) {
+        return [NSJSONSerialization dataWithJSONObject:@{@"deviceId": deviceId} options:0 error:nil];
+    }
+    id json = [NSJSONSerialization JSONObjectWithData:tplBody options:NSJSONReadingMutableContainers error:nil];
+    if (![json isKindOfClass:[NSDictionary class]]) return tplBody; // 非 JSON：原样用
+    NSMutableDictionary *d = (NSMutableDictionary *)json;
+    NSString *existingKey = nil;
+    for (NSString *k in d) {
+        NSString *lk = [k lowercaseString];
+        if ([lk isEqualToString:@"deviceid"] || [lk isEqualToString:@"device_id"]) { existingKey = k; break; }
+    }
+    if (existingKey) d[existingKey] = deviceId;
+    else d[@"deviceId"] = deviceId;
+    NSData *out = [NSJSONSerialization dataWithJSONObject:d options:0 error:nil];
+    return out.length ? out : tplBody;
+}
+
 // 调签到接口（body 只有 deviceId）。code 0 成功；540004 今天已签过（不重复领）。
 // 回调里清 pending、记诊断；成功/已签才算“今天签成”，之后不再试。
 // v0.4.2：记下签到接口的 code 与服务端 message（供诊断分清是哪一步报的）；
 // 请求头对齐已知能用的快捷指令：加 Accept: application/json，并复用 App
 // 自己请求的 User-Agent（抓到才带，没抓到不伪造）。
+// v0.4.4：有 App 的签到请求模板时按模板重发（URL、头原样，体只换 deviceId）；
+// 没模板时用 0.4.3 的拼法。54019 会话失效时清模板，下次用拼法+新 token。
 static void NEAutoSignInDoSignWithAuth(NSString *auth, NSString *deviceId) {
-    NSURL *url = [NSURL URLWithString:@"https://cn-cbu-gateway.ninebot.com/portal/api/user-sign/v2/sign"];
-    if (!url) { gAutoSignInCheckPending = NO; return; }
-    NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:url];
-    req.HTTPMethod = @"POST";
-    [req setValue:auth forHTTPHeaderField:@"Authorization"];
-    [req setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
-    [req setValue:@"application/json" forHTTPHeaderField:@"Accept"];
     [gAuthLock lock];
-    NSString *ua = gCapturedUserAgent;
+    NSURL *tplURL = gTplSignCaptured ? gTplSignURL : nil;
+    NSDictionary *tplHeaders = gTplSignCaptured ? gTplSignHeaders : nil;
+    NSString *tplMethod = gTplSignCaptured ? gTplSignMethod : nil;
+    NSData *tplBody = gTplSignCaptured ? gTplSignBody : nil;
     [gAuthLock unlock];
-    if (ua.length) [req setValue:ua forHTTPHeaderField:@"User-Agent"];
-    req.HTTPBody = [NSJSONSerialization dataWithJSONObject:@{@"deviceId": deviceId}
-                                                   options:0 error:nil];
+    NSMutableURLRequest *req = nil;
+    if (tplURL) {
+        // v0.4.4：有 App 的签到请求模板就按模板重发（URL、头原样，包括
+        // App 自己的 Authorization；体只换 deviceId）。模板里的 token
+        // 就是 App 调通签到接口用的那个值，比插件自己抓的更可信。
+        req = [NSMutableURLRequest requestWithURL:tplURL];
+        req.HTTPMethod = tplMethod.length ? tplMethod : @"POST";
+        for (NSString *hk in tplHeaders) {
+            [req setValue:tplHeaders[hk] forHTTPHeaderField:hk];
+        }
+        req.HTTPBody = NEAutoSignInSignBodyWithDeviceId(tplBody, deviceId);
+        os_log(gLog, "[SIGN] 签到：按 App 模板重发");
+    } else {
+        NSURL *url = [NSURL URLWithString:@"https://cn-cbu-gateway.ninebot.com/portal/api/user-sign/v2/sign"];
+        if (!url) { gAutoSignInCheckPending = NO; return; }
+        req = [NSMutableURLRequest requestWithURL:url];
+        req.HTTPMethod = @"POST";
+        [req setValue:auth forHTTPHeaderField:@"Authorization"];
+        [req setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
+        [req setValue:@"application/json" forHTTPHeaderField:@"Accept"];
+        [gAuthLock lock];
+        NSString *ua = gCapturedUserAgent;
+        [gAuthLock unlock];
+        if (ua.length) [req setValue:ua forHTTPHeaderField:@"User-Agent"];
+        req.HTTPBody = [NSJSONSerialization dataWithJSONObject:@{@"deviceId": deviceId}
+                                                       options:0 error:nil];
+    }
     NSURLSessionDataTask *task = [NESignInSession() dataTaskWithRequest:req
         completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
         gAutoSignInCheckPending = NO;
@@ -4519,6 +4648,7 @@ static void NEAutoSignInDoSignWithAuth(NSString *auth, NSString *deviceId) {
             NEAutoSignInNoteCheck(@"已签到", c);
             os_log(gLog, "[SIGN] 今天已签到（签到接口报 540004），不重复签");
         } else {
+            if (c == 54019) NEClearSignInTemplates(); // 会话失效：模板里的 token 已过期，清掉下次用拼法+新 token
             NEAutoSignInNoteCheck([NSString stringWithFormat:@"code %d", c], c);
             os_log(gLog, "[SIGN] 签到返回 code=%d（下次打开 App 再试）", c);
         }
@@ -4543,16 +4673,34 @@ static void NEAutoSignInRun(void) {
                auth.length >= 20 ? "有" : "无", deviceId.length >= 8 ? "有" : "无");
         return;
     }
-    NSURL *statusURL = [NSURL URLWithString:@"https://cn-cbu-gateway.ninebot.com/portal/api/user-sign/v2/status"];
-    if (!statusURL) { gAutoSignInCheckPending = NO; return; }
-    NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:statusURL];
-    req.HTTPMethod = @"GET";
-    [req setValue:auth forHTTPHeaderField:@"Authorization"];
-    [req setValue:@"application/json" forHTTPHeaderField:@"Accept"];
+    // v0.4.4：有 App 的状态请求模板就按模板重发（完整 URL 含查询串、全部头
+    // 原样，包括 App 自己的 Authorization）；没模板时用 0.4.3 的拼法
+    // （Authorization + Accept + App 的 User-Agent，不带 deviceId）。
     [gAuthLock lock];
-    NSString *ua = gCapturedUserAgent;
+    NSURL *tplURL = gTplStatusCaptured ? gTplStatusURL : nil;
+    NSDictionary *tplHeaders = gTplStatusCaptured ? gTplStatusHeaders : nil;
+    NSString *tplMethod = gTplStatusCaptured ? gTplStatusMethod : nil;
     [gAuthLock unlock];
-    if (ua.length) [req setValue:ua forHTTPHeaderField:@"User-Agent"];
+    NSMutableURLRequest *req = nil;
+    if (tplURL) {
+        req = [NSMutableURLRequest requestWithURL:tplURL];
+        req.HTTPMethod = tplMethod.length ? tplMethod : @"GET";
+        for (NSString *hk in tplHeaders) {
+            [req setValue:tplHeaders[hk] forHTTPHeaderField:hk];
+        }
+        os_log(gLog, "[SIGN] 查状态：按 App 模板重发");
+    } else {
+        NSURL *statusURL = [NSURL URLWithString:@"https://cn-cbu-gateway.ninebot.com/portal/api/user-sign/v2/status"];
+        if (!statusURL) { gAutoSignInCheckPending = NO; return; }
+        req = [NSMutableURLRequest requestWithURL:statusURL];
+        req.HTTPMethod = @"GET";
+        [req setValue:auth forHTTPHeaderField:@"Authorization"];
+        [req setValue:@"application/json" forHTTPHeaderField:@"Accept"];
+        [gAuthLock lock];
+        NSString *ua = gCapturedUserAgent;
+        [gAuthLock unlock];
+        if (ua.length) [req setValue:ua forHTTPHeaderField:@"User-Agent"];
+    }
     NSURLSessionDataTask *task = [NESignInSession() dataTaskWithRequest:req
         completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
         if (err || !data) {
@@ -4567,6 +4715,7 @@ static void NEAutoSignInRun(void) {
         int c = code ? [code intValue] : -1;
         gSignInDiagStatusCode = c; // v0.4.2：状态接口的 code 单独记
         gSignInDiagLastMessage = NEAutoSignInServerMessage(json);
+        if (c == 54019) NEClearSignInTemplates(); // 会话失效：模板里的 token 已过期，清掉，签到那步用拼法+新 token
         if (c == 540004) {
             NENoteSignInDoneToday();
             gAutoSignInDoneToday = YES;
@@ -4951,7 +5100,7 @@ static void NECheckSettingsButton(void) {
     aboutName.text = @"NinebotEnhance";
     aboutName.font = [UIFont boldSystemFontOfSize:16];
     UILabel *aboutVer = [UILabel new];
-    aboutVer.text = @"0.4.3";
+    aboutVer.text = @"0.4.4";
     aboutVer.font = [UIFont systemFontOfSize:15];
     aboutVer.textColor = [UIColor secondaryLabelColor];
     [aboutTitleRow addArrangedSubview:aboutName];
@@ -6044,7 +6193,7 @@ static void NEProbeStart(void) {
                hasSel ? "YES" : "NO");
     }
 
-    os_log(gLog, "NinebotEnhance iOS 0.4.3 已加载（小胶囊 HUD：日期/天气/信号/音量/电量/来电/超速 + 翻页时钟 + 车辆数据探测 + 有效期9999/主页换图/自定义显示 + 自动签到）");
+    os_log(gLog, "NinebotEnhance iOS 0.4.4 已加载（小胶囊 HUD：日期/天气/信号/音量/电量/来电/超速 + 翻页时钟 + 车辆数据探测 + 有效期9999/主页换图/自定义显示 + 自动签到）");
 
     // 电量监听 + 定位 + 来电观察，全部在主队列 / 后台队列做，不阻塞加载
     dispatch_async(dispatch_get_main_queue(), ^{
