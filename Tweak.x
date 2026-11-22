@@ -880,8 +880,10 @@ static void NEInstallLabelHookIfNeeded(void) {
 static NSString *NEPageNameForVC(UIViewController *vc);
 static UITabBarController *NEAppTabBarController(void);
 
-// 编译器可见的 RN getter 声明（只有声明，没有实现，不注册分类，运行时无影响）。
-@interface RCTParagraphComponentView (NE)
+// 编译器可见的 RN getter 声明（只有声明，没有实现，运行时无影响）。
+// 注意：必须是类本身的 @interface 声明，不能写成分类 (NE)——分类要求
+// 类的接口已先声明，否则报 cannot find interface declaration。
+@interface RCTParagraphComponentView : UIView
 - (NSAttributedString *)attributedText;
 @end
 
