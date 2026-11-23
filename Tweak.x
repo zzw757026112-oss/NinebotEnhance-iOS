@@ -1,24 +1,15 @@
-// NinebotEnhance iOS v0.5.9 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
+// NinebotEnhance iOS v0.6.0 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
 //
-// v0.5.9 修续航三问题（用户 12:24 截图+原话实锤，0.5.8 已装）：
-//  ① 续航后面多了个 km（截图“续航 588kmkm”）：分开 label 那路把纯数字“588”
-//     归一化成“588km”写进数字 label，旁边“km”那个 label 还在，就成了
-//     “588kmkm”。修：分开 label 只写数字本身（NEDeviceRangeNumberOnly，
-//     用户填的尾巴单位也去掉）；整串（“续航 78.1km”一个 label）那路仍用
-//     含 km 的值，因为它一次换掉数字+单位整段。
-//  ② 开续航开关/改输入框不实时更新（关开关却可以）：设备页不在 key window
-//     里时，续航数字 label 的重匹配要算窗口坐标相邻（“续航”在旁边），算不
-//     出来刷新就空转；关开关能实时恢复是因为按存的原文恢复、不用重匹配；
-//     车辆名能实时更新是因为按钮标题匹配不用坐标。修：钩子第一次认出续航
-//     数字 label 就记一个弱引用（sRangeNumberLabel），刷新时即使不在窗口
-//     里也认得出它、直接按当前值写，不用重匹配。
-//  ③ 续航自定义和真实值来回跳：App 每次重写真实值，钩子都从头重匹配一遍，
-//     重匹配要算窗口坐标相邻，布局抖动/帧没出来时算不出，真值就漏过去闪
-//     一下。修：已经被认出来的 label（挂着字段关联），钩子直接按当前值重
-//     写，不再重匹配（NEValueForKnownLabel）；关开关/值清空时值是 nil，掉
-//     下去重匹配、匹配不到就放行真值。
-//  另补：刷新那路认出 label 时也存原文（之前只有钩子认出来的才存，刷新认
-//  出来的关开关恢复不了）；富文本钩子也存原文。含 0.5.8 全部内容。
+// v0.6.0 修车辆名关开关不实时恢复（用户 12:44 实锤，0.5.9 已装）：
+//  查代码实锤——按钮代码与 0.5.8 一模一样，差的是原文没存上：按钮的原文
+//  只在 setTitle: 钩子替换标题时才存，刷新那路换标题（开关打开时算出
+//  “迈凯轮”直接 setTitle:）不存；App 不重设标题，原标题就没地方存，
+//  关开关时刷新找不到原文恢复。修：刷新按钮那路算出替换值时，也把当前
+//  标题存成原文+记字段（只有算出值时才存，那时当前标题一定是原文，
+//  “迈凯轮”算不出值，不会错存）。含 0.5.9 全部内容。
+//  注意：装 0.6.0 后先把 App 划掉重开一次——当前卡住的“迈凯轮”会在启动
+//  时恢复成真名（开关是关的，App 自己设的真名直接放行）；之后开/关都
+//  实时生效，不用再重启。
 //
 // v0.5.8 釜底抽薪：删掉 UILabel 车辆名匹配（用户 11:53“还是老问题”实锤）。
 //  诊断早已证实左上角“Xiaomi_SU9Max”是导航栏 UIButton 标题，走按钮标题
@@ -1990,7 +1981,23 @@ static void NEForceRefreshLabelsInView(UIView *view) {
                                                  OBJC_ASSOCIATION_RETAIN_NONATOMIC);
                     } else {
                         NSString *t = [btn titleForState:UIControlStateNormal];
-                        if (t.length) val = NEFixedButtonTitleForField(t, NULL);
+                        if (t.length) {
+                            NSString *f2 = nil;
+                            val = NEFixedButtonTitleForField(t, &f2);
+                            // v0.6.0：刷新这路换标题时也存原文+字段——之前只靠
+                            // setTitle: 钩子存，App 不重设标题就没存，关开关就
+                            // 恢复不了（0.5.9 用户实锤：车辆名关开关不实时恢复，
+                            // 按钮代码与 0.5.8 一样，差的就是原文没存上）。
+                            // 只有算出替换值时才存，那时当前标题一定是原文
+                            // （“迈凯轮”这种中文算不出替换值，不会错存）。
+                            if (val && f2.length) {
+                                if (!objc_getAssociatedObject(btn, &NEOriginalTextKey))
+                                    objc_setAssociatedObject(btn, &NEOriginalTextKey, t,
+                                                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                                objc_setAssociatedObject(btn, &NEAppliedFieldKey, f2,
+                                                         OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                            }
+                        }
                     }
                 }
                 if (val) [btn setTitle:val forState:UIControlStateNormal];
@@ -5785,7 +5792,7 @@ static void NECheckSettingsButton(void) {
     aboutName.text = @"NinebotEnhance";
     aboutName.font = [UIFont boldSystemFontOfSize:16];
     UILabel *aboutVer = [UILabel new];
-    aboutVer.text = @"0.5.9";
+    aboutVer.text = @"0.6.0";
     aboutVer.font = [UIFont systemFontOfSize:15];
     aboutVer.textColor = [UIColor secondaryLabelColor];
     [aboutTitleRow addArrangedSubview:aboutName];
