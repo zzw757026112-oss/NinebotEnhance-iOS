@@ -1,4 +1,17 @@
-// NinebotEnhance iOS v0.5.2 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
+// NinebotEnhance iOS v0.5.3 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
+//
+// v0.5.3 修车辆名一直换不上（诊断 ne-diag.txt 实锤，0.5.2 视频仍不行）：
+//  ① 车辆名“Xiaomi_SU9Max”根本不是 UILabel，是导航栏 EachNavigationBar 里
+//     的 UIButton 标题（UIButtonLabel 在导航栏里，不在设备页主 view 内，
+//     label 钩子的祖先判定永远过不了；按钮标题走 setTitle:，NEFixedButton-
+//     TitleForField 只认等级/称号）。修：按钮标题匹配也认车辆名（ASCII token
+//     含字母、4-30 字符），setTitle: 钩子与刷新都走通。
+//  ② 钩子安装守卫漏了新开关：NEInstallLabelHookIfNeeded 只看旧五个开关，
+//     只开车辆名/续航时钩子根本不装。修：守卫加上 gDeviceName/gDeviceRange。
+//  续航仍未解决：诊断证实“续航 78.1km”是 NBBaseUIKit.MileageView 自绘，
+//  里面没有任何 UILabel；电量“80%”也是 NBBaseUIKit.BatteryView 自绘。
+//  label 钩子够不着自绘视图，续航要换得另想办法（hook 自绘或数据源），
+//  0.5.3 先修好车辆名，续航后续再攻。含 0.5.2 全部内容。
 //
 // v0.5.2 修 0.5.1 仍不行（用户截图实锤）：
 //  ① “迈凯轮”跑到了续航的 km 上：续航是“续航”“78.1”“km”三个分开 label，
@@ -1181,6 +1194,10 @@ static void NE_UILabel_setAttributedText(id self, SEL _cmd, NSAttributedString *
 // 按钮标题钩子：等级/称号那两个药丸可能是 UIButton 的标题（走 setTitle:forState:，
 // 不是 UILabel setText:），label 钩子拦不到。只换 Lv. 开头和“暂无称号”这两个，
 // 别的按钮标题一概不碰。
+// v0.5.3：设备页左上角车辆名是导航栏 UIButton 的标题（诊断证实：EachNavigationBar
+// 里的 UIButton，title="Xiaomi_SU9Max"，不是 UILabel）。label 钩子够不着，
+// 只能走这里。认 ASCII token（含字母、4-30 字符），“车控/主题”是中文不认，
+// “Ninebot pro+”含空格和 + 不认，导航栏右边消息按钮标题为空不认。
 static NSString *NEFixedButtonTitleForField(NSString *title, NSString **fieldOut) {
     if (fieldOut) *fieldOut = nil;
     if (!title.length) return nil;
@@ -1193,6 +1210,25 @@ static NSString *NEFixedButtonTitleForField(NSString *title, NSString **fieldOut
         [title isEqualToString:@"暂无称号"]) {
         if (fieldOut) *fieldOut = @"NETitle";
         return gTitleValue;
+    }
+    if (gDeviceName) {
+        NSString *nv = [gDeviceNameValue stringByTrimmingCharactersInSet:
+                        [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if (nv.length > 0 && title.length >= 4 && title.length <= 30 &&
+            [title rangeOfString:@" "].location == NSNotFound) {
+            static NSRegularExpression *sBtnNameRe = nil;
+            static dispatch_once_t sBtnNameOnce;
+            dispatch_once(&sBtnNameOnce, ^{
+                sBtnNameRe = [NSRegularExpression regularExpressionWithPattern:
+                              @"^(?=.*[A-Za-z])[A-Za-z0-9_\\-\\.]{4,30}$"
+                              options:0 error:nil];
+            });
+            if (sBtnNameRe && [sBtnNameRe firstMatchInString:title options:0
+                                                        range:NSMakeRange(0, title.length)]) {
+                if (fieldOut) *fieldOut = @"NEDeviceName";
+                return nv;
+            }
+        }
     }
     return nil;
 }
@@ -1222,7 +1258,8 @@ static void NEStartImageRefreshTimerIfNeeded(void);
 static BOOL gLabelHookInstalled = NO;
 static void NEInstallLabelHookIfNeeded(void) {
     if (gLabelHookInstalled) return;
-    if (!gValidity9999 && !gNCoins && !gMileage && !gLevel && !gTitle && !gSignDays) return;
+    if (!gValidity9999 && !gNCoins && !gMileage && !gLevel && !gTitle && !gSignDays &&
+        !gDeviceName && !gDeviceRange) return;
     Class cls = objc_getClass("UILabel");
     if (!cls || !class_getInstanceMethod(cls, @selector(setText:))) {
         os_log(gLog, "[LBL] UILabel/setText: 不存在，不装钩子");
@@ -1617,7 +1654,8 @@ static void NE_RCTParagraphTextView_drawRect(id self, SEL _cmd, CGRect rect) {
 static BOOL gRNTextHookInstalled = NO;
 static void NEInstallRNTextHookIfNeeded(void) {
     if (gRNTextHookInstalled) return;
-    if (!gValidity9999 && !gNCoins && !gMileage && !gLevel && !gTitle && !gSignDays) return;
+    if (!gValidity9999 && !gNCoins && !gMileage && !gLevel && !gTitle && !gSignDays &&
+        !gDeviceName && !gDeviceRange) return;
     BOOL any = NO;
     Class textCls = objc_getClass("RCTParagraphTextView");
     if (textCls && class_getInstanceMethod(textCls, @selector(drawRect:))) {
@@ -5549,7 +5587,7 @@ static void NECheckSettingsButton(void) {
     aboutName.text = @"NinebotEnhance";
     aboutName.font = [UIFont boldSystemFontOfSize:16];
     UILabel *aboutVer = [UILabel new];
-    aboutVer.text = @"0.5.2";
+    aboutVer.text = @"0.5.3";
     aboutVer.font = [UIFont systemFontOfSize:15];
     aboutVer.textColor = [UIColor secondaryLabelColor];
     [aboutTitleRow addArrangedSubview:aboutName];
