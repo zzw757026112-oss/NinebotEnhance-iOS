@@ -1,4 +1,11 @@
-// NinebotEnhance iOS v0.4.8 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
+// NinebotEnhance iOS v0.4.9 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
+//
+// v0.4.9 车辆图自适应（用户问“能不能让它自适应我自定义图片的大小”）：
+//  自定义车辆图不再被车辆框拉伸变形。给自定义车辆图时把那个 UIImageView 的
+//  contentMode 设成 AspectFit，按原比例显示、留白不裁切；以后换任何比例的
+//  车辆图都不用再手动垫透明边。背景图不受影响（仍满屏显示，已按 view 纵横比
+//  裁过显示版）。setImage: 钩子与 3 秒定时刷新两处都设，App 重设图片也会
+//  重新算一次。含 0.4.8 全部内容（冷启动背景变车辆图修法）。
 //
 // v0.4.8 修冷启动背景变车辆图（用户视频实测：划掉后台重开，设备页背景先显示
 //  车辆图，几秒后/下拉刷新才变回自定义背景）：
@@ -11,6 +18,7 @@
 //  放行，错换的车辆图纠回背景图；踏板车只认已是车辆图才放行，错换的背景图
 //  纠回车辆图。3 秒定时刷新与 setImage: 钩子都能纠错，不再依赖下拉刷新。
 //
+// v0.4.7 清理（0.4.6 实测签到已通：状态 0、签到 540004 已签、记录“今天已签到”）：
 //  设置页自动签到卡去掉灰色诊断行（token 来源、设备、上次检查时间、code、
 //  模板状态不再在设置页显示），只留开关行、记录行与说明文字；诊断文案生成
 //  代码保留，ne-diag.txt 导出里仍有 [自动签到] 行，出问题时可导出来看。
@@ -2232,6 +2240,9 @@ static void NE_UIImageView_setImage(id self, SEL _cmd, UIImage *image) {
             UIImage *veh = NECustomVehicleImage();
             NSInteger kind = (veh && custom == veh) ? 0 : 1;
             NEStashOriginalBeforeReplace((UIImageView *)self, image, custom, kind);
+            // 0.4.9：车辆图按原比例自适应显示（AspectFit），不拉伸变形；
+            // 背景图仍满屏显示（已按 view 纵横比裁过显示版）。
+            if (kind == 0) ((UIImageView *)self).contentMode = UIViewContentModeScaleAspectFit;
             orig_UIImageView_setImage(self, _cmd, custom);
             return;
         }
@@ -2567,6 +2578,8 @@ static void NEForceRefreshImagesInView(UIView *view) {
                         UIImage *veh = NECustomVehicleImage();
                         NSInteger kind = (veh && custom == veh) ? 0 : 1;
                         NEStashOriginalBeforeReplace(iv, img, custom, kind);
+                        // 0.4.9：车辆图按原比例自适应显示（AspectFit），不拉伸变形。
+                        if (kind == 0) iv.contentMode = UIViewContentModeScaleAspectFit;
                         iv.image = custom;
                         // 若 App 绕开 setImage: 直接写了 layer.contents（显示内容
                         // 会盖过 UIImageView.image），只换 iv.image 显示换不上；
@@ -5359,7 +5372,7 @@ static void NECheckSettingsButton(void) {
     aboutName.text = @"NinebotEnhance";
     aboutName.font = [UIFont boldSystemFontOfSize:16];
     UILabel *aboutVer = [UILabel new];
-    aboutVer.text = @"0.4.8";
+    aboutVer.text = @"0.4.9";
     aboutVer.font = [UIFont systemFontOfSize:15];
     aboutVer.textColor = [UIColor secondaryLabelColor];
     [aboutTitleRow addArrangedSubview:aboutName];
