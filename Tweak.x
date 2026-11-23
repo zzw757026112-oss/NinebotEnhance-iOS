@@ -1,4 +1,12 @@
-// NinebotEnhance iOS v0.5.3 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
+// NinebotEnhance iOS v0.5.4 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
+//
+// v0.5.4 修续航“78.1”被写成“迈凯轮”来回跳（用户视频实锤）：
+//  续航数字 label“78.1”会被车辆名认走、写成“迈凯轮”，又被 App 写回“78.1”，
+//  两边抢同一个 label 才跳。用户点破了关键：“78.1”能被换成“迈凯轮”，
+//  就能被换成“288”——机制是一样的，只是之前写错了值。
+//  修：车辆名（段 7）加纯数字硬门（isNum 直接跳过），数字 label 永远不归
+//  车辆名，只归续航（段 8）；段 8 把“78.1”换成自定义值“288km”，“km”
+//  那个 label 不动。含 0.5.3 全部内容（按钮标题车辆名 + 钩子守卫）。
 //
 // v0.5.3 修车辆名一直换不上（诊断 ne-diag.txt 实锤，0.5.2 视频仍不行）：
 //  ① 车辆名“Xiaomi_SU9Max”根本不是 UILabel，是导航栏 EachNavigationBar 里
@@ -1044,7 +1052,11 @@ static NSString *NEFixedLabelString(NSString *text, UILabel *label,
     //    最短 4 字符也把它排除在外）。
     //    须在设备根页面内且在左上区域（根页面坐标 x<300, y<300）；未布局（frame 为空）时
     //    不判，等刷新再算。匹配到就整串换自定义名。
-    if (gDeviceName) {
+    //    v0.5.4：纯数字（isNum）直接跳过——视频实锤“78.1”会被写成“迈凯轮”来回跳，
+    //    说明续航数字 label 曾被车辆名认走；isNum 是硬门，数字 label 永远不归车辆名，
+    //    只归下面的续航（段 8）。“78.1”能被换成“迈凯轮”，就能被换成“288”，
+    //    机制是一样的，只是之前写错了值、且两边抢同一个 label 才跳。
+    if (gDeviceName && !isNum) {
         NSString *nv = [gDeviceNameValue stringByTrimmingCharactersInSet:
                         [NSCharacterSet whitespaceAndNewlineCharacterSet]];
         if (nv.length > 0 && text.length >= 4 && text.length <= 30 &&
@@ -5587,7 +5599,7 @@ static void NECheckSettingsButton(void) {
     aboutName.text = @"NinebotEnhance";
     aboutName.font = [UIFont boldSystemFontOfSize:16];
     UILabel *aboutVer = [UILabel new];
-    aboutVer.text = @"0.5.3";
+    aboutVer.text = @"0.5.4";
     aboutVer.font = [UIFont systemFontOfSize:15];
     aboutVer.textColor = [UIColor secondaryLabelColor];
     [aboutTitleRow addArrangedSubview:aboutName];
