@@ -1,4 +1,15 @@
-// NinebotEnhance iOS v0.5.1 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
+// NinebotEnhance iOS v0.5.2 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
+//
+// v0.5.2 修 0.5.1 仍不行（用户截图实锤）：
+//  ① “迈凯轮”跑到了续航的 km 上：续航是“续航”“78.1”“km”三个分开 label，
+//     “km”只有 2 字符带字母，被车辆名正则误认。修：车辆名最短 4 字符（“km”
+//     只有 2 字符，直接排除），“Xiaomi_SU9Max”13 字符不受影响。
+//  ② 续航数字“78.1”没换：0.5.1 把分开 label 的单位改成必带，但“78.1”
+//     自己不带 km（km 是第三个 label），所以对不上。修：分开 label 的数字
+//     可以不带 km，但必须与“续航”同行相邻（左右）——电量“80”在“续航”
+//     上方（上下相邻）不认；且旁边有“%”的也不认。含 0.5.1 全部内容。
+//  车辆名“Xiaomi_SU9Max”本身仍没换上：等用户导出界面诊断（ne-diag.txt）
+//  看它到底是什么 label/按钮、frame 在哪，再针对性修。
 //
 // v0.5.1 修 0.5.0 两 bug（用户视频实锤）：
 //  ① 车辆名字没换、反而把 80% 电量换成了自定义名：车辆名正则只认 ASCII token，
@@ -751,6 +762,27 @@ static UILabel *NEAdjacentLabelContaining(UILabel *label, NSString *keyword) {
     return nil;
 }
 
+// 同行（左右）相邻 label 里含关键字的那一个（找不到返回 nil）。
+// 续航数字“78.1”在“续航”同一行右侧；电量“80”在“续航”上方（上下相邻），
+// 只认同行才能把续航数字和电量数字分开。
+static UILabel *NEHorizontallyAdjacentLabelContaining(UILabel *label, NSString *keyword) {
+    if (!label || !keyword.length) return nil;
+    UIWindow *w = NEKeyWindow();
+    if (!w) return nil;
+    CGRect lf = NEFrameInWindow(label, w);
+    if (CGRectIsEmpty(lf)) return nil;
+    NSMutableArray<UILabel *> *cands = [NSMutableArray array];
+    NECollectNearbyLabels(label, cands);
+    for (UILabel *cand in cands) {
+        CGRect cf = NEFrameInWindow(cand, w);
+        if (CGRectIsEmpty(cf)) continue;
+        if (!NEFramesHorizontallyAdjacent(lf, cf)) continue;
+        NSString *t = NEPlainTextOfLabel(cand);
+        if (t.length && [t rangeOfString:keyword].location != NSNotFound) return cand;
+    }
+    return nil;
+}
+
 // 数字旁边有个 "%" label → 这是百分比（电量），绝不能当 N币/里程换
 static BOOL NEHasAdjacentPercentLabel(UILabel *label) {
     for (UILabel *cand in NEAdjacentLabels(label)) {
@@ -994,14 +1026,15 @@ static NSString *NEFixedLabelString(NSString *text, UILabel *label,
         if (separateOut) *separateOut = YES;
         return gNCoinsValue;
     }
-    // 7. 车辆名字：设备页左上角的车辆名 label（单 token、ASCII 字母数字/_/-/.，2-30 字符，
-    //    且至少含一个字母——纯数字是电量“80”那类数字 label，绝不能认）。
+    // 7. 车辆名字：设备页左上角的车辆名 label（单 token、ASCII 字母数字/_/-/.，4-30 字符，
+    //    且至少含一个字母——纯数字是电量“80”那类数字 label，绝不能认；“km”只有 2 字符，
+    //    最短 4 字符也把它排除在外）。
     //    须在设备根页面内且在左上区域（根页面坐标 x<300, y<300）；未布局（frame 为空）时
     //    不判，等刷新再算。匹配到就整串换自定义名。
     if (gDeviceName) {
         NSString *nv = [gDeviceNameValue stringByTrimmingCharactersInSet:
                         [NSCharacterSet whitespaceAndNewlineCharacterSet]];
-        if (nv.length > 0 && text.length >= 2 && text.length <= 30 &&
+        if (nv.length > 0 && text.length >= 4 && text.length <= 30 &&
             [text rangeOfString:@" "].location == NSNotFound &&
             [text rangeOfString:@"续航"].location == NSNotFound &&
             [text rangeOfString:@"%"].location == NSNotFound) {
@@ -1009,7 +1042,7 @@ static NSString *NEFixedLabelString(NSString *text, UILabel *label,
             static dispatch_once_t sNameOnce;
             dispatch_once(&sNameOnce, ^{
                 sNameRe = [NSRegularExpression regularExpressionWithPattern:
-                           @"^(?=.*[A-Za-z])[A-Za-z0-9_\\-\\.]{2,30}$"
+                           @"^(?=.*[A-Za-z])[A-Za-z0-9_\\-\\.]{4,30}$"
                            options:0 error:nil];
             });
             if (sNameRe && [sNameRe firstMatchInString:text options:0
@@ -1034,8 +1067,9 @@ static NSString *NEFixedLabelString(NSString *text, UILabel *label,
         }
     }
     // 8. 续航：同 label 含“续航”+数字+单位，只换数字+单位那一段；
-    //    分开 label：纯“数字+km”（必须带 km/公里单位，电量“80”那种纯数字不认）
-    //    + 旁边有“续航”，整串换自定义值（纯数字自动补 km）。
+    //    分开 label：续航是“续航”“78.1”“km”三个 label——数字 label（“78.1”，
+    //    可能不带 km）须与“续航”同行相邻（左右），电量“80”在“续航”上方（上下
+    //    相邻）不认；整串换自定义值（纯数字自动补 km）。
     if (gDeviceRange) {
         NSString *rep = NEDeviceRangeDisplayValue();
         if (rep.length > 0) {
@@ -1062,12 +1096,13 @@ static NSString *NEFixedLabelString(NSString *text, UILabel *label,
                 static dispatch_once_t sRangeOnlyOnce;
                 dispatch_once(&sRangeOnlyOnce, ^{
                     sRangeOnlyRe = [NSRegularExpression regularExpressionWithPattern:
-                                    @"^\\s*\\d+(\\.\\d+)?\\s*(km|公里)\\s*$"
+                                    @"^\\s*\\d+(\\.\\d+)?\\s*(km|公里)?\\s*$"
                                     options:0 error:nil];
                 });
                 if (sRangeOnlyRe && [sRangeOnlyRe firstMatchInString:text options:0
                                                                 range:NSMakeRange(0, text.length)] &&
-                    NEAdjacentLabelContaining(label, @"续航")) {
+                    !NEHasAdjacentPercentLabel(label) &&
+                    NEHorizontallyAdjacentLabelContaining(label, @"续航")) {
                     if (fieldOut) *fieldOut = @"NEDeviceRange";
                     if (separateOut) *separateOut = YES;
                     return rep;
@@ -5514,7 +5549,7 @@ static void NECheckSettingsButton(void) {
     aboutName.text = @"NinebotEnhance";
     aboutName.font = [UIFont boldSystemFontOfSize:16];
     UILabel *aboutVer = [UILabel new];
-    aboutVer.text = @"0.5.1";
+    aboutVer.text = @"0.5.2";
     aboutVer.font = [UIFont systemFontOfSize:15];
     aboutVer.textColor = [UIColor secondaryLabelColor];
     [aboutTitleRow addArrangedSubview:aboutName];
