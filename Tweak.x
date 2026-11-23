@@ -1,4 +1,13 @@
-// NinebotEnhance iOS v0.5.7 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
+// NinebotEnhance iOS v0.5.8 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
+//
+// v0.5.8 釜底抽薪：删掉 UILabel 车辆名匹配（用户 11:53“还是老问题”实锤）。
+//  诊断早已证实左上角“Xiaomi_SU9Max”是导航栏 UIButton 标题，走按钮标题
+//  匹配（NEFixedButtonTitleForField）已经能正常显示“迈凯轮”。UILabel 那路
+//  从 0.5.0 起就一直在抢续航数字 label，0.5.1 的字母要求、0.5.2 的长度、
+//  0.5.4 的 isNum 硬门、0.5.5 的调序、0.5.6 的内联硬门都没拦住，两项都开
+//  时续航还是优先变“迈凯轮”。根子就是这路不该存在——删掉它，数字 label 只
+//  归续航，车辆名只走按钮标题；刷新时 UILabel 再也不挂车辆名关联，旧版错
+//  认上的也清掉重匹配。含 0.5.7 全部内容。
 //
 // v0.5.7 修“开能实时更新、关和改值不能”（用户 11:51 原话实锤）：
 //  ① 关开关不恢复：替换后原文已丢，刷新算不出原值，只能等 App 重设、必须
@@ -1123,53 +1132,13 @@ static NSString *NEFixedLabelString(NSString *text, UILabel *label,
             }
         }
     }
-    // 8. 车辆名字：设备页左上角的车辆名 label（单 token、ASCII 字母数字/_/-/.，4-30 字符，
-    //    且至少含一个字母——纯数字是电量“80”那类数字 label，绝不能认；“km”只有 2 字符，
-    //    最短 4 字符也把它排除在外）。
-    //    须在设备根页面内且在左上区域（根页面坐标 x<300, y<300）；未布局（frame 为空）时
-    //    不判，等刷新再算。匹配到就整串换自定义名。
-    //    v0.5.4：纯数字（isNum）直接跳过——视频实锤“78.1”会被写成“迈凯轮”来回跳，
-    //    说明续航数字 label 曾被车辆名认走；isNum 是硬门，数字 label 永远不归车辆名，
-    //    只归上面的续航（段 7）。“78.1”能被换成“迈凯轮”，就能被换成“288”，
-    //    机制是一样的，只是之前写错了值、且两边抢同一个 label 才跳。
-    //    v0.5.5：续航段移到前面先认，车辆名再也抢不到续航数字。
-    //    v0.5.6：再加一道内联硬门——直接现算 NEIsPureNumberString(text)，不只依赖
-    //    前面的 isNum 变量；纯数字在这里就地跳过，绝不进车辆名正则。
-    if (gDeviceName && !isNum && !NEIsPureNumberString(text)) {
-        NSString *nv = [gDeviceNameValue stringByTrimmingCharactersInSet:
-                        [NSCharacterSet whitespaceAndNewlineCharacterSet]];
-        if (nv.length > 0 && text.length >= 4 && text.length <= 30 &&
-            [text rangeOfString:@" "].location == NSNotFound &&
-            [text rangeOfString:@"续航"].location == NSNotFound &&
-            [text rangeOfString:@"%"].location == NSNotFound) {
-            static NSRegularExpression *sNameRe = nil;
-            static dispatch_once_t sNameOnce;
-            dispatch_once(&sNameOnce, ^{
-                sNameRe = [NSRegularExpression regularExpressionWithPattern:
-                           @"^(?=.*[A-Za-z])[A-Za-z0-9_\\-\\.]{4,30}$"
-                           options:0 error:nil];
-            });
-            if (sNameRe && [sNameRe firstMatchInString:text options:0
-                                                  range:NSMakeRange(0, text.length)]) {
-                UIViewController *rootPage = NEDeviceRootPageVC();
-                if (rootPage && rootPage.view) {
-                    BOOL onDevicePage = NO;
-                    for (UIView *p = label; p; p = p.superview) {
-                        if (p == rootPage.view) { onDevicePage = YES; break; }
-                    }
-                    if (onDevicePage) {
-                        CGRect f = CGRectZero;
-                        @try { f = [label convertRect:label.bounds toView:rootPage.view]; }
-                        @catch (...) { f = CGRectZero; }
-                        if (!CGRectIsEmpty(f) && f.origin.x < 300 && f.origin.y < 300) {
-                            if (fieldOut) *fieldOut = @"NEDeviceName";
-                            return nv;
-                        }
-                    }
-                }
-            }
-        }
-    }
+    // v0.5.8：删掉 UILabel 车辆名匹配——诊断 ne-diag.txt 早已证实，设备页左上角
+    //  “Xiaomi_SU9Max”根本不是 UILabel，是导航栏 EachNavigationBar 里的 UIButton
+    //  标题，走 NEFixedButtonTitleForField（setTitle: 钩子 + 按钮刷新），那条路
+    //  已经能正常显示“迈凯轮”。UILabel 这路从 0.5.0 起就一直在抢续航数字 label
+    //  （“78.1”被写成“迈凯轮”），0.5.1/0.5.2/0.5.4/0.5.5/0.5.6 的正则、长度、
+    //  isNum 硬门、调序都没拦住，两项都开时续航还是优先变“迈凯轮”。根子就是
+    //  这路不该存在——删掉它，数字 label 只归续航，车辆名只走按钮标题。
     return nil;
 }
 
@@ -1823,6 +1792,14 @@ static void NEForceRefreshLabelsInView(UIView *view) {
             if ([label.superview isKindOfClass:[UIButton class]]) continue;
             @try {
                 NSString *field = objc_getAssociatedObject(label, &NEAppliedFieldKey);
+                // v0.5.8：UILabel 再也不挂车辆名关联——车辆名只走按钮标题。
+                // 旧版错认上的 label（关联着 NEDeviceName），清掉它、掉下去重匹配，
+                // 让续航认走；否则刷新永远按车辆名写“迈凯轮”。
+                if ([field isEqualToString:@"NEDeviceName"]) {
+                    objc_setAssociatedObject(label, &NEAppliedFieldKey, nil,
+                                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                    field = nil;
+                }
                 // v0.5.5：之前被错认成车辆名的数字 label（如“78.1”），别再按车辆名
                 // 写“迈凯轮”——当前文本是纯数字就清掉车辆名关联，掉下去重匹配，
                 // 让续航（段 7）认走。否则刷新永远写错值，开关关了也纠不回来。
@@ -5678,7 +5655,7 @@ static void NECheckSettingsButton(void) {
     aboutName.text = @"NinebotEnhance";
     aboutName.font = [UIFont boldSystemFontOfSize:16];
     UILabel *aboutVer = [UILabel new];
-    aboutVer.text = @"0.5.7";
+    aboutVer.text = @"0.5.8";
     aboutVer.font = [UIFont systemFontOfSize:15];
     aboutVer.textColor = [UIColor secondaryLabelColor];
     [aboutTitleRow addArrangedSubview:aboutName];
