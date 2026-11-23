@@ -1,4 +1,13 @@
-// NinebotEnhance iOS v0.5.4 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
+// NinebotEnhance iOS v0.5.5 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
+//
+// v0.5.5 修两项都开时续航优先显示“迈凯轮”（用户 11:12 原话实锤）：
+//  车辆名和续航都开，续航“78.1”优先被写成“迈凯轮”；且每次改开关都要重启
+//  App 才生效。两处改动：
+//  ① 匹配顺序对调：续航（段 7）移到车辆名（段 8）之前先认，数字 label 先归
+//     续航，车辆名再也抢不到；车辆名段仍有 isNum 硬门双保险。
+//  ② 刷新纠错：之前被错认成车辆名的数字 label，刷新时若当前文本是纯数字，
+//     清掉车辆名关联、掉下去重匹配，让续航认走；否则刷新永远写错值，开关
+//     关了也纠不回来，只能重启。含 0.5.4 全部内容。
 //
 // v0.5.4 修续航“78.1”被写成“迈凯轮”来回跳（用户视频实锤）：
 //  续航数字 label“78.1”会被车辆名认走、写成“迈凯轮”，又被 App 写回“78.1”，
@@ -1047,51 +1056,10 @@ static NSString *NEFixedLabelString(NSString *text, UILabel *label,
         if (separateOut) *separateOut = YES;
         return gNCoinsValue;
     }
-    // 7. 车辆名字：设备页左上角的车辆名 label（单 token、ASCII 字母数字/_/-/.，4-30 字符，
-    //    且至少含一个字母——纯数字是电量“80”那类数字 label，绝不能认；“km”只有 2 字符，
-    //    最短 4 字符也把它排除在外）。
-    //    须在设备根页面内且在左上区域（根页面坐标 x<300, y<300）；未布局（frame 为空）时
-    //    不判，等刷新再算。匹配到就整串换自定义名。
-    //    v0.5.4：纯数字（isNum）直接跳过——视频实锤“78.1”会被写成“迈凯轮”来回跳，
-    //    说明续航数字 label 曾被车辆名认走；isNum 是硬门，数字 label 永远不归车辆名，
-    //    只归下面的续航（段 8）。“78.1”能被换成“迈凯轮”，就能被换成“288”，
-    //    机制是一样的，只是之前写错了值、且两边抢同一个 label 才跳。
-    if (gDeviceName && !isNum) {
-        NSString *nv = [gDeviceNameValue stringByTrimmingCharactersInSet:
-                        [NSCharacterSet whitespaceAndNewlineCharacterSet]];
-        if (nv.length > 0 && text.length >= 4 && text.length <= 30 &&
-            [text rangeOfString:@" "].location == NSNotFound &&
-            [text rangeOfString:@"续航"].location == NSNotFound &&
-            [text rangeOfString:@"%"].location == NSNotFound) {
-            static NSRegularExpression *sNameRe = nil;
-            static dispatch_once_t sNameOnce;
-            dispatch_once(&sNameOnce, ^{
-                sNameRe = [NSRegularExpression regularExpressionWithPattern:
-                           @"^(?=.*[A-Za-z])[A-Za-z0-9_\\-\\.]{4,30}$"
-                           options:0 error:nil];
-            });
-            if (sNameRe && [sNameRe firstMatchInString:text options:0
-                                                  range:NSMakeRange(0, text.length)]) {
-                UIViewController *rootPage = NEDeviceRootPageVC();
-                if (rootPage && rootPage.view) {
-                    BOOL onDevicePage = NO;
-                    for (UIView *p = label; p; p = p.superview) {
-                        if (p == rootPage.view) { onDevicePage = YES; break; }
-                    }
-                    if (onDevicePage) {
-                        CGRect f = CGRectZero;
-                        @try { f = [label convertRect:label.bounds toView:rootPage.view]; }
-                        @catch (...) { f = CGRectZero; }
-                        if (!CGRectIsEmpty(f) && f.origin.x < 300 && f.origin.y < 300) {
-                            if (fieldOut) *fieldOut = @"NEDeviceName";
-                            return nv;
-                        }
-                    }
-                }
-            }
-        }
-    }
-    // 8. 续航：同 label 含“续航”+数字+单位，只换数字+单位那一段；
+    // 7. 续航（v0.5.5 从段 8 移到段 7 之前）：用户实测——只开续航时“288”能出来，
+    //    车辆名开着“78.1”就被抢成“迈凯轮”。说明车辆名（旧段 7）先认走了续航
+    //    数字 label。续航先认：数字 label 先归续航，车辆名再也抢不到。
+    //    同 label 含“续航”+数字+单位，只换数字+单位那一段；
     //    分开 label：续航是“续航”“78.1”“km”三个 label——数字 label（“78.1”，
     //    可能不带 km）须与“续航”同行相邻（左右），电量“80”在“续航”上方（上下
     //    相邻）不认；整串换自定义值（纯数字自动补 km）。
@@ -1131,6 +1099,51 @@ static NSString *NEFixedLabelString(NSString *text, UILabel *label,
                     if (fieldOut) *fieldOut = @"NEDeviceRange";
                     if (separateOut) *separateOut = YES;
                     return rep;
+                }
+            }
+        }
+    }
+    // 8. 车辆名字：设备页左上角的车辆名 label（单 token、ASCII 字母数字/_/-/.，4-30 字符，
+    //    且至少含一个字母——纯数字是电量“80”那类数字 label，绝不能认；“km”只有 2 字符，
+    //    最短 4 字符也把它排除在外）。
+    //    须在设备根页面内且在左上区域（根页面坐标 x<300, y<300）；未布局（frame 为空）时
+    //    不判，等刷新再算。匹配到就整串换自定义名。
+    //    v0.5.4：纯数字（isNum）直接跳过——视频实锤“78.1”会被写成“迈凯轮”来回跳，
+    //    说明续航数字 label 曾被车辆名认走；isNum 是硬门，数字 label 永远不归车辆名，
+    //    只归上面的续航（段 7）。“78.1”能被换成“迈凯轮”，就能被换成“288”，
+    //    机制是一样的，只是之前写错了值、且两边抢同一个 label 才跳。
+    //    v0.5.5：续航段移到前面先认，车辆名再也抢不到续航数字。
+    if (gDeviceName && !isNum) {
+        NSString *nv = [gDeviceNameValue stringByTrimmingCharactersInSet:
+                        [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if (nv.length > 0 && text.length >= 4 && text.length <= 30 &&
+            [text rangeOfString:@" "].location == NSNotFound &&
+            [text rangeOfString:@"续航"].location == NSNotFound &&
+            [text rangeOfString:@"%"].location == NSNotFound) {
+            static NSRegularExpression *sNameRe = nil;
+            static dispatch_once_t sNameOnce;
+            dispatch_once(&sNameOnce, ^{
+                sNameRe = [NSRegularExpression regularExpressionWithPattern:
+                           @"^(?=.*[A-Za-z])[A-Za-z0-9_\\-\\.]{4,30}$"
+                           options:0 error:nil];
+            });
+            if (sNameRe && [sNameRe firstMatchInString:text options:0
+                                                  range:NSMakeRange(0, text.length)]) {
+                UIViewController *rootPage = NEDeviceRootPageVC();
+                if (rootPage && rootPage.view) {
+                    BOOL onDevicePage = NO;
+                    for (UIView *p = label; p; p = p.superview) {
+                        if (p == rootPage.view) { onDevicePage = YES; break; }
+                    }
+                    if (onDevicePage) {
+                        CGRect f = CGRectZero;
+                        @try { f = [label convertRect:label.bounds toView:rootPage.view]; }
+                        @catch (...) { f = CGRectZero; }
+                        if (!CGRectIsEmpty(f) && f.origin.x < 300 && f.origin.y < 300) {
+                            if (fieldOut) *fieldOut = @"NEDeviceName";
+                            return nv;
+                        }
+                    }
                 }
             }
         }
@@ -1779,6 +1792,17 @@ static void NEForceRefreshLabelsInView(UIView *view) {
             if ([label.superview isKindOfClass:[UIButton class]]) continue;
             @try {
                 NSString *field = objc_getAssociatedObject(label, &NEAppliedFieldKey);
+                // v0.5.5：之前被错认成车辆名的数字 label（如“78.1”），别再按车辆名
+                // 写“迈凯轮”——当前文本是纯数字就清掉车辆名关联，掉下去重匹配，
+                // 让续航（段 7）认走。否则刷新永远写错值，开关关了也纠不回来。
+                if ([field isEqualToString:@"NEDeviceName"]) {
+                    NSString *cur0 = NEPlainTextOfLabel(label);
+                    if (cur0.length && NEIsPureNumberString(cur0)) {
+                        objc_setAssociatedObject(label, &NEAppliedFieldKey, nil,
+                                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                        field = nil;
+                    }
+                }
                 if (field.length) {
                     NSNumber *sep = objc_getAssociatedObject(label, &NEAppliedSeparateKey);
                     NSString *val = NEFieldCurrentValue(field, sep.boolValue);
@@ -5599,7 +5623,7 @@ static void NECheckSettingsButton(void) {
     aboutName.text = @"NinebotEnhance";
     aboutName.font = [UIFont boldSystemFontOfSize:16];
     UILabel *aboutVer = [UILabel new];
-    aboutVer.text = @"0.5.4";
+    aboutVer.text = @"0.5.5";
     aboutVer.font = [UIFont systemFontOfSize:15];
     aboutVer.textColor = [UIColor secondaryLabelColor];
     [aboutTitleRow addArrangedSubview:aboutName];
