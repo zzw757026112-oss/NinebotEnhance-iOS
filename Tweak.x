@@ -1,4 +1,12 @@
-// NinebotEnhance iOS v0.5.5 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
+// NinebotEnhance iOS v0.5.6 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
+//
+// v0.5.6 修开关改完必须重启 App 才生效（用户 11:37 原话实锤）：
+//  开关回调里只认旧五个开关，车辆名/续航两个新开关拨动后不同步缓存、
+//  不装钩子、不刷新，所以改完必须重启。修：开关回调补上 NEDeviceName /
+//  NEDeviceRange；开关与改值后除刷 key window 外，再直接刷一次设备根页面
+//  （用户在“我的”页改设置时设备页不在 key window 里），切回设备页立刻
+//  生效。另给车辆名再加一道内联纯数字硬门（现算，不只依赖 isNum 变量）。
+//  含 0.5.5 全部内容。
 //
 // v0.5.5 修两项都开时续航优先显示“迈凯轮”（用户 11:12 原话实锤）：
 //  车辆名和续航都开，续航“78.1”优先被写成“迈凯轮”；且每次改开关都要重启
@@ -1113,7 +1121,9 @@ static NSString *NEFixedLabelString(NSString *text, UILabel *label,
     //    只归上面的续航（段 7）。“78.1”能被换成“迈凯轮”，就能被换成“288”，
     //    机制是一样的，只是之前写错了值、且两边抢同一个 label 才跳。
     //    v0.5.5：续航段移到前面先认，车辆名再也抢不到续航数字。
-    if (gDeviceName && !isNum) {
+    //    v0.5.6：再加一道内联硬门——直接现算 NEIsPureNumberString(text)，不只依赖
+    //    前面的 isNum 变量；纯数字在这里就地跳过，绝不进车辆名正则。
+    if (gDeviceName && !isNum && !NEIsPureNumberString(text)) {
         NSString *nv = [gDeviceNameValue stringByTrimmingCharactersInSet:
                         [NSCharacterSet whitespaceAndNewlineCharacterSet]];
         if (nv.length > 0 && text.length >= 4 && text.length <= 30 &&
@@ -5623,7 +5633,7 @@ static void NECheckSettingsButton(void) {
     aboutName.text = @"NinebotEnhance";
     aboutName.font = [UIFont boldSystemFontOfSize:16];
     UILabel *aboutVer = [UILabel new];
-    aboutVer.text = @"0.5.5";
+    aboutVer.text = @"0.5.6";
     aboutVer.font = [UIFont systemFontOfSize:15];
     aboutVer.textColor = [UIColor secondaryLabelColor];
     [aboutTitleRow addArrangedSubview:aboutName];
@@ -5842,6 +5852,12 @@ static void NECheckSettingsButton(void) {
     NEInstallRNTextHookIfNeeded();
     NEForceRefreshLabels(); // v0.3.9 修复：值改了，已显示的 label 不会自动重设，强制刷新立刻生效
     NEForceRedrawRNText(); // RN 段落同理：值改了，已显示的段落强制重画
+    // v0.5.6：设备页可能不在 key window 里（用户在“我的”页改设置），
+    // 再直接刷一次设备根页面，改完切回设备页立刻生效，不用重启。
+    @try {
+        UIViewController *rootPage = NEDeviceRootPageVC();
+        if (rootPage && rootPage.view) NEForceRefreshLabelsInView(rootPage.view);
+    } @catch (...) {}
 }
 
 - (void)dismissKeyboard {
@@ -5891,13 +5907,22 @@ static void NECheckSettingsButton(void) {
         NEForceRedrawRNText();
     }
     // v0.3.9 追加：五个自定义显示项开关——同步缓存并按需装钩子
+    // v0.5.6：漏了车辆名/续航两个新开关——拨动它们不走这里，不同步缓存、
+    // 不装钩子、不刷新，所以改完必须重启 App 才生效。补上。
     if ([key isEqualToString:@"NENCoins"] || [key isEqualToString:@"NEMileage"] ||
         [key isEqualToString:@"NELevel"] || [key isEqualToString:@"NETitle"] ||
-        [key isEqualToString:@"NESignDays"]) {
+        [key isEqualToString:@"NESignDays"] ||
+        [key isEqualToString:@"NEDeviceName"] || [key isEqualToString:@"NEDeviceRange"]) {
         NESyncCustomDisplayCache();
         if (sw.isOn) { NEInstallLabelHookIfNeeded(); NEInstallRNTextHookIfNeeded(); }
         NEForceRefreshLabels(); // v0.3.9 修复：同上
         NEForceRedrawRNText();
+        // v0.5.6：设备页可能不在 key window 里（用户在“我的”页改设置），
+        // 再直接刷一次设备根页面，改完切回设备页立刻生效，不用重启。
+        @try {
+            UIViewController *rootPage = NEDeviceRootPageVC();
+            if (rootPage && rootPage.view) NEForceRefreshLabelsInView(rootPage.view);
+        } @catch (...) {}
     }
     // v0.4.1 自动签到：打开开关就排一次静默签到（今天没签成、且没已排的检查时）
     if ([key isEqualToString:@"NEAutoSignIn"] && sw.isOn) NEAutoSignInScheduleAfter(1.0);
