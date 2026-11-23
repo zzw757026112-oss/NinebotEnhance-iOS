@@ -1,4 +1,13 @@
-// NinebotEnhance iOS v0.5.6 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
+// NinebotEnhance iOS v0.5.7 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
+//
+// v0.5.7 修“开能实时更新、关和改值不能”（用户 11:51 原话实锤）：
+//  ① 关开关不恢复：替换后原文已丢，刷新算不出原值，只能等 App 重设、必须
+//     重启。修：第一次替换时存原文，开关关掉（或值清空）后刷新按原文恢复，
+//     label 与按钮标题都走这条路。
+//  ② 改值不生效：输入框只在 EditingDidEnd 才存值，输完直接切 tab、键盘
+//     还没收，新值根本没存，设备页还显示旧值。修：每敲一个字就存
+//     （EditingChanged）；切回页面先同步一次缓存再刷新，拿到的就是最新值。
+//  含 0.5.6 全部内容。
 //
 // v0.5.6 修开关改完必须重启 App 才生效（用户 11:37 原话实锤）：
 //  开关回调里只认旧五个开关，车辆名/续航两个新开关拨动后不同步缓存、
@@ -692,6 +701,9 @@ static NSString *NEDeviceRangeDisplayValue(void) {
 
 static const char NEAppliedFieldKey = 0;    // 之前被替换过的 label：字段 key
 static const char NEAppliedSeparateKey = 0; // 同上：是不是“分开 label”式替换
+// v0.5.7：第一次替换时存的原文——开关关掉后按它恢复，否则原值已丢、
+// 只能等 App 自己重设（所以以前关开关必须重启才生效）。
+static const char NEOriginalTextKey = 0;    // 第一次替换前 label/按钮的原文
 
 // label 的纯文本：有富文本就取富文本的字符串，否则取 text
 static NSString *NEPlainTextOfLabel(UILabel *label) {
@@ -1195,6 +1207,10 @@ static void NE_UILabel_setText(id self, SEL _cmd, NSString *text) {
         NSString *fixed = NEFixedLabelString(text, (UILabel *)self, &field, &separate);
         if (fixed) {
             if (field.length) {
+                // v0.5.7：第一次替换时存原文，开关关掉后按它恢复
+                if (!objc_getAssociatedObject(self, &NEOriginalTextKey))
+                    objc_setAssociatedObject(self, &NEOriginalTextKey, text,
+                                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
                 objc_setAssociatedObject(self, &NEAppliedFieldKey, field,
                                          OBJC_ASSOCIATION_RETAIN_NONATOMIC);
                 objc_setAssociatedObject(self, &NEAppliedSeparateKey, @(separate),
@@ -1274,9 +1290,14 @@ static void NE_UIButton_setTitle(id self, SEL _cmd, NSString *title, UIControlSt
         NSString *field = nil;
         NSString *fixed = NEFixedButtonTitleForField(title, &field);
         if (fixed) {
-            if (field.length)
+            if (field.length) {
+                // v0.5.7：第一次替换时存原文，开关关掉后按它恢复
+                if (!objc_getAssociatedObject(self, &NEOriginalTextKey))
+                    objc_setAssociatedObject(self, &NEOriginalTextKey, title,
+                                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
                 objc_setAssociatedObject(self, &NEAppliedFieldKey, field,
                                          OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            }
             orig_UIButton_setTitle(self, _cmd, fixed, state);
             return;
         }
@@ -1817,6 +1838,17 @@ static void NEForceRefreshLabelsInView(UIView *view) {
                     NSNumber *sep = objc_getAssociatedObject(label, &NEAppliedSeparateKey);
                     NSString *val = NEFieldCurrentValue(field, sep.boolValue);
                     if (val) { NESetLabelPlainText(label, val); continue; }
+                    // v0.5.7：开关关了（或值清空了），当前值是 nil——按第一次替换时
+                    // 存的原文恢复，不用等 App 自己重设、不用重启。
+                    NSString *orig = objc_getAssociatedObject(label, &NEOriginalTextKey);
+                    if (orig.length) {
+                        NESetLabelPlainText(label, orig);
+                        objc_setAssociatedObject(label, &NEAppliedFieldKey, nil,
+                                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                        objc_setAssociatedObject(label, &NEOriginalTextKey, nil,
+                                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                        continue;
+                    }
                 }
                 NSString *cur = NEPlainTextOfLabel(label);
                 if (cur.length) {
@@ -1841,8 +1873,18 @@ static void NEForceRefreshLabelsInView(UIView *view) {
                 NSString *field = objc_getAssociatedObject(btn, &NEAppliedFieldKey);
                 NSString *val = field.length ? NEFieldCurrentValue(field, NO) : nil;
                 if (!val) {
-                    NSString *t = [btn titleForState:UIControlStateNormal];
-                    if (t.length) val = NEFixedButtonTitleForField(t, NULL);
+                    // v0.5.7：开关关了，当前值是 nil——按第一次替换时存的原文恢复。
+                    NSString *orig = objc_getAssociatedObject(btn, &NEOriginalTextKey);
+                    if (field.length && orig.length) {
+                        [btn setTitle:orig forState:UIControlStateNormal];
+                        objc_setAssociatedObject(btn, &NEAppliedFieldKey, nil,
+                                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                        objc_setAssociatedObject(btn, &NEOriginalTextKey, nil,
+                                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                    } else {
+                        NSString *t = [btn titleForState:UIControlStateNormal];
+                        if (t.length) val = NEFixedButtonTitleForField(t, NULL);
+                    }
                 }
                 if (val) [btn setTitle:val forState:UIControlStateNormal];
             } @catch (...) {}
@@ -2940,6 +2982,9 @@ static void NE_UIViewController_viewDidAppear(id self, SEL _cmd, BOOL animated) 
         [gAppearThrottle removeObjectsForKeys:stale];
     }
     @try {
+        // v0.5.7：切回页面先同步一次缓存——输入框改值后直接切 tab，缓存里还是
+        // 旧值，刷新会写回旧值；同步了再刷就是最新值。
+        NESyncCustomDisplayCache();
         NEForceRefreshLabels();
         NEForceRefreshImages();
         NEForceRedrawRNText(); // RN 段落：切回页面时强制重画，开关状态变化时生效
@@ -5633,7 +5678,7 @@ static void NECheckSettingsButton(void) {
     aboutName.text = @"NinebotEnhance";
     aboutName.font = [UIFont boldSystemFontOfSize:16];
     UILabel *aboutVer = [UILabel new];
-    aboutVer.text = @"0.5.6";
+    aboutVer.text = @"0.5.7";
     aboutVer.font = [UIFont systemFontOfSize:15];
     aboutVer.textColor = [UIColor secondaryLabelColor];
     [aboutTitleRow addArrangedSubview:aboutName];
@@ -5813,6 +5858,11 @@ static void NECheckSettingsButton(void) {
     field.translatesAutoresizingMaskIntoConstraints = NO;
     [field addTarget:self action:@selector(customValueChanged:)
         forControlEvents:UIControlEventEditingDidEnd];
+    // v0.5.7：只在 EditingDidEnd 才存值——用户输完直接切 tab、键盘还没收，
+    // 新值根本没存，设备页还显示旧值。改成每敲一个字就存（EditingChanged），
+    // 切过去就是最新值。
+    [field addTarget:self action:@selector(customValueChanged:)
+        forControlEvents:UIControlEventEditingChanged];
     UISwitch *sw = [UISwitch new];
     sw.on = on;
     sw.translatesAutoresizingMaskIntoConstraints = NO;
