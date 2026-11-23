@@ -1,4 +1,10 @@
-// NinebotEnhance iOS v0.6.5 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
+// NinebotEnhance iOS v0.6.6 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
+//
+// v0.6.6 加自动分享（每天领 1 N币，用户 2026-11-24 决定做）：24 号凌晨重抓
+//  实锤分享是 App 自己调 share-callback（加密包，只能重放）+ task/reward
+//  领奖。插件钩子抓 App 真分享的请求当模板存本机，重放时只换 token/时间/
+//  请求号；领奖前先 GET 任务列表拿当天 taskId。开关默认关，第一次用要先
+//  手动分享一次（记模板）。
 //
 // v0.6.5 修键盘自动滚（0.6.4 还是不行，用户 15:16 实锤）：续航实时更新
 //  好了，但键盘弹起来时底下空白有了、输入框不会自己滚到键盘上面，还得
@@ -2131,6 +2137,8 @@ static void NEForceRefreshLabels(void) {
 static UITabBarController *NEAppTabBarController(void);
 // 前向声明：自动签到诊断行（定义在后面的 v0.4.1 自动签到节）
 static NSString *NEAutoSignInDiagExportLine(void);
+// 前向声明：自动分享诊断行（定义在后面的 v0.6.6 自动分享节）
+static NSString *NEAutoShareDiagExportLine(void);
 
 static NSString *NEDiagFilePath(void) {
     NSString *doc = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory,
@@ -2328,6 +2336,7 @@ static void NEDumpDiagForView(UIView *root, NSString *pageName) {
     df.dateFormat = @"yyyy-MM-dd HH:mm:ss";
     [out appendFormat:@"\n===== %@ %@ =====\n", pageName ?: @"?", [df stringFromDate:[NSDate date]]];
     [out appendFormat:@"%@\n", NEAutoSignInDiagExportLine()];
+    [out appendFormat:@"%@\n", NEAutoShareDiagExportLine()];
     [out appendString:@"(文本为当前显示值；→ 后面是匹配器会换成的字段/值，(no change) 表示不换；[hidden] 表示该视图被隐藏；[RN-text] 是 React Native 文本视图；RN 文本的 verdict 只含同 label 规则；frame 是页面自身坐标)\n"];
     int count = 0;
     @try {
@@ -4502,6 +4511,15 @@ static NSData *gTplSignBody = nil; // 签到请求的原始体（deviceId 重发
 static BOOL gTplStatusCaptured = NO; // 已抓到 App 的状态请求模板
 static BOOL gTplSignCaptured = NO; // 已抓到 App 的签到请求模板
 
+// v0.6.6 自动分享模板：App 自己调 share-callback 时记下的整条请求。
+// 头里的 token 不存（重放时用当前 token 补）；service-time / request-id
+// 也不存（重放时现算）。其余头原样存，只放本机 NSUserDefaults，不进仓库。
+static NSURL *gShareTplURL = nil;
+static NSDictionary *gShareTplHeaders = nil;
+static NSString *gShareTplMethod = nil;
+static NSData *gShareTplBody = nil; // 加密包 {"a":"..."} 原样
+static BOOL gShareTplCaptured = NO;
+
 static NSString *NEAutoSignInNowHHmm(void) {
     static NSDateFormatter *fmt = nil;
     static dispatch_once_t onceToken;
@@ -4743,6 +4761,36 @@ static NSURLSessionDataTask *NE_NSURLSession_dataTaskWithRequest(id self, SEL _c
                 if (self != NESignInSession()) {
                     NSString *path = url.path ?: @"";
                     NSString *lowerPath = [path lowercaseString];
+                    // v0.6.6 自动分享：App 自己调 share-callback（真分享）时，把整条
+                    // 请求（URL、头、体）记下来当模板，存 NSUserDefaults。插件自己
+                    // 的重放走 NESignInSession，不进这里，不会覆盖模板。只记 POST
+                    // 且带体的；头里的 token 不存（重放时用当前 token 补）。
+                    if ([lowerPath containsString:@"share-callback"]) {
+                        if ([[request.HTTPMethod uppercaseString] isEqualToString:@"POST"] && request.HTTPBody.length) {
+                            NSMutableDictionary *cleanShare = [(request.allHTTPHeaderFields ?: @{}) mutableCopy];
+                            [cleanShare removeObjectForKey:@"Content-Length"];
+                            [cleanShare removeObjectForKey:@"content-length"];
+                            [cleanShare removeObjectForKey:@"Host"];
+                            [cleanShare removeObjectForKey:@"host"];
+                            [cleanShare removeObjectForKey:@"access-token"];
+                            [cleanShare removeObjectForKey:@"access_token"];
+                            [cleanShare removeObjectForKey:@"Authorization"];
+                            [cleanShare removeObjectForKey:@"authorization"];
+                            [cleanShare removeObjectForKey:@"service-time"];
+                            [cleanShare removeObjectForKey:@"request-id"];
+                            gShareTplURL = url;
+                            gShareTplHeaders = [cleanShare copy];
+                            gShareTplMethod = [request.HTTPMethod copy];
+                            gShareTplBody = [request.HTTPBody copy];
+                            gShareTplCaptured = YES;
+                            NSUserDefaults *dd = [NSUserDefaults standardUserDefaults];
+                            [dd setObject:url.absoluteString forKey:@"NEAutoShareTplURL"];
+                            [dd setObject:gShareTplMethod forKey:@"NEAutoShareTplMethod"];
+                            [dd setObject:gShareTplHeaders forKey:@"NEAutoShareTplHeaders"];
+                            [dd setObject:gShareTplBody forKey:@"NEAutoShareTplBody"];
+                            os_log(gLog, "[SHARE] 已捕获 App 的 share-callback 分享请求模板");
+                        }
+                    }
                     if ([lowerPath containsString:@"user-sign"]) {
                         NSString *reqAuth = request.allHTTPHeaderFields[@"Authorization"];
                         if (reqAuth.length >= 20) {
@@ -5565,6 +5613,374 @@ static void NEAutoSignInTriggerIfNeeded(void) {
         NEAutoSignInScheduleAfter(6.0);
 }
 
+// ---------------- 自动分享（v0.6.6；每天领 1 N币）----------------
+// 2026-11-24 用户重抓实锤：每日分享是 App 自己调两个接口，不是钩微信：
+//   ① POST /app-api/circle/v1/share-callback —— 分享那一下记一次分享
+//      （RN TimelineModule 发的，体是加密包 {"a":"<base64>"}，插件生成不了
+//      新的，只能重放抓到的）；
+//   ② POST /portal/self-service/task/reward —— body {"taskId":...} 领奖
+//      （安卓模块已证实；23 号没分享直接调回 43003，说明服务器验分享事件）。
+// 办法是“模板重放”：NSURLSession 钩子看到 App 自己调 share-callback 时，
+// 把整条请求（URL、头、体）记下来当模板，存 NSUserDefaults（只本机，不进
+// 仓库）；自动分享时按模板原样重发，只换 access-token / access_token
+// （当前 token）、service-time、request-id。模板是加密包，可能带时间戳/
+// 签名，过期了重放会失败——失败时诊断会写明，手动分享一次就能刷新模板。
+// 领奖前先 GET 任务列表拿当天的 taskId（任务 ID 可能变，不写死；title
+// 含“分享”的就是每日分享）。开关 NEAutoShare 默认关；每天只做一次
+// （NEAutoShareLastDate）。只调官方接口，不碰微信。
+// 注意：taskId 是 64 位大数（1823622692036079618），JSON 里可能是数字也
+// 可能是字符串；当数字解析可能丢精度，所以优先按字符串取。
+
+static BOOL NEAutoShareEnabled(void) {
+    id v = [[NSUserDefaults standardUserDefaults] objectForKey:@"NEAutoShare"];
+    return v ? [v boolValue] : NO; // 默认关：新功能，让用户自己开
+}
+
+static NSString *NEAutoShareRecordText(void) {
+    NSString *last = [[NSUserDefaults standardUserDefaults] stringForKey:@"NEAutoShareLastDate"];
+    NSString *res = [[NSUserDefaults standardUserDefaults] stringForKey:@"NEAutoShareLastResult"];
+    if (last.length == 0) return @"暂无分享记录";
+    NSString *today = NEAutoSignInTodayString();
+    if ([last isEqualToString:today]) {
+        if (res.length) return [NSString stringWithFormat:@"今天已分享（%@）：%@", last, res];
+        return [NSString stringWithFormat:@"今天已分享（%@）", last];
+    }
+    if (res.length) return [NSString stringWithFormat:@"上次分享：%@（%@）", last, res];
+    return [NSString stringWithFormat:@"上次分享：%@", last];
+}
+
+static void NENoteShareDoneToday(NSString *result) {
+    NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
+    [d setObject:NEAutoSignInTodayString() forKey:@"NEAutoShareLastDate"];
+    if (result.length) [d setObject:result forKey:@"NEAutoShareLastResult"];
+}
+
+// 本次启动还没抓到模板时，从 NSUserDefaults 恢复上次存的（只本机）。
+static void NEAutoShareLoadTemplateIfNeeded(void) {
+    if (gShareTplCaptured) return;
+    NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
+    NSString *u = [d stringForKey:@"NEAutoShareTplURL"];
+    NSData *b = [d dataForKey:@"NEAutoShareTplBody"];
+    if (!u.length || !b.length) return;
+    NSURL *url = [NSURL URLWithString:u];
+    if (!url) return;
+    gShareTplURL = url;
+    gShareTplMethod = [d stringForKey:@"NEAutoShareTplMethod"] ?: @"POST";
+    gShareTplHeaders = [d dictionaryForKey:@"NEAutoShareTplHeaders"];
+    gShareTplBody = b;
+    gShareTplCaptured = YES;
+}
+
+// ---- 自动分享诊断（只记状态，不记 token 值）----
+static NSString *gShareDiagLastTime = nil;
+static NSString *gShareDiagLastResult = nil;
+static NSInteger gShareDiagLastCode = -1;
+static NSInteger gShareDiagTaskCode = -1; // 任务列表 GET 的 code
+static NSInteger gShareDiagShareCode = -1; // share-callback 的 code（-1 表示没拿到/没调过）
+static NSInteger gShareDiagRewardCode = -1; // task/reward 的 code
+static NSString *gShareDiagLastMessage = nil;
+
+static NSString *NEAutoShareDiagText(void) {
+    NSString *time = gShareDiagLastTime.length ? gShareDiagLastTime : @"—";
+    NSString *res = gShareDiagLastResult.length ? gShareDiagLastResult : @"未检查";
+    NSMutableString *out = [NSMutableString stringWithFormat:@"上次检查 %@ · %@", time, res];
+    if (gShareDiagTaskCode >= 0) [out appendFormat:@" · 任务列表 %d", (int)gShareDiagTaskCode];
+    if (gShareDiagShareCode >= 0) [out appendFormat:@" · 分享 %d", (int)gShareDiagShareCode];
+    if (gShareDiagRewardCode >= 0) [out appendFormat:@" · 领奖 %d", (int)gShareDiagRewardCode];
+    [gAuthLock lock];
+    BOOL tpl = gShareTplCaptured;
+    [gAuthLock unlock];
+    [out appendFormat:@" · 模板:%@", tpl ? @"已捕获" : @"未捕获（先手动分享一次）"];
+    if (gShareDiagLastMessage.length) [out appendFormat:@"（%@）", gShareDiagLastMessage];
+    return out;
+}
+
+static void NEAutoShareNoteCheck(NSString *result, NSInteger code) {
+    gShareDiagLastTime = NEAutoSignInNowHHmm();
+    gShareDiagLastResult = result;
+    gShareDiagLastCode = code;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [[NSNotificationCenter defaultCenter]
+            postNotificationName:@"NEAutoShareRecordChanged" object:nil];
+    });
+}
+
+static NSString *NEAutoShareDiagExportLine(void) {
+    return [NSString stringWithFormat:@"[自动分享] %@", NEAutoShareDiagText()];
+}
+
+// ---- 自动分享运行状态 ----
+static BOOL gAutoShareDoneToday = NO;
+static BOOL gAutoShareCheckPending = NO;
+static BOOL gAutoShareEverScheduled = NO;
+static id gAutoShareObserver = nil;
+
+static void NEAutoShareScheduleAfter(double seconds);
+static void NEAutoShareRun(void);
+static void NEAutoShareEndPass(void) {
+    gAutoShareCheckPending = NO;
+}
+
+// 任务列表 / 领奖用的头：Authorization + Accept + 四个 H5 头 +
+// App 自己的 User-Agent（抓到才带）。和签到拼法一致（23 号实测这套
+// 头调 task/reward 能通，报的是业务码 43003 不是鉴权错）。
+static void NEAutoShareApplyH5Headers(NSMutableURLRequest *req, NSString *auth, BOOL isPost) {
+    if (auth.length) [req setValue:auth forHTTPHeaderField:@"Authorization"];
+    if (isPost) [req setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
+    [req setValue:@"application/json" forHTTPHeaderField:@"Accept"];
+    [req setValue:@"https://h5-bj.ninebot.com" forHTTPHeaderField:@"Origin"];
+    [req setValue:@"https://h5-bj.ninebot.com/" forHTTPHeaderField:@"Referer"];
+    [req setValue:@"zh" forHTTPHeaderField:@"language"];
+    [req setValue:@"1" forHTTPHeaderField:@"from_platform"];
+    [gAuthLock lock];
+    NSString *ua = gCapturedUserAgent;
+    [gAuthLock unlock];
+    if (ua.length) [req setValue:ua forHTTPHeaderField:@"User-Agent"];
+}
+
+// 任务列表里找“每日分享”：返回 taskId（字符串），找不到返回 nil。
+// 列表结构：data.list 或 data 或顶层 list；每项有 title / taskId /
+// totalCount / rewardStatus。taskId 优先按字符串取。
+static NSString *NEAutoShareFindShareTaskId(NSDictionary *json, NSInteger *outTotalCount) {
+    if (outTotalCount) *outTotalCount = -1;
+    id data = json[@"data"];
+    NSArray *list = nil;
+    if ([data isKindOfClass:[NSArray class]]) list = (NSArray *)data;
+    else if ([data isKindOfClass:[NSDictionary class]]) {
+        id l = ((NSDictionary *)data)[@"list"];
+        if ([l isKindOfClass:[NSArray class]]) list = (NSArray *)l;
+    }
+    if (!list) {
+        id top = json[@"list"];
+        if ([top isKindOfClass:[NSArray class]]) list = (NSArray *)top;
+    }
+    if (!list) return nil;
+    for (id item in list) {
+        if (![item isKindOfClass:[NSDictionary class]]) continue;
+        NSDictionary *t = (NSDictionary *)item;
+        NSString *title = t[@"title"];
+        if (![title isKindOfClass:[NSString class]]) title = @"";
+        if ([title rangeOfString:@"分享"].location == NSNotFound) continue;
+        id tid = t[@"taskId"];
+        NSString *taskId = nil;
+        if ([tid isKindOfClass:[NSString class]]) taskId = (NSString *)tid;
+        else if ([tid isKindOfClass:[NSNumber class]]) taskId = [(NSNumber *)tid stringValue];
+        if (outTotalCount) {
+            id tc = t[@"totalCount"];
+            if ([tc isKindOfClass:[NSNumber class]]) *outTotalCount = [(NSNumber *)tc integerValue];
+        }
+        if (taskId.length) return taskId;
+        return nil;
+    }
+    return nil;
+}
+
+// ① 任务列表 GET。completion(taskId, totalCount, code, message)：
+// taskId 为 nil 表示没找到/失败；code 是服务端 code（-1 表示网络/解析失败）。
+static void NEAutoShareFetchTaskList(NSString *auth, void (^completion)(NSString *, NSInteger, NSInteger, NSString *)) {
+    NSURL *url = [NSURL URLWithString:@"https://cn-cbu-gateway.ninebot.com/portal/api/task-center/task/v3/list?typeCode=2&appVersion=610133858&platformType=iOS"];
+    if (!url) { if (completion) completion(nil, -1, -1, @"URL 错"); return; }
+    NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:url];
+    req.HTTPMethod = @"GET";
+    NEAutoShareApplyH5Headers(req, auth, NO);
+    NSURLSessionDataTask *task = [NESignInSession() dataTaskWithRequest:req completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
+        if (err || !data) { if (completion) completion(nil, -1, -1, @"网络失败"); return; }
+        NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+        if (![json isKindOfClass:[NSDictionary class]]) { if (completion) completion(nil, -1, -1, @"返回不是 JSON"); return; }
+        NSNumber *codeNum = json[@"code"];
+        NSInteger code = codeNum ? [codeNum integerValue] : -1;
+        if (code != 0) { if (completion) completion(nil, -1, code, NEAutoSignInServerMessage(json)); return; }
+        NSInteger total = -1;
+        NSString *taskId = NEAutoShareFindShareTaskId(json, &total);
+        if (completion) completion(taskId, total, code, NEAutoSignInServerMessage(json));
+    }];
+    [task resume];
+}
+
+// ② 重放 share-callback（按模板原样发，只换 token / service-time /
+// request-id）。completion(httpStatus, code)：httpStatus 是 HTTP 状态码；
+// code 是服务端 code（解析不到时 -1）。HTTP 不是 200 就不往下领奖。
+static void NEAutoShareReplayShare(NSString *bareToken, void (^completion)(NSInteger, NSInteger)) {
+    NEAutoShareLoadTemplateIfNeeded();
+    NSURL *url = gShareTplURL;
+    if (!url) url = [NSURL URLWithString:@"https://cn-cbu-gateway.ninebot.com/app-api/circle/v1/share-callback"];
+    if (!url || !gShareTplBody.length) { if (completion) completion(-1, -1); return; }
+    NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:url];
+    req.HTTPMethod = gShareTplMethod.length ? gShareTplMethod : @"POST";
+    if (gShareTplHeaders) {
+        for (NSString *hk in gShareTplHeaders) {
+            [req setValue:gShareTplHeaders[hk] forHTTPHeaderField:hk];
+        }
+    }
+    if (bareToken.length) {
+        [req setValue:bareToken forHTTPHeaderField:@"access-token"];
+        [req setValue:bareToken forHTTPHeaderField:@"access_token"];
+    }
+    long long ms = (long long)([[NSDate date] timeIntervalSince1970] * 1000.0);
+    [req setValue:[NSString stringWithFormat:@"%lld", ms] forHTTPHeaderField:@"service-time"];
+    NSString *rid = [[[NSUUID UUID] UUIDString] stringByReplacingOccurrencesOfString:@"-" withString:@""];
+    [req setValue:[rid lowercaseString] forHTTPHeaderField:@"request-id"];
+    req.HTTPBody = gShareTplBody;
+    NSURLSessionDataTask *task = [NESignInSession() dataTaskWithRequest:req completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
+        NSInteger status = -1;
+        if ([resp isKindOfClass:[NSHTTPURLResponse class]]) status = [(NSHTTPURLResponse *)resp statusCode];
+        NSInteger code = -1;
+        if (data.length) {
+            NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+            if ([json isKindOfClass:[NSDictionary class]] && json[@"code"]) code = [json[@"code"] integerValue];
+        }
+        if (completion) completion(status, code);
+    }];
+    [task resume];
+}
+
+// ③ 领奖 POST。completion(code, message)
+static void NEAutoShareClaimReward(NSString *auth, NSString *taskId, void (^completion)(NSInteger, NSString *)) {
+    NSURL *url = [NSURL URLWithString:@"https://cn-cbu-gateway.ninebot.com/portal/self-service/task/reward"];
+    if (!url) { if (completion) completion(-1, @"URL 错"); return; }
+    NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:url];
+    req.HTTPMethod = @"POST";
+    NEAutoShareApplyH5Headers(req, auth, YES);
+    req.HTTPBody = [NSJSONSerialization dataWithJSONObject:@{@"taskId": taskId} options:0 error:nil];
+    NSURLSessionDataTask *task = [NESignInSession() dataTaskWithRequest:req completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
+        if (err || !data) { if (completion) completion(-1, @"网络失败"); return; }
+        NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+        if (![json isKindOfClass:[NSDictionary class]]) { if (completion) completion(-1, @"返回不是 JSON"); return; }
+        NSNumber *codeNum = json[@"code"];
+        NSInteger code = codeNum ? [codeNum integerValue] : -1;
+        if (completion) completion(code, NEAutoSignInServerMessage(json));
+    }];
+    [task resume];
+}
+
+// 静默分享领奖：任务列表 → 重放 share-callback → 领奖。只记 code，不记 token。
+static void NEAutoShareRun(void) {
+    if (!NEAutoShareEnabled()) { gAutoShareCheckPending = NO; return; }
+    NSString *last = [[NSUserDefaults standardUserDefaults] stringForKey:@"NEAutoShareLastDate"];
+    if ([last isEqualToString:NEAutoSignInTodayString()]) {
+        // 今天已处理过（成功或已领过才记日期），不用再跑
+        gAutoShareDoneToday = YES;
+        gAutoShareCheckPending = NO;
+        return;
+    }
+    gShareDiagTaskCode = -1;
+    gShareDiagShareCode = -1;
+    gShareDiagRewardCode = -1;
+    gShareDiagLastMessage = nil;
+    NEAutoShareLoadTemplateIfNeeded();
+    if (!gShareTplCaptured || !gShareTplBody.length) {
+        NEAutoShareNoteCheck(@"无分享模板，先手动分享一次", -1);
+        os_log(gLog, "[SHARE] 跳过：没有 share-callback 模板（先手动分享一次）");
+        NEAutoShareEndPass();
+        return;
+    }
+    NSArray *cands = NEAutoSignInAuthCandidates();
+    NSDictionary *cand0 = cands.count ? cands[0] : nil;
+    NSString *auth = cand0[@"auth"];
+    NSString *bareToken = nil;
+    if (auth.length) {
+        bareToken = NEAuthHasBearerPrefix(auth) ? [auth substringFromIndex:7] : auth;
+    }
+    if (!bareToken.length || !auth.length) {
+        NEAutoShareNoteCheck(@"无 token", -1);
+        os_log(gLog, "[SHARE] 跳过：token 未找到");
+        NEAutoShareEndPass();
+        return;
+    }
+    // ① 任务列表：拿每日分享的 taskId 与今天已领次数
+    NEAutoShareFetchTaskList(auth, ^(NSString *taskId, NSInteger totalCount, NSInteger code, NSString *message) {
+        gShareDiagTaskCode = code;
+        if (message.length) gShareDiagLastMessage = message;
+        if (!taskId.length) {
+            NEAutoShareNoteCheck(code == 0 ? @"没找到每日分享任务" : @"任务列表失败", code);
+            os_log(gLog, "[SHARE] 任务列表没拿到每日分享 taskId（code=%ld）", (long)code);
+            NEAutoShareEndPass();
+            return;
+        }
+        if (totalCount >= 1) {
+            // 今天已领过（totalCount 是今天已完成次数）
+            NENoteShareDoneToday(@"今天已领过");
+            gAutoShareDoneToday = YES;
+            NEAutoShareEndPass();
+            NEAutoShareNoteCheck(@"今天已领过", 0);
+            os_log(gLog, "[SHARE] 今天已领过（totalCount=%ld），不重复领", (long)totalCount);
+            return;
+        }
+        // ② 重放 share-callback 记一次分享
+        NEAutoShareReplayShare(bareToken, ^(NSInteger httpStatus, NSInteger shareCode) {
+            gShareDiagShareCode = shareCode;
+            if (httpStatus != 200) {
+                NEAutoShareNoteCheck(@"分享请求失败", httpStatus);
+                os_log(gLog, "[SHARE] share-callback HTTP %ld，不领奖", (long)httpStatus);
+                NEAutoShareEndPass();
+                return;
+            }
+            os_log(gLog, "[SHARE] share-callback HTTP 200（code=%ld），去领奖", (long)shareCode);
+            // ③ 领奖
+            NEAutoShareClaimReward(auth, taskId, ^(NSInteger rewardCode, NSString *rewardMsg) {
+                gShareDiagRewardCode = rewardCode;
+                if (rewardMsg.length) gShareDiagLastMessage = rewardMsg;
+                if (rewardCode == 0) {
+                    NENoteShareDoneToday(@"已领到 1 N币");
+                    gAutoShareDoneToday = YES;
+                    NEAutoShareEndPass();
+                    NEAutoShareNoteCheck(@"已领到 1 N币", 0);
+                    os_log(gLog, "[SHARE] 领奖成功（code 0）");
+                } else if (rewardCode == 43003) {
+                    // 43003 两义：分享未登记 / 今天已领过。再查一次任务列表，
+                    // totalCount 涨了就是已领过，否则是分享没登记（模板过期）。
+                    NEAutoShareFetchTaskList(auth, ^(NSString *taskId2, NSInteger totalCount2, NSInteger code2, NSString *message2) {
+                        if (totalCount2 > totalCount) {
+                            NENoteShareDoneToday(@"今天已领过");
+                            gAutoShareDoneToday = YES;
+                            NEAutoShareEndPass();
+                            NEAutoShareNoteCheck(@"今天已领过", 0);
+                            os_log(gLog, "[SHARE] 43003 但 totalCount 已涨，算今天已领过");
+                        } else {
+                            NEAutoShareEndPass();
+                            NEAutoShareNoteCheck(@"分享未登记（模板可能过期）", 43003);
+                            os_log(gLog, "[SHARE] 领奖 43003，分享未登记——模板可能过期，手动分享一次刷新");
+                        }
+                    });
+                } else if (rewardCode == 54019) {
+                    NEAutoShareEndPass();
+                    NEAutoShareNoteCheck(@"会话失效", 54019);
+                    os_log(gLog, "[SHARE] 领奖报 54019（会话失效）");
+                } else {
+                    NEAutoShareEndPass();
+                    NEAutoShareNoteCheck([NSString stringWithFormat:@"领奖失败 code %ld", (long)rewardCode], rewardCode);
+                    os_log(gLog, "[SHARE] 领奖返回 code=%ld", (long)rewardCode);
+                }
+            });
+        });
+    });
+}
+
+static void NEAutoShareScheduleAfter(double seconds) {
+    if (!NEAutoShareEnabled()) return;
+    if (gAutoShareDoneToday || gAutoShareCheckPending) return;
+    gAutoShareCheckPending = YES;
+    gAutoShareEverScheduled = YES;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(seconds * NSEC_PER_SEC)),
+                   dispatch_get_global_queue(QOS_CLASS_BACKGROUND, 0), ^{
+        NEAutoShareRun();
+    });
+}
+
+// 每次进前台都试着排一次（已领成/已排时 ScheduleAfter 自己会拦）。
+// 万一注入时 App 已在前台（become-active 已发过），直接排一次。
+static void NEAutoShareTriggerIfNeeded(void) {
+    if (gAutoShareObserver) return;
+    gAutoShareObserver = [[NSNotificationCenter defaultCenter]
+        addObserverForName:UIApplicationDidBecomeActiveNotification object:nil
+        queue:[NSOperationQueue mainQueue] usingBlock:^(NSNotification *note) {
+        NEAutoShareScheduleAfter(gAutoShareEverScheduled ? 3.0 : 6.0);
+    }];
+    if ([[UIApplication sharedApplication] applicationState] == UIApplicationStateActive)
+        NEAutoShareScheduleAfter(6.0);
+}
+
+
 // ---------------- HUD 设置界面 ----------------
 // 九号 App 的“我的”页右上角会出现一个“Ninebot pro+”按钮。
 // 找页面的办法：每 3 秒看一次最上层 ViewController，只在“我的”页
@@ -5577,6 +5993,7 @@ static const char NEHUDButtonKey = 0;
 static const char NEBeautyGroupKey = 0; // 设置页：“美化娱乐”折叠容器
 static const char NENavGroupKey = 0;    // 设置页：“导航增强”折叠容器
 static const char NESignInRecordKey = 0; // 设置页：自动签到记录 label
+static const char NEShareRecordKey = 0; // 设置页：自动分享记录 label（v0.6.6）
 static const char NESpeedLimitValueKey = 0;
 
 @interface NEHUDSettingsVC : UIViewController
@@ -5799,6 +6216,31 @@ static void NECheckSettingsButton(void) {
     [signStack addArrangedSubview:[self ne_footnoteView:signNote]];
     [self ne_styleSeparatorsInStack:signStack];
     [stack addArrangedSubview:[self ne_cardWrappingStack:signStack]];
+
+    // ---- 自动分享卡（v0.6.6；单独一行，不折叠；每天领 1 N币）----
+    UIStackView *shareStack = [UIStackView new];
+    shareStack.axis = UILayoutConstraintAxisVertical;
+    shareStack.spacing = 0;
+    [shareStack addArrangedSubview:[self switchRow:@"自动分享（打开 App 时静默分享领 1 N币）" key:@"NEAutoShare" on:NEAutoShareEnabled()]];
+    UILabel *shareRecord = [UILabel new];
+    shareRecord.text = NEAutoShareRecordText();
+    shareRecord.font = [UIFont systemFontOfSize:13];
+    shareRecord.textColor = [UIColor secondaryLabelColor];
+    shareRecord.numberOfLines = 0;
+    objc_setAssociatedObject(self, &NEShareRecordKey, shareRecord, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    [shareStack addArrangedSubview:[self ne_footnoteView:shareRecord]];
+    UILabel *shareNote = [UILabel new];
+    shareNote.text = @"打开 App 时自动分享并领奖，每天一次；第一次用要先手动分享一次（插件记下分享请求当模板）。";
+    shareNote.font = [UIFont systemFontOfSize:13];
+    shareNote.textColor = [UIColor secondaryLabelColor];
+    shareNote.numberOfLines = 0;
+    [shareStack addArrangedSubview:[self ne_footnoteView:shareNote]];
+    [self ne_styleSeparatorsInStack:shareStack];
+    [stack addArrangedSubview:[self ne_cardWrappingStack:shareStack]];
+    // 分享跑完发来的通知：设置页开着时也刷新记录行
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(onShareRecordChanged:)
+                                                 name:@"NEAutoShareRecordChanged" object:nil];
     // 签到跑完（成功或已签）会发通知，设置页开着时也刷新记录行
     [[NSNotificationCenter defaultCenter] addObserver:self
                                              selector:@selector(onSignInRecordChanged:)
@@ -5916,7 +6358,7 @@ static void NECheckSettingsButton(void) {
     aboutName.text = @"NinebotEnhance";
     aboutName.font = [UIFont boldSystemFontOfSize:16];
     UILabel *aboutVer = [UILabel new];
-    aboutVer.text = @"0.6.5";
+    aboutVer.text = @"0.6.6";
     aboutVer.font = [UIFont systemFontOfSize:15];
     aboutVer.textColor = [UIColor secondaryLabelColor];
     [aboutTitleRow addArrangedSubview:aboutName];
@@ -5962,6 +6404,7 @@ static void NECheckSettingsButton(void) {
 - (void)viewWillAppear:(BOOL)animated {
     [super viewWillAppear:animated];
     [self refreshSignInRecord];
+    [self refreshShareRecord];
 }
 
 // 签到记录行：打开设置页时按最新状态刷一遍（签到可能在设置页打开前已跑完；
@@ -5974,6 +6417,17 @@ static void NECheckSettingsButton(void) {
 // 签到跑完发来的通知（成功或今天已签过都发）：设置页开着时也刷新记录行
 - (void)onSignInRecordChanged:(NSNotification *)note {
     [self refreshSignInRecord];
+}
+
+// 分享记录行：打开设置页时按最新状态刷一遍（v0.6.6）
+- (void)refreshShareRecord {
+    UILabel *record = objc_getAssociatedObject(self, &NEShareRecordKey);
+    if (record) record.text = NEAutoShareRecordText();
+}
+
+// 分享跑完发来的通知：设置页开着时也刷新记录行
+- (void)onShareRecordChanged:(NSNotification *)note {
+    [self refreshShareRecord];
 }
 
 - (void)dealloc {
@@ -6299,6 +6753,8 @@ static void NECheckSettingsButton(void) {
     }
     // v0.4.1 自动签到：打开开关就排一次静默签到（今天没签成、且没已排的检查时）
     if ([key isEqualToString:@"NEAutoSignIn"] && sw.isOn) NEAutoSignInScheduleAfter(1.0);
+    // v0.6.6 自动分享：打开开关就排一次静默分享（今天没领成、且没已排的检查时）
+    if ([key isEqualToString:@"NEAutoShare"] && sw.isOn) NEAutoShareScheduleAfter(1.0);
 }
 
 // 限速行：左边“限速”+ 中间值 + 右边步进器（30–120，每 5 一档）
@@ -7125,6 +7581,9 @@ static void NEProbeStart(void) {
 
         // v0.4.1 自动签到（保险）：每次进前台时静默补签（今天没签成时才跑，开关默认开）
         NEAutoSignInTriggerIfNeeded();
+
+        // v0.6.6 自动分享：每次进前台时静默分享领奖（今天没领成时才跑，开关默认关）
+        NEAutoShareTriggerIfNeeded();
 
         // v0.3.9 修复：启动 3 秒后强制刷新一次文字+图片——页面可能在钩子装好前已加载，
         // 或主题图在钩子装好前已设好，靠刷新再补一次。
