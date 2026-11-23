@@ -1,4 +1,15 @@
-// NinebotEnhance iOS v0.6.2 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
+// NinebotEnhance iOS v0.6.3 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
+//
+// v0.6.3 修续航开开关不实时更新（0.6.2 还是不行，用户 14:38 实锤）：
+//  根因找到了——不是认法不对，是 `!NEHasAdjacentPercentLabel` 这个守卫在
+//  条件最前面把所有路都堵死了。电量“%”在续航数字上方 30 多 px，上下相邻
+//  的阈值是 60px，横向又重叠，所以“78.1”也被判成“旁边有 %”，整个条件
+//  直接短路成 false，坐标/兄弟/MileageView 三条路全没机会跑。启动时能换
+//  是因为那时“%”还没创建出来，守卫放行；数据到了、“%”一出现就再也认
+//  不出来——开开关必须重启、关开关却能实时恢复，就是这么来的。修：
+//  MileageView 两条路绕开 % 守卫（电量在 BatteryView 那边，祖先里没
+//  MileageView、框也不和它重叠，绕开是安全的）；“续航”文字两条路仍留
+//  % 守卫。含 0.6.2 全部内容（服务有效期已移到 N币余额上面）。
 //
 // v0.6.2 两件事：①修续航开开关不实时更新（0.6.1 没修好，用户 14:09 实锤，
 // 开开关必须重启才显示、关开关可以实时恢复）：诊断（ne-diag-fe80540d.txt，
@@ -1250,19 +1261,25 @@ static NSString *NEFixedLabelString(NSString *text, UILabel *label,
                 });
                 if (sRangeOnlyRe && [sRangeOnlyRe firstMatchInString:text options:0
                                                                 range:NSMakeRange(0, text.length)] &&
-                    !NEHasAdjacentPercentLabel(label) &&
-                    (NEHorizontallyAdjacentLabelContaining(label, @"续航") ||
-                     // v0.6.1：设备页不在 key window 里时坐标算不出，同行相邻
-                     // 永远认不到，改用兄弟 label 认“续航”（同一行三个 label），
-                     // 兄弟里有“%”的是电量，排除。
-                     (NEHasSiblingLabelContaining(label, @"续航") &&
-                      !NEHasSiblingLabelContaining(label, @"%")) ||
-                     // v0.6.2：“续航”文字 label 是动态加的，诊断里看不到、
-                     // 兄弟关系也对不上；改认 MileageView——续航数字就在它那块
-                     // 区域（祖先里有它，或框和它重叠）；电量在 BatteryView
-                     // 那边，不会误认。
-                     NEHasAncestorWithClassContaining(label, @"MileageView") ||
-                     NEIsLabelInsideMileageView(label))) {
+                    // v0.6.3：根因找到了——`!NEHasAdjacentPercentLabel` 这个守卫
+                    // 挡住了所有续航认法。电量“%”在续航数字上方 30 多 px，上下
+                    // 相邻的阈值是 60px，横向又重叠，所以“78.1”也被判成“旁边
+                    // 有 %”，整个条件直接短路成 false，坐标/兄弟/MileageView
+                    // 三条路全没机会跑。启动时能换是因为那时“%”还没创建出来，
+                    // 守卫放行；数据到了、“%”一出现就再也认不出来——开开关必须
+                    // 重启、关开关却能实时恢复，就是这么来的。修：MileageView
+                    // 两条路绕开 % 守卫（电量在 BatteryView 那边，祖先里没
+                    // MileageView、框也不和它重叠，绕开是安全的）；“续航”文字
+                    // 两条路仍留 % 守卫，免得把电量认进来。
+                    (NEHasAncestorWithClassContaining(label, @"MileageView") ||
+                     NEIsLabelInsideMileageView(label) ||
+                     (!NEHasAdjacentPercentLabel(label) &&
+                      (NEHorizontallyAdjacentLabelContaining(label, @"续航") ||
+                       // v0.6.1：设备页不在 key window 里时坐标算不出，同行相邻
+                       // 永远认不到，改用兄弟 label 认“续航”（同一行三个 label），
+                       // 兄弟里有“%”的是电量，排除。
+                       (NEHasSiblingLabelContaining(label, @"续航") &&
+                        !NEHasSiblingLabelContaining(label, @"%")))))) {
                     if (fieldOut) *fieldOut = @"NEDeviceRange";
                     if (separateOut) *separateOut = YES;
                     // v0.5.9：分开 label 只写数字本身——“km”是旁边另一个 label，
@@ -5888,7 +5905,7 @@ static void NECheckSettingsButton(void) {
     aboutName.text = @"NinebotEnhance";
     aboutName.font = [UIFont boldSystemFontOfSize:16];
     UILabel *aboutVer = [UILabel new];
-    aboutVer.text = @"0.6.2";
+    aboutVer.text = @"0.6.3";
     aboutVer.font = [UIFont systemFontOfSize:15];
     aboutVer.textColor = [UIColor secondaryLabelColor];
     [aboutTitleRow addArrangedSubview:aboutName];
