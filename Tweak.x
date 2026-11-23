@@ -1,4 +1,11 @@
-// NinebotEnhance iOS v0.4.9 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
+// NinebotEnhance iOS v0.5.0 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
+//
+// v0.5.0 设备页左上角车辆名字+续航自定义（用户新想法）：
+//  美化娱乐组新增两行“车辆名字”“续航”，默认开关关闭；开启后自己输入想要显示
+//  的内容。车辆名字认设备页左上角的车辆名 label（单 token ASCII 名，根页面
+//  坐标左上区域），整串替换；续航认含“续航”的 label（同 label 或分开 label），
+//  只换数字+单位那一段，输入纯数字自动补 km。开关与输入改完立即生效（已有的
+//  自定义显示刷新机制）。含 0.4.9 全部内容。
 //
 // v0.4.9 车辆图自适应（用户问“能不能让它自适应我自定义图片的大小”）：
 //  自定义车辆图不再被车辆框拉伸变形。给自定义车辆图时把那个 UIImageView 的
@@ -559,9 +566,11 @@ static BOOL NEBoolDefault(NSString *key) {
     id v = [[NSUserDefaults standardUserDefaults] objectForKey:key];
     return v ? [v boolValue] : NO;
 }
-static BOOL gNCoins = NO, gMileage = NO, gLevel = NO, gTitle = NO, gSignDays = NO;
+static BOOL gNCoins = NO, gMileage = NO, gLevel = NO, gTitle = NO, gSignDays = NO,
+            gDeviceName = NO, gDeviceRange = NO;
 static NSString *gNCoinsValue = nil, *gMileageValue = nil, *gLevelValue = nil,
-                *gTitleValue = nil, *gSignDaysValue = nil;
+                *gTitleValue = nil, *gSignDaysValue = nil,
+                *gDeviceNameValue = nil, *gDeviceRangeValue = nil;
 static void NESyncCustomDisplayCache(void) {
     NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
     gNCoins = NEBoolDefault(@"NENCoins");
@@ -569,11 +578,15 @@ static void NESyncCustomDisplayCache(void) {
     gLevel = NEBoolDefault(@"NELevel");
     gTitle = NEBoolDefault(@"NETitle");
     gSignDays = NEBoolDefault(@"NESignDays");
+    gDeviceName = NEBoolDefault(@"NEDeviceName");
+    gDeviceRange = NEBoolDefault(@"NEDeviceRange");
     gNCoinsValue = [d stringForKey:@"NENCoinsValue"];
     gMileageValue = [d stringForKey:@"NEMileageValue"];
     gLevelValue = [d stringForKey:@"NELevelValue"];
     gTitleValue = [d stringForKey:@"NETitleValue"];
     gSignDaysValue = [d stringForKey:@"NESignDaysValue"];
+    gDeviceNameValue = [d stringForKey:@"NEDeviceNameValue"];
+    gDeviceRangeValue = [d stringForKey:@"NEDeviceRangeValue"];
     gValidityValue = [d stringForKey:@"NEValidityValue"];
 }
 
@@ -583,6 +596,26 @@ static NSString *NEValidityDisplayValue(void) {
     NSString *v = [gValidityValue stringByTrimmingCharactersInSet:
                    [NSCharacterSet whitespaceAndNewlineCharacterSet]];
     return v.length ? v : nil;
+}
+
+// 续航实际要显示的值（数字+单位）：用户填的（去空白）；纯数字自动补 km；
+// 已带单位直接用；没填返回 nil。
+static NSString *NEDeviceRangeDisplayValue(void) {
+    NSString *v = [gDeviceRangeValue stringByTrimmingCharactersInSet:
+                   [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (!v.length) return nil;
+    static NSRegularExpression *sPureNumRe = nil;
+    static dispatch_once_t sPureOnce;
+    dispatch_once(&sPureOnce, ^{
+        sPureNumRe = [NSRegularExpression regularExpressionWithPattern:
+                      @"^\\d+(\\.\\d+)?$"
+                      options:0 error:nil];
+    });
+    if (sPureNumRe && [sPureNumRe firstMatchInString:v options:0
+                                                range:NSMakeRange(0, v.length)]) {
+        return [v stringByAppendingString:@"km"];
+    }
+    return v;
 }
 
 // v0.3.9 修复：文字替换根因——App 的数字和单位/描述经常不在同一个 label 里
@@ -757,6 +790,9 @@ static BOOL NEIsLabelInOwnSettingsPage(UILabel *label) {
     }
     return NO;
 }
+
+// 车辆名识别要换算到根页面坐标，NEDeviceRootPageVC 定义在后面，这里先声明。
+static UIViewController *NEDeviceRootPageVC(void);
 
 // 所有文字替换共用：输入 label 的纯文本（setText: 的 text 或 attributedText.string），
 // 返回替换后的字符串；没有可换的返回 nil。
@@ -947,6 +983,85 @@ static NSString *NEFixedLabelString(NSString *text, UILabel *label,
         if (fieldOut) *fieldOut = @"NENCoins";
         if (separateOut) *separateOut = YES;
         return gNCoinsValue;
+    }
+    // 7. 车辆名字：设备页左上角的车辆名 label（单 token、ASCII 字母数字/_/-/.，2-30 字符）。
+    //    须在设备根页面内且在左上区域（根页面坐标 x<220, y<180）；未布局（frame 为空）时
+    //    不判，等刷新再算。匹配到就整串换自定义名。
+    if (gDeviceName) {
+        NSString *nv = [gDeviceNameValue stringByTrimmingCharactersInSet:
+                        [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if (nv.length > 0 && text.length >= 2 && text.length <= 30 &&
+            [text rangeOfString:@" "].location == NSNotFound &&
+            [text rangeOfString:@"续航"].location == NSNotFound &&
+            [text rangeOfString:@"%"].location == NSNotFound) {
+            static NSRegularExpression *sNameRe = nil;
+            static dispatch_once_t sNameOnce;
+            dispatch_once(&sNameOnce, ^{
+                sNameRe = [NSRegularExpression regularExpressionWithPattern:
+                           @"^[A-Za-z0-9_\\-\\.]{2,30}$"
+                           options:0 error:nil];
+            });
+            if (sNameRe && [sNameRe firstMatchInString:text options:0
+                                                  range:NSMakeRange(0, text.length)]) {
+                UIViewController *rootPage = NEDeviceRootPageVC();
+                if (rootPage && rootPage.view) {
+                    BOOL onDevicePage = NO;
+                    for (UIView *p = label; p; p = p.superview) {
+                        if (p == rootPage.view) { onDevicePage = YES; break; }
+                    }
+                    if (onDevicePage) {
+                        CGRect f = CGRectZero;
+                        @try { f = [label convertRect:label.bounds toView:rootPage.view]; }
+                        @catch (...) { f = CGRectZero; }
+                        if (!CGRectIsEmpty(f) && f.origin.x < 220 && f.origin.y < 180) {
+                            if (fieldOut) *fieldOut = @"NEDeviceName";
+                            return nv;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // 8. 续航：同 label 含“续航”+数字+单位，只换数字+单位那一段；
+    //    分开 label：纯“数字+km”+ 旁边有“续航”，整串换自定义值（纯数字自动补 km）。
+    if (gDeviceRange) {
+        NSString *rep = NEDeviceRangeDisplayValue();
+        if (rep.length > 0) {
+            if ([text rangeOfString:@"续航"].location != NSNotFound) {
+                static NSRegularExpression *sRangeRe = nil;
+                static dispatch_once_t sRangeOnce;
+                dispatch_once(&sRangeOnce, ^{
+                    sRangeRe = [NSRegularExpression regularExpressionWithPattern:
+                                @"\\d+(\\.\\d+)?\\s*(km|公里)?"
+                                options:0 error:nil];
+                });
+                if (sRangeRe) {
+                    NSRange keyRange = [text rangeOfString:@"续航"];
+                    NSRange search = NSMakeRange(keyRange.location + keyRange.length,
+                                                text.length - (keyRange.location + keyRange.length));
+                    NSTextCheckingResult *m = [sRangeRe firstMatchInString:text options:0 range:search];
+                    if (m) {
+                        if (fieldOut) *fieldOut = @"NEDeviceRange";
+                        return [text stringByReplacingCharactersInRange:m.range withString:rep];
+                    }
+                }
+            } else {
+                static NSRegularExpression *sRangeOnlyRe = nil;
+                static dispatch_once_t sRangeOnlyOnce;
+                dispatch_once(&sRangeOnlyOnce, ^{
+                    sRangeOnlyRe = [NSRegularExpression regularExpressionWithPattern:
+                                    @"^\\s*\\d+(\\.\\d+)?\\s*(km|公里)?\\s*$"
+                                    options:0 error:nil];
+                });
+                if (sRangeOnlyRe && [sRangeOnlyRe firstMatchInString:text options:0
+                                                                range:NSMakeRange(0, text.length)] &&
+                    NEAdjacentLabelContaining(label, @"续航")) {
+                    if (fieldOut) *fieldOut = @"NEDeviceRange";
+                    if (separateOut) *separateOut = YES;
+                    return rep;
+                }
+            }
+        }
     }
     return nil;
 }
@@ -1523,6 +1638,19 @@ static NSString *NEFieldCurrentValue(NSString *field, BOOL separate) {
         NSString *v = gLevelValue;
         if ([v hasPrefix:@"Lv."] || [v hasPrefix:@"lv."]) return [v substringFromIndex:3];
         return v;
+    }
+    if ([field isEqualToString:@"NEDeviceName"]) {
+        if (!gDeviceName) return nil;
+        NSString *v = [gDeviceNameValue stringByTrimmingCharactersInSet:
+                       [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        return v.length ? v : nil;
+    }
+    if ([field isEqualToString:@"NEDeviceRange"]) {
+        if (!gDeviceRange) return nil;
+        // 分开 label（纯数字+km）直接返回归一化值；同 label（“续航 78.1km”）返回 nil，
+        // 让刷新走重匹配（当前文本仍含“续航”+数字，能算出新值）。
+        if (!separate) return nil;
+        return NEDeviceRangeDisplayValue();
     }
     return nil;
 }
@@ -5301,6 +5429,8 @@ static void NECheckSettingsButton(void) {
     [beautyStack addArrangedSubview:[self customDisplayRow:@"等级（1-9）" toggleKey:@"NELevel" valueKey:@"NELevelValue" on:NEBoolDefault(@"NELevel") value:[defs stringForKey:@"NELevelValue"] placeholder:@"如 Lv.99"]];
     [beautyStack addArrangedSubview:[self customDisplayRow:@"称号" toggleKey:@"NETitle" valueKey:@"NETitleValue" on:NEBoolDefault(@"NETitle") value:[defs stringForKey:@"NETitleValue"] placeholder:@"如 车神"]];
     [beautyStack addArrangedSubview:[self customDisplayRow:@"签到天数" toggleKey:@"NESignDays" valueKey:@"NESignDaysValue" on:NEBoolDefault(@"NESignDays") value:[defs stringForKey:@"NESignDaysValue"] placeholder:@"如 365"]];
+    [beautyStack addArrangedSubview:[self customDisplayRow:@"车辆名字" toggleKey:@"NEDeviceName" valueKey:@"NEDeviceNameValue" on:NEBoolDefault(@"NEDeviceName") value:[defs stringForKey:@"NEDeviceNameValue"] placeholder:@"如 我的爱车"]];
+    [beautyStack addArrangedSubview:[self customDisplayRow:@"续航" toggleKey:@"NEDeviceRange" valueKey:@"NEDeviceRangeValue" on:NEBoolDefault(@"NEDeviceRange") value:[defs stringForKey:@"NEDeviceRangeValue"] placeholder:@"如 150（自动补 km）"]];
     [self ne_styleSeparatorsInStack:beautyStack];
     UIView *beautyCard = [self ne_cardWrappingStack:beautyStack];
     beautyCard.hidden = YES; // 默认折叠，折叠状态存在卡片上
@@ -5372,7 +5502,7 @@ static void NECheckSettingsButton(void) {
     aboutName.text = @"NinebotEnhance";
     aboutName.font = [UIFont boldSystemFontOfSize:16];
     UILabel *aboutVer = [UILabel new];
-    aboutVer.text = @"0.4.9";
+    aboutVer.text = @"0.5.0";
     aboutVer.font = [UIFont systemFontOfSize:15];
     aboutVer.textColor = [UIColor secondaryLabelColor];
     [aboutTitleRow addArrangedSubview:aboutName];
