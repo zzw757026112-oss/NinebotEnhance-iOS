@@ -1,15 +1,12 @@
-// NinebotEnhance iOS v0.6.3 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
+// NinebotEnhance iOS v0.6.4 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
 //
-// v0.6.3 修续航开开关不实时更新（0.6.2 还是不行，用户 14:38 实锤）：
-//  根因找到了——不是认法不对，是 `!NEHasAdjacentPercentLabel` 这个守卫在
-//  条件最前面把所有路都堵死了。电量“%”在续航数字上方 30 多 px，上下相邻
-//  的阈值是 60px，横向又重叠，所以“78.1”也被判成“旁边有 %”，整个条件
-//  直接短路成 false，坐标/兄弟/MileageView 三条路全没机会跑。启动时能换
-//  是因为那时“%”还没创建出来，守卫放行；数据到了、“%”一出现就再也认
-//  不出来——开开关必须重启、关开关却能实时恢复，就是这么来的。修：
-//  MileageView 两条路绕开 % 守卫（电量在 BatteryView 那边，祖先里没
-//  MileageView、框也不和它重叠，绕开是安全的）；“续航”文字两条路仍留
-//  % 守卫。含 0.6.2 全部内容（服务有效期已移到 N币余额上面）。
+// v0.6.4 修设置页键盘遮住输入框（用户 14:42 视频实锤）：点最底下的续航
+//  输入框时键盘弹起把输入框盖住，看不见自己在输什么。修法：注册
+//  UIKeyboardWillShow/Hide + UITextFieldTextDidBeginEditing 通知，
+//  键盘出现时给 scroll view 底部加内边距（键盘与 scroll view 的交叠高
+//  度）、把正在编辑的输入框滚到可见处；键盘收起时恢复；键盘已弹起时点
+//  另一个输入框靠 DidBeginEditing 再滚一次。含 0.6.3 全部内容（续航
+//  MileageView 两条路绕开 % 守卫 + 服务有效期已移到 N币余额上面）。
 //
 // v0.6.2 两件事：①修续航开开关不实时更新（0.6.1 没修好，用户 14:09 实锤，
 // 开开关必须重启才显示、关开关可以实时恢复）：诊断（ne-diag-fe80540d.txt，
@@ -5805,6 +5802,19 @@ static void NECheckSettingsButton(void) {
     [[NSNotificationCenter defaultCenter] addObserver:self
                                              selector:@selector(onSignInRecordChanged:)
                                                  name:@"NEAutoSignInRecordChanged" object:nil];
+    // v0.6.4：键盘弹起会盖住底下的输入框（续航在最底下，输的时候看不
+    // 见自己在输什么，用户 14:42 视频实锤）。键盘出现时给 scroll view
+    // 底部加内边距、把正在编辑的输入框滚到可见处；键盘收起时恢复。
+    // dealloc 里已有 removeObserver:self，会一并清掉。
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(ne_keyboardWillShow:)
+                                                 name:UIKeyboardWillShowNotification object:nil];
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(ne_keyboardWillHide:)
+                                                 name:UIKeyboardWillHideNotification object:nil];
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(ne_textFieldDidBeginEditing:)
+                                                 name:UITextFieldTextDidBeginEditingNotification object:nil];
 
     // ---- 美化娱乐组（默认折叠，只改显示不改真数据）----
     UIStackView *beautyStack = [UIStackView new];
@@ -5905,7 +5915,7 @@ static void NECheckSettingsButton(void) {
     aboutName.text = @"NinebotEnhance";
     aboutName.font = [UIFont boldSystemFontOfSize:16];
     UILabel *aboutVer = [UILabel new];
-    aboutVer.text = @"0.6.3";
+    aboutVer.text = @"0.6.4";
     aboutVer.font = [UIFont systemFontOfSize:15];
     aboutVer.textColor = [UIColor secondaryLabelColor];
     [aboutTitleRow addArrangedSubview:aboutName];
@@ -6139,6 +6149,63 @@ static void NECheckSettingsButton(void) {
 
 - (void)dismissKeyboard {
     [self.view endEditing:YES];
+}
+
+// v0.6.4：键盘遮挡输入框的修法。scroll view 是 self.view 里唯一的
+// UIScrollView，直接找它。
+- (UIScrollView *)ne_settingsScrollView {
+    for (UIView *v in self.view.subviews) {
+        if ([v isKindOfClass:[UIScrollView class]]) return (UIScrollView *)v;
+    }
+    return nil;
+}
+
+- (UIView *)ne_firstResponderInView:(UIView *)view {
+    if (view.isFirstResponder) return view;
+    for (UIView *sub in view.subviews) {
+        UIView *found = [self ne_firstResponderInView:sub];
+        if (found) return found;
+    }
+    return nil;
+}
+
+// 正在编辑的输入框滚到可见处（上下各留 12pt 余量）
+- (void)ne_scrollTextFieldIntoView:(UITextField *)field {
+    UIScrollView *scroll = [self ne_settingsScrollView];
+    if (!scroll || !field) return;
+    CGRect r = [field convertRect:field.bounds toView:scroll];
+    r = CGRectInset(r, 0, -12);
+    [scroll scrollRectToVisible:r animated:YES];
+}
+
+- (void)ne_keyboardWillShow:(NSNotification *)note {
+    UIScrollView *scroll = [self ne_settingsScrollView];
+    if (!scroll) return;
+    // 键盘和 scroll view 的交叠高度就是要垫的底边距（浮动/分屏键盘也适用）
+    CGRect kbEnd = [note.userInfo[UIKeyboardFrameEndUserInfoKey] CGRectValue];
+    CGRect kbInView = [self.view convertRect:kbEnd fromView:nil];
+    CGFloat overlap = CGRectGetMaxY(scroll.frame) - CGRectGetMinY(kbInView);
+    if (overlap < 0) overlap = 0;
+    UIEdgeInsets insets = scroll.contentInset;
+    insets.bottom = overlap;
+    scroll.contentInset = insets;
+    scroll.scrollIndicatorInsets = insets;
+    UIView *first = [self ne_firstResponderInView:self.view];
+    if ([first isKindOfClass:[UITextField class]])
+        [self ne_scrollTextFieldIntoView:(UITextField *)first];
+}
+
+- (void)ne_keyboardWillHide:(NSNotification *)note {
+    UIScrollView *scroll = [self ne_settingsScrollView];
+    if (!scroll) return;
+    scroll.contentInset = UIEdgeInsetsZero;
+    scroll.scrollIndicatorInsets = UIEdgeInsetsZero;
+}
+
+// 键盘已弹起时点另一个输入框：WillShow 不会再发，靠这个把新输入框滚出来
+- (void)ne_textFieldDidBeginEditing:(NSNotification *)note {
+    if ([note.object isKindOfClass:[UITextField class]])
+        [self ne_scrollTextFieldIntoView:(UITextField *)note.object];
 }
 
 - (UIView *)switchRow:(NSString *)title key:(NSString *)key on:(BOOL)on {
