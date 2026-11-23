@@ -1,4 +1,14 @@
-// NinebotEnhance iOS v0.6.1 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
+// NinebotEnhance iOS v0.6.2 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
+//
+// v0.6.2 两件事：①修续航开开关不实时更新（0.6.1 没修好，用户 14:09 实锤，
+// 开开关必须重启才显示、关开关可以实时恢复）：诊断（ne-diag-fe80540d.txt，
+// 11:47–13:14 多次导出）里续航那块根本没有文字 label——MileageView 是自绘
+// 的，“续航”“78.1”都是 App 数据到了之后动态加的 label，诊断（启动后 2 秒
+// 导出一次）拍不到，兄弟关系也对不上。改认 MileageView：祖先里有它，或框
+// 和它重叠，就是续航；电量在 BatteryView 那边，不会误认。②服务有效期移到
+// N币余额上面（用户 14:31 截图+要求）：它和 N币/里程/等级/称号/签到天数/
+// 车辆名字/续航一样是自定义显示值，放一组里，不再单独顶在换图上面。
+// 含 0.6.1 全部内容。
 //
 // v0.6.1 修续航开开关不实时更新（用户 13:16 实锤，0.6.0 已装；关开关可以，
 // 车辆名都正常）：查代码+诊断实锤——续航分开 label 那路认“续航”只靠窗口
@@ -908,6 +918,52 @@ static BOOL NEHasSiblingLabelContaining(UILabel *label, NSString *keyword) {
     return NO;
 }
 
+// v0.6.2：label 的祖先里有没有类名含关键字的 view（不用窗口坐标）。
+// 续航数字 label 是 App 数据到了之后动态加的，诊断里看不到它、也看不到
+// “续航”文字 label，兄弟关系对不上（0.6.1 没修好）；但 MileageView 一直在
+// 层级里（诊断有），续航数字就在它那块区域。祖先里有 MileageView 的数字
+// label 就是续航；电量在 BatteryView 那边，不会误认。
+static BOOL NEHasAncestorWithClassContaining(UILabel *label, NSString *keyword) {
+    if (!label || !keyword.length) return NO;
+    UIView *anc = label.superview;
+    int levels = 0;
+    while (anc && levels < 8) {
+        NSString *cls = NSStringFromClass([anc class]);
+        if (cls.length && [cls rangeOfString:keyword].location != NSNotFound) return YES;
+        anc = anc.superview;
+        levels++;
+    }
+    return NO;
+}
+
+// v0.6.2：在 root 下找第一个类名含关键字的 view。
+static UIView *NEFindViewWithClassContaining(UIView *root, NSString *keyword) {
+    if (!root || !keyword.length) return nil;
+    NSString *cls = NSStringFromClass([root class]);
+    if (cls.length && [cls rangeOfString:keyword].location != NSNotFound) return root;
+    for (UIView *sub in root.subviews) {
+        UIView *found = NEFindViewWithClassContaining(sub, keyword);
+        if (found) return found;
+    }
+    return nil;
+}
+
+// v0.6.2：label 的框是不是和 MileageView 的框重叠（设备页可见时坐标有效）。
+// 续航数字画在 MileageView 那块区域里；电量在 BatteryView 那块（y 差 50+），
+// 不重叠。设备页不在 key window 里时返回 NO（坐标算不出），那时靠祖先那条。
+static BOOL NEIsLabelInsideMileageView(UILabel *label) {
+    if (!label) return NO;
+    UIWindow *w = NEKeyWindow();
+    if (!w) return NO;
+    CGRect lf = NEFrameInWindow(label, w);
+    if (CGRectIsEmpty(lf)) return NO;
+    UIView *mileage = NEFindViewWithClassContaining(w, @"MileageView");
+    if (!mileage) return NO;
+    CGRect mf = NEFrameInWindow(mileage, w);
+    if (CGRectIsEmpty(mf)) return NO;
+    return CGRectIntersectsRect(lf, mf);
+}
+
 // 数字旁边有个 "%" label → 这是百分比（电量），绝不能当 N币/里程换
 static BOOL NEHasAdjacentPercentLabel(UILabel *label) {
     for (UILabel *cand in NEAdjacentLabels(label)) {
@@ -1200,7 +1256,13 @@ static NSString *NEFixedLabelString(NSString *text, UILabel *label,
                      // 永远认不到，改用兄弟 label 认“续航”（同一行三个 label），
                      // 兄弟里有“%”的是电量，排除。
                      (NEHasSiblingLabelContaining(label, @"续航") &&
-                      !NEHasSiblingLabelContaining(label, @"%")))) {
+                      !NEHasSiblingLabelContaining(label, @"%")) ||
+                     // v0.6.2：“续航”文字 label 是动态加的，诊断里看不到、
+                     // 兄弟关系也对不上；改认 MileageView——续航数字就在它那块
+                     // 区域（祖先里有它，或框和它重叠）；电量在 BatteryView
+                     // 那边，不会误认。
+                     NEHasAncestorWithClassContaining(label, @"MileageView") ||
+                     NEIsLabelInsideMileageView(label))) {
                     if (fieldOut) *fieldOut = @"NEDeviceRange";
                     if (separateOut) *separateOut = YES;
                     // v0.5.9：分开 label 只写数字本身——“km”是旁边另一个 label，
@@ -5732,7 +5794,6 @@ static void NECheckSettingsButton(void) {
     beautyStack.axis = UILayoutConstraintAxisVertical;
     beautyStack.spacing = 0; // 卡片内行与行直接贴合，中间用底部分隔线分开
     NSUserDefaults *defs = [NSUserDefaults standardUserDefaults];
-    [beautyStack addArrangedSubview:[self customDisplayRow:@"服务有效期" toggleKey:@"NEValidity9999" valueKey:@"NEValidityValue" on:NEValidity9999() value:[defs stringForKey:@"NEValidityValue"] placeholder:@"留空显示真实日期"]];
     [beautyStack addArrangedSubview:[self sectionLabel:@"主页车辆图"]];
     [beautyStack addArrangedSubview:[self imagePickRow:@"更换车辆图" kind:0]];
     [beautyStack addArrangedSubview:[self imageClearRow:@"恢复原图" kind:0]];
@@ -5745,6 +5806,9 @@ static void NECheckSettingsButton(void) {
     imgNote.textColor = [UIColor secondaryLabelColor];
     imgNote.numberOfLines = 0;
     [beautyStack addArrangedSubview:[self ne_footnoteView:imgNote]];
+    // v0.6.2：服务有效期移到 N币余额上面——它和 N币/里程/等级/称号/签到天数/
+    // 车辆名字/续航一样是“自定义显示值”，放一组里，不再单独顶在换图上面。
+    [beautyStack addArrangedSubview:[self customDisplayRow:@"服务有效期" toggleKey:@"NEValidity9999" valueKey:@"NEValidityValue" on:NEValidity9999() value:[defs stringForKey:@"NEValidityValue"] placeholder:@"留空显示真实日期"]];
     // v0.3.9 追加：五个自定义显示项（开关 + 输入框，自己填想显示的值）
     [beautyStack addArrangedSubview:[self customDisplayRow:@"N币余额" toggleKey:@"NENCoins" valueKey:@"NENCoinsValue" on:NEBoolDefault(@"NENCoins") value:[defs stringForKey:@"NENCoinsValue"] placeholder:@"如 99999"]];
     [beautyStack addArrangedSubview:[self customDisplayRow:@"总里程" toggleKey:@"NEMileage" valueKey:@"NEMileageValue" on:NEBoolDefault(@"NEMileage") value:[defs stringForKey:@"NEMileageValue"] placeholder:@"如 99999.9 km"]];
@@ -5824,7 +5888,7 @@ static void NECheckSettingsButton(void) {
     aboutName.text = @"NinebotEnhance";
     aboutName.font = [UIFont boldSystemFontOfSize:16];
     UILabel *aboutVer = [UILabel new];
-    aboutVer.text = @"0.6.1";
+    aboutVer.text = @"0.6.2";
     aboutVer.font = [UIFont systemFontOfSize:15];
     aboutVer.textColor = [UIColor secondaryLabelColor];
     [aboutTitleRow addArrangedSubview:aboutName];
