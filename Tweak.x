@@ -1,6 +1,16 @@
-// NinebotEnhance iOS v0.4.7 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
+// NinebotEnhance iOS v0.4.8 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
 //
-// v0.4.7 清理（0.4.6 实测签到已通：状态 0、签到 540004 已签、记录“今天已签到”）：
+// v0.4.8 修冷启动背景变车辆图（用户视频实测：划掉后台重开，设备页背景先显示
+//  车辆图，几秒后/下拉刷新才变回自定义背景）：
+//  ① 根因是冷启动布局未稳时背景 view 的 bounds transient 成“非满屏、够大、
+//  在顶区”，NEClassifyDeviceImage 按尺寸误判成踏板车，给了车辆图；旧守卫
+//  见是自定义图就放行，错图永远纠不回来。改：NEIsScooterViewGeometry 要求
+//  view 必须在 UITableView 里（踏板车在表头/首 cell，背景层不在表里；层级
+//  布局前就定死，比尺寸稳），背景 view 再也不会拿到车辆图。
+//  ② NEClassifyDeviceImage 的放行改成分 view 认图：满屏只认已是背景图才
+//  放行，错换的车辆图纠回背景图；踏板车只认已是车辆图才放行，错换的背景图
+//  纠回车辆图。3 秒定时刷新与 setImage: 钩子都能纠错，不再依赖下拉刷新。
+//
 //  设置页自动签到卡去掉灰色诊断行（token 来源、设备、上次检查时间、code、
 //  模板状态不再在设置页显示），只留开关行、记录行与说明文字；诊断文案生成
 //  代码保留，ne-diag.txt 导出里仍有 [自动签到] 行，出问题时可导出来看。
@@ -2070,9 +2080,23 @@ static UIViewController *NEDeviceRootPageVC(void);
 // 只给车辆图（不裁剪，原图直设）；满屏三张仍走 NEImageBySiblingOrder
 // 给背景图，两者不再交叉。
 // 第十二修：踏板车视图的几何判定（不含“有没有自定义图”），供换图和恢复原图共用。
+// 0.4.8：踏板车视图一定在 UITableView 里（header 或首 cell）；满屏背景层不在表里。
+// 冷启动布局未稳时背景 view 的 bounds 可能 transient 成“非满屏、够大、在顶区”，
+// 光看尺寸会误判成踏板车。层级（在不在表里）布局前就定死，比尺寸稳。
+static BOOL NEViewIsInsideTableView(UIView *v) {
+    for (UIView *p = v; p; p = p.superview) {
+        if ([p isKindOfClass:[UITableView class]]) return YES;
+    }
+    return NO;
+}
+
 static BOOL NEIsScooterViewGeometry(UIImageView *iv, UIImage *image) {
     if (!iv || !image) return NO;
     if (![NSThread isMainThread]) return NO;
+    // 0.4.8：不在 UITableView 里的一律不是踏板车视图（背景层），不给车辆图。
+    // 冷启动背景 view 布局中 transient 成“非满屏够大”时，旧代码会错给车辆图，
+    // 之后守卫又放行错图，背景就一直显示车辆图，得下拉刷新才好。
+    if (!NEViewIsInsideTableView(iv)) return NO;
     CGSize bs = iv.bounds.size;
     if (bs.width < 150 || bs.height < 50) return NO;
     CGFloat w = image.size.width, h = image.size.height;
@@ -2115,9 +2139,6 @@ static UIImage *NEClassifyDeviceImage(UIImageView *iv, UIImage *image) {
     UIImage *bg = NECustomBackgroundImage();
     UIImage *veh = NECustomVehicleImage();
     if (!bg && !veh) return nil;
-    // 已经是自定义图：放行。刷新/重设时再进钩子不会来回换。
-    // 显示版（第八修裁过的背景图）也是自定义图，一样放行。
-    if ((bg && (image == bg || image == gBgDisplayImage)) || (veh && image == veh)) return nil;
     CGFloat w = image.size.width, h = image.size.height;
     // 小图（图标/头像）一概不碰
     if (w < 200 && h < 200) return nil;
@@ -2127,11 +2148,20 @@ static UIImage *NEClassifyDeviceImage(UIImageView *iv, UIImage *image) {
     if (bs.width >= sw * 0.9 && bs.height >= sh * 0.5) {
         // 满屏大视图：三张主题/背景层（第十一修：全是背景层，中间可见那张
         // 是主题画层，车辆不在其中）→ 背景图；没有自定义背景时不换。
+        // 0.4.8：放行只认“已经是正确的背景图”。冷启动时背景 view 可能被错换
+        // 成车辆图，旧守卫见是自定义图就放行，错图永远纠不回来（得下拉刷新
+        // 等 App 重设原图）。现在错换的车辆图也纠回背景图。
+        if (!bg) return nil;
+        if (image == bg || image == gBgDisplayImage) return nil;
         return NEImageBySiblingOrder(iv, bg, veh);
     }
     // 非满屏：踏板车视图（第十一修）——见 NEVehicleImageForScooterView。
     // 卡片缩略图进不来：view 小（~100px）或在图区下面，都被那里的 gate 拦住。
-    return NEVehicleImageForScooterView(iv, image);
+    // 0.4.8：同理，只认“已经是车辆图”才放行；错换的背景图纠回车辆图。
+    UIImage *v = NEVehicleImageForScooterView(iv, image);
+    if (!v) return nil;
+    if (image == v) return nil;
+    return v;
 }
 
 // SDWebImage 的 URL 判定：满屏 view 只换背景图，不再按 URL 关键字分背景/车辆。
@@ -2261,11 +2291,11 @@ static void NE_CALayer_setContents(id self, SEL _cmd, id contents) {
                         if (bs.width >= sw * 0.9 && bs.height >= sh * 0.5) {
                             // 自己写的自定义图直接放行（别重复处理）。
                             // 显示版（第八修裁过的背景图）也是自己写的，一样放行。
+                            // 0.4.8：满屏 view 只认背景图才放行；错写进来的车辆图
+                            // 也要纠回背景图（旧守卫连车辆图也放行，错图卡死）。
                             UIImage *bg = NECustomBackgroundImage();
-                            UIImage *veh = NECustomVehicleImage();
                             if (!((bg && (contents == (__bridge id)bg.CGImage ||
-                                          (gBgDisplayImage && contents == (__bridge id)gBgDisplayImage.CGImage))) ||
-                                  (veh && contents == (__bridge id)veh.CGImage))) {
+                                          (gBgDisplayImage && contents == (__bridge id)gBgDisplayImage.CGImage))))) {
                                 UIImage *incoming = [UIImage imageWithCGImage:(CGImageRef)contents];
                                 UIImage *custom = incoming ? NEClassifyDeviceImage(iv, incoming) : nil;
                                 if (custom && custom.CGImage) {
@@ -5329,7 +5359,7 @@ static void NECheckSettingsButton(void) {
     aboutName.text = @"NinebotEnhance";
     aboutName.font = [UIFont boldSystemFontOfSize:16];
     UILabel *aboutVer = [UILabel new];
-    aboutVer.text = @"0.4.7";
+    aboutVer.text = @"0.4.8";
     aboutVer.font = [UIFont systemFontOfSize:15];
     aboutVer.textColor = [UIColor secondaryLabelColor];
     [aboutTitleRow addArrangedSubview:aboutName];
