@@ -1,4 +1,13 @@
-// NinebotEnhance iOS v0.6.0 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
+// NinebotEnhance iOS v0.6.1 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
+//
+// v0.6.1 修续航开开关不实时更新（用户 13:16 实锤，0.6.0 已装；关开关可以，
+// 车辆名都正常）：查代码+诊断实锤——续航分开 label 那路认“续航”只靠窗口
+// 坐标同行相邻，设备页不在 key window 里时坐标算不出，永远认不到；之前
+// 只靠弱引用 sRangeNumberLabel 兜底，但它只在钩子认出过 label 的那次会话
+// 里才有，重启后没认过就是空的。修：再加一条不用坐标的认法——兄弟 label
+// 里有“续航”（同一行“续航”“78.1”“km”三个 label），且兄弟里没有“%”
+// （电量“80”那行没有“续航”，兄弟里有“%”会排除）。只认兄弟，免得收到
+// 别的卡片里的字。含 0.6.0 全部内容。
 //
 // v0.6.0 修车辆名关开关不实时恢复（用户 12:44 实锤，0.5.9 已装）：
 //  查代码实锤——按钮代码与 0.5.8 一模一样，差的是原文没存上：按钮的原文
@@ -881,6 +890,24 @@ static UILabel *NEHorizontallyAdjacentLabelContaining(UILabel *label, NSString *
     return nil;
 }
 
+// v0.6.1：兄弟 label 里含关键字的那一个（不用窗口坐标）。设备页不在 key
+// window 里时窗口坐标算不出，NEHorizontallyAdjacentLabelContaining 永远返回
+// nil，续航开开关就认不出数字 label（0.6.0 用户实锤：续航开开关不实时更新，
+// 关开关却可以——关开关走存原文恢复，不用认）。只认兄弟，免得收到别的卡片
+// 里的字；续航“78.1”和“续航”“km”是同一行的三个 label，最可能是兄弟；
+// 电量“80”那行没有“续航”，且它兄弟里有“%”会另外排除。
+static BOOL NEHasSiblingLabelContaining(UILabel *label, NSString *keyword) {
+    if (!label || !keyword.length) return NO;
+    UIView *parent = label.superview;
+    if (!parent) return NO;
+    for (UIView *sib in parent.subviews) {
+        if (sib == label || ![sib isKindOfClass:[UILabel class]]) continue;
+        NSString *t = NEPlainTextOfLabel((UILabel *)sib);
+        if (t.length && [t rangeOfString:keyword].location != NSNotFound) return YES;
+    }
+    return NO;
+}
+
 // 数字旁边有个 "%" label → 这是百分比（电量），绝不能当 N币/里程换
 static BOOL NEHasAdjacentPercentLabel(UILabel *label) {
     for (UILabel *cand in NEAdjacentLabels(label)) {
@@ -1168,7 +1195,12 @@ static NSString *NEFixedLabelString(NSString *text, UILabel *label,
                 if (sRangeOnlyRe && [sRangeOnlyRe firstMatchInString:text options:0
                                                                 range:NSMakeRange(0, text.length)] &&
                     !NEHasAdjacentPercentLabel(label) &&
-                    NEHorizontallyAdjacentLabelContaining(label, @"续航")) {
+                    (NEHorizontallyAdjacentLabelContaining(label, @"续航") ||
+                     // v0.6.1：设备页不在 key window 里时坐标算不出，同行相邻
+                     // 永远认不到，改用兄弟 label 认“续航”（同一行三个 label），
+                     // 兄弟里有“%”的是电量，排除。
+                     (NEHasSiblingLabelContaining(label, @"续航") &&
+                      !NEHasSiblingLabelContaining(label, @"%")))) {
                     if (fieldOut) *fieldOut = @"NEDeviceRange";
                     if (separateOut) *separateOut = YES;
                     // v0.5.9：分开 label 只写数字本身——“km”是旁边另一个 label，
@@ -5792,7 +5824,7 @@ static void NECheckSettingsButton(void) {
     aboutName.text = @"NinebotEnhance";
     aboutName.font = [UIFont boldSystemFontOfSize:16];
     UILabel *aboutVer = [UILabel new];
-    aboutVer.text = @"0.6.0";
+    aboutVer.text = @"0.6.1";
     aboutVer.font = [UIFont systemFontOfSize:15];
     aboutVer.textColor = [UIColor secondaryLabelColor];
     [aboutTitleRow addArrangedSubview:aboutName];
