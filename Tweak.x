@@ -1,12 +1,13 @@
-// NinebotEnhance iOS v0.6.4 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
+// NinebotEnhance iOS v0.6.5 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
 //
-// v0.6.4 修设置页键盘遮住输入框（用户 14:42 视频实锤）：点最底下的续航
-//  输入框时键盘弹起把输入框盖住，看不见自己在输什么。修法：注册
-//  UIKeyboardWillShow/Hide + UITextFieldTextDidBeginEditing 通知，
-//  键盘出现时给 scroll view 底部加内边距（键盘与 scroll view 的交叠高
-//  度）、把正在编辑的输入框滚到可见处；键盘收起时恢复；键盘已弹起时点
-//  另一个输入框靠 DidBeginEditing 再滚一次。含 0.6.3 全部内容（续航
-//  MileageView 两条路绕开 % 守卫 + 服务有效期已移到 N币余额上面）。
+// v0.6.5 修键盘自动滚（0.6.4 还是不行，用户 15:16 实锤）：续航实时更新
+//  好了，但键盘弹起来时底下空白有了、输入框不会自己滚到键盘上面，还得
+//  手动滑。根因：0.6.4 的 scrollRectToVisible 只在 rect 完全不可见时才
+//  滚，而且刚设的 contentInset 在同一 runloop 里还没算进可见区。改成
+//  自己算目标 contentOffset（按当前 contentInset 算可见高度），直接
+//  setContentOffset；键盘出现那一下再推迟到下一个 runloop 滚，等
+//  contentInset 生效。含 0.6.4 全部内容（续航 MileageView 绕开 % 守卫
+//  + 服务有效期已移到 N币余额上面）。
 //
 // v0.6.2 两件事：①修续航开开关不实时更新（0.6.1 没修好，用户 14:09 实锤，
 // 开开关必须重启才显示、关开关可以实时恢复）：诊断（ne-diag-fe80540d.txt，
@@ -5915,7 +5916,7 @@ static void NECheckSettingsButton(void) {
     aboutName.text = @"NinebotEnhance";
     aboutName.font = [UIFont boldSystemFontOfSize:16];
     UILabel *aboutVer = [UILabel new];
-    aboutVer.text = @"0.6.4";
+    aboutVer.text = @"0.6.5";
     aboutVer.font = [UIFont systemFontOfSize:15];
     aboutVer.textColor = [UIColor secondaryLabelColor];
     [aboutTitleRow addArrangedSubview:aboutName];
@@ -6169,13 +6170,34 @@ static void NECheckSettingsButton(void) {
     return nil;
 }
 
-// 正在编辑的输入框滚到可见处（上下各留 12pt 余量）
+// 正在编辑的输入框滚到可见处（上下各留 12pt 余量）。v0.6.5：0.6.4 的
+// scrollRectToVisible 不动——它只在 rect 完全不可见时才滚，而且刚设
+// 的 contentInset 在同一 runloop 里还没算进可见区，底下的输入框滚不
+// 上来（用户 15:16 实锤：底下空白有了，但不会自己滚到键盘上面）。改成
+// 自己算目标 contentOffset（按当前 contentInset 算可见高度），直接
+// setContentOffset。
 - (void)ne_scrollTextFieldIntoView:(UITextField *)field {
     UIScrollView *scroll = [self ne_settingsScrollView];
     if (!scroll || !field) return;
     CGRect r = [field convertRect:field.bounds toView:scroll];
     r = CGRectInset(r, 0, -12);
-    [scroll scrollRectToVisible:r animated:YES];
+    CGFloat visibleHeight = scroll.bounds.size.height - scroll.contentInset.top - scroll.contentInset.bottom;
+    if (visibleHeight <= 0) return;
+    CGFloat top = scroll.contentOffset.y;
+    CGFloat bottom = top + visibleHeight;
+    CGFloat targetY = top;
+    if (CGRectGetMinY(r) < top) {
+        targetY = CGRectGetMinY(r);
+    } else if (CGRectGetMaxY(r) > bottom) {
+        targetY = CGRectGetMaxY(r) - visibleHeight;
+    } else {
+        return; // 已经可见，不动
+    }
+    CGFloat maxY = scroll.contentSize.height - visibleHeight;
+    if (maxY < 0) maxY = 0;
+    if (targetY < 0) targetY = 0;
+    if (targetY > maxY) targetY = maxY;
+    [scroll setContentOffset:CGPointMake(0, targetY) animated:YES];
 }
 
 - (void)ne_keyboardWillShow:(NSNotification *)note {
@@ -6191,8 +6213,15 @@ static void NECheckSettingsButton(void) {
     scroll.contentInset = insets;
     scroll.scrollIndicatorInsets = insets;
     UIView *first = [self ne_firstResponderInView:self.view];
-    if ([first isKindOfClass:[UITextField class]])
-        [self ne_scrollTextFieldIntoView:(UITextField *)first];
+    if ([first isKindOfClass:[UITextField class]]) {
+        UITextField *tf = (UITextField *)first;
+        // v0.6.5：下一个 runloop 再滚——刚设的 contentInset 要先生效，
+        // 不然按旧可见高度算，底下的输入框还是滚不上来。
+        __weak NEHUDSettingsVC *weakSelf = self;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [weakSelf ne_scrollTextFieldIntoView:tf];
+        });
+    }
 }
 
 - (void)ne_keyboardWillHide:(NSNotification *)note {
