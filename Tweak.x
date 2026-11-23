@@ -1,4 +1,24 @@
-// NinebotEnhance iOS v0.5.8 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
+// NinebotEnhance iOS v0.5.9 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
+//
+// v0.5.9 修续航三问题（用户 12:24 截图+原话实锤，0.5.8 已装）：
+//  ① 续航后面多了个 km（截图“续航 588kmkm”）：分开 label 那路把纯数字“588”
+//     归一化成“588km”写进数字 label，旁边“km”那个 label 还在，就成了
+//     “588kmkm”。修：分开 label 只写数字本身（NEDeviceRangeNumberOnly，
+//     用户填的尾巴单位也去掉）；整串（“续航 78.1km”一个 label）那路仍用
+//     含 km 的值，因为它一次换掉数字+单位整段。
+//  ② 开续航开关/改输入框不实时更新（关开关却可以）：设备页不在 key window
+//     里时，续航数字 label 的重匹配要算窗口坐标相邻（“续航”在旁边），算不
+//     出来刷新就空转；关开关能实时恢复是因为按存的原文恢复、不用重匹配；
+//     车辆名能实时更新是因为按钮标题匹配不用坐标。修：钩子第一次认出续航
+//     数字 label 就记一个弱引用（sRangeNumberLabel），刷新时即使不在窗口
+//     里也认得出它、直接按当前值写，不用重匹配。
+//  ③ 续航自定义和真实值来回跳：App 每次重写真实值，钩子都从头重匹配一遍，
+//     重匹配要算窗口坐标相邻，布局抖动/帧没出来时算不出，真值就漏过去闪
+//     一下。修：已经被认出来的 label（挂着字段关联），钩子直接按当前值重
+//     写，不再重匹配（NEValueForKnownLabel）；关开关/值清空时值是 nil，掉
+//     下去重匹配、匹配不到就放行真值。
+//  另补：刷新那路认出 label 时也存原文（之前只有钩子认出来的才存，刷新认
+//  出来的关开关恢复不了）；富文本钩子也存原文。含 0.5.8 全部内容。
 //
 // v0.5.8 釜底抽薪：删掉 UILabel 车辆名匹配（用户 11:53“还是老问题”实锤）。
 //  诊断早已证实左上角“Xiaomi_SU9Max”是导航栏 UIButton 标题，走按钮标题
@@ -695,6 +715,30 @@ static NSString *NEDeviceRangeDisplayValue(void) {
     return v;
 }
 
+// 去掉字符串尾巴的续航单位（km/公里，不区分大小写），只留前面部分。
+static NSString *NEStripTrailingRangeUnit(NSString *s) {
+    if (!s.length) return s;
+    NSString *t = [s stringByTrimmingCharactersInSet:
+                   [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if ([t hasSuffix:@"公里"]) t = [t substringToIndex:t.length - 2];
+    else if (t.length >= 2) {
+        NSString *tail = [[t substringFromIndex:t.length - 2] lowercaseString];
+        if ([tail isEqualToString:@"km"]) t = [t substringToIndex:t.length - 2];
+    }
+    return [t stringByTrimmingCharactersInSet:
+            [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+}
+
+// v0.5.9：分开 label 的续航值（数字本身，不带单位）——用户填“588”，显示在
+// 数字 label 里；“km”是旁边另一个 label，还在，写“588km”就成“588kmkm”。
+static NSString *NEDeviceRangeNumberOnly(void) {
+    NSString *v = [gDeviceRangeValue stringByTrimmingCharactersInSet:
+                   [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (!v.length) return nil;
+    NSString *t = NEStripTrailingRangeUnit(v);
+    return t.length ? t : nil;
+}
+
 // v0.3.9 修复：文字替换根因——App 的数字和单位/描述经常不在同一个 label 里
 // （数字一个 label，单位“km”/“N币”/“服务有效期”在旁边另一个 label），
 // 或者走 setAttributedText:（富文本，大数字+小单位），所以只拦 setText: 且
@@ -713,6 +757,10 @@ static const char NEAppliedSeparateKey = 0; // 同上：是不是“分开 label
 // v0.5.7：第一次替换时存的原文——开关关掉后按它恢复，否则原值已丢、
 // 只能等 App 自己重设（所以以前关开关必须重启才生效）。
 static const char NEOriginalTextKey = 0;    // 第一次替换前 label/按钮的原文
+
+// v0.5.9：钩子第一次认出的续航数字 label（弱引用）——设备页不在 key window
+// 里时重匹配算不出窗口坐标，刷新时靠它认出 label、直接按当前值写。
+static __weak UILabel *sRangeNumberLabel = nil;
 
 // label 的纯文本：有富文本就取富文本的字符串，否则取 text
 static NSString *NEPlainTextOfLabel(UILabel *label) {
@@ -894,6 +942,10 @@ static BOOL NEIsLabelInOwnSettingsPage(UILabel *label) {
 
 // 车辆名识别要换算到根页面坐标，NEDeviceRootPageVC 定义在后面，这里先声明。
 static UIViewController *NEDeviceRootPageVC(void);
+
+// v0.5.9：NEValueForKnownLabel（钩子，定义在后面）要用，NEFieldCurrentValue
+// 定义在更后面，这里先声明。
+static NSString *NEFieldCurrentValue(NSString *field, BOOL separate);
 
 // 所有文字替换共用：输入 label 的纯文本（setText: 的 text 或 attributedText.string），
 // 返回替换后的字符串；没有可换的返回 nil。
@@ -1091,7 +1143,8 @@ static NSString *NEFixedLabelString(NSString *text, UILabel *label,
     //    同 label 含“续航”+数字+单位，只换数字+单位那一段；
     //    分开 label：续航是“续航”“78.1”“km”三个 label——数字 label（“78.1”，
     //    可能不带 km）须与“续航”同行相邻（左右），电量“80”在“续航”上方（上下
-    //    相邻）不认；整串换自定义值（纯数字自动补 km）。
+    //    相邻）不认；分开 label 只写数字本身（v0.5.9，“km”在旁边另一个 label
+    //    里，写“588km”就成“588kmkm”），同 label 整串才用含 km 的值。
     if (gDeviceRange) {
         NSString *rep = NEDeviceRangeDisplayValue();
         if (rep.length > 0) {
@@ -1127,7 +1180,13 @@ static NSString *NEFixedLabelString(NSString *text, UILabel *label,
                     NEHorizontallyAdjacentLabelContaining(label, @"续航")) {
                     if (fieldOut) *fieldOut = @"NEDeviceRange";
                     if (separateOut) *separateOut = YES;
-                    return rep;
+                    // v0.5.9：分开 label 只写数字本身——“km”是旁边另一个 label，
+                    // 还在，写“588km”就成“588kmkm”（用户 12:24 截图实锤）。
+                    // 整串（“续航 78.1km”一个 label）那路仍用 rep（含 km），
+                    // 因为它一次换掉数字+单位整段。
+                    NSString *numOnly = NEDeviceRangeNumberOnly();
+                    sRangeNumberLabel = label;
+                    return numOnly.length ? numOnly : rep;
                 }
             }
         }
@@ -1170,8 +1229,27 @@ static NSAttributedString *NEAttributedStringByReplacing(NSAttributedString *ori
 
 static void (*orig_UILabel_setAttributedText)(id, SEL, NSAttributedString *);
 
+// v0.5.9：已经被认出来的 label（挂着字段关联），App 再写真实值时直接按
+// 当前值重写，不再从头重匹配——重匹配要算窗口坐标相邻，布局抖动/帧没出来
+// 时算不出，真值就漏过去闪一下（续航来回跳的根因，用户 12:24 实锤）。
+// 开关关了/值清空了返回 nil，掉下去重匹配、重匹配不到就放行原值（真值）。
+// 车辆名（NEDeviceName）不走这里——UILabel 再也不挂车辆名关联（v0.5.8），
+// 万一有旧版残留也别按它写。
+static NSString *NEValueForKnownLabel(UILabel *label) {
+    if (!label || NEIsLabelInOwnSettingsPage(label)) return nil;
+    NSString *afield = objc_getAssociatedObject(label, &NEAppliedFieldKey);
+    if (!afield.length || [afield isEqualToString:@"NEDeviceName"]) return nil;
+    NSNumber *asep = objc_getAssociatedObject(label, &NEAppliedSeparateKey);
+    NSString *aval = NEFieldCurrentValue(afield, asep.boolValue);
+    if (aval.length && [afield isEqualToString:@"NEDeviceRange"] && asep.boolValue)
+        sRangeNumberLabel = label;
+    return aval;
+}
+
 static void NE_UILabel_setText(id self, SEL _cmd, NSString *text) {
     if (text.length > 0 && [self isKindOfClass:[UILabel class]]) {
+        NSString *known = NEValueForKnownLabel((UILabel *)self);
+        if (known) { orig_UILabel_setText(self, _cmd, known); return; }
         NSString *field = nil; BOOL separate = NO;
         NSString *fixed = NEFixedLabelString(text, (UILabel *)self, &field, &separate);
         if (fixed) {
@@ -1194,10 +1272,21 @@ static void NE_UILabel_setText(id self, SEL _cmd, NSString *text) {
 
 static void NE_UILabel_setAttributedText(id self, SEL _cmd, NSAttributedString *attr) {
     if (attr.length > 0 && [self isKindOfClass:[UILabel class]]) {
+        NSString *known = NEValueForKnownLabel((UILabel *)self);
+        if (known) {
+            orig_UILabel_setAttributedText(self, _cmd,
+                NEAttributedStringByReplacing(attr, attr.string, known));
+            return;
+        }
         NSString *field = nil; BOOL separate = NO;
         NSString *fixed = NEFixedLabelString(attr.string, (UILabel *)self, &field, &separate);
         if (fixed) {
             if (field.length) {
+                // v0.5.9：setText: 那路存原文，富文本这路之前没存——关开关后
+                // 刷新恢复不了。补上。
+                if (!objc_getAssociatedObject(self, &NEOriginalTextKey))
+                    objc_setAssociatedObject(self, &NEOriginalTextKey, attr.string,
+                                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
                 objc_setAssociatedObject(self, &NEAppliedFieldKey, field,
                                          OBJC_ASSOCIATION_RETAIN_NONATOMIC);
                 objc_setAssociatedObject(self, &NEAppliedSeparateKey, @(separate),
@@ -1757,10 +1846,13 @@ static NSString *NEFieldCurrentValue(NSString *field, BOOL separate) {
     }
     if ([field isEqualToString:@"NEDeviceRange"]) {
         if (!gDeviceRange) return nil;
-        // 分开 label（纯数字+km）直接返回归一化值；同 label（“续航 78.1km”）返回 nil，
-        // 让刷新走重匹配（当前文本仍含“续航”+数字，能算出新值）。
+        // 分开 label（纯数字+km）直接返回数字本身；同 label（“续航 78.1km”）
+        // 返回 nil，让刷新走重匹配（当前文本仍含“续航”+数字，能算出新值）。
+        // v0.5.9：之前分开 label 返回含 km 的归一化值，旁边“km”那个 label
+        // 还在，显示成“588kmkm”。只写数字，“km”由旁边那个 label 自己显示。
         if (!separate) return nil;
-        return NEDeviceRangeDisplayValue();
+        NSString *n = NEDeviceRangeNumberOnly();
+        return n.length ? n : NEDeviceRangeDisplayValue();
     }
     return nil;
 }
@@ -1814,7 +1906,12 @@ static void NEForceRefreshLabelsInView(UIView *view) {
                 if (field.length) {
                     NSNumber *sep = objc_getAssociatedObject(label, &NEAppliedSeparateKey);
                     NSString *val = NEFieldCurrentValue(field, sep.boolValue);
-                    if (val) { NESetLabelPlainText(label, val); continue; }
+                    if (val) {
+                        // v0.5.9：记下续航数字 label，刷新时靠它认（见下面弱引用 fallback）。
+                        if ([field isEqualToString:@"NEDeviceRange"] && sep.boolValue)
+                            sRangeNumberLabel = label;
+                        NESetLabelPlainText(label, val); continue;
+                    }
                     // v0.5.7：开关关了（或值清空了），当前值是 nil——按第一次替换时
                     // 存的原文恢复，不用等 App 自己重设、不用重启。
                     NSString *orig = objc_getAssociatedObject(label, &NEOriginalTextKey);
@@ -1833,12 +1930,45 @@ static void NEForceRefreshLabelsInView(UIView *view) {
                     NSString *fixed = NEFixedLabelString(cur, label, &f2, &sep2);
                     if (fixed) {
                         if (f2.length) {
+                            // v0.5.9：第一次替换时存原文，关开关后按它恢复。
+                            // 刷新这路之前没存——钩子认出来的才有原文，刷新认
+                            // 出来的没有，关开关就恢复不了。补上（当前文本是
+                            // 真值时才存，已经是自定义值的不存）。
+                            if (!objc_getAssociatedObject(label, &NEOriginalTextKey))
+                                objc_setAssociatedObject(label, &NEOriginalTextKey, cur,
+                                                         OBJC_ASSOCIATION_RETAIN_NONATOMIC);
                             objc_setAssociatedObject(label, &NEAppliedFieldKey, f2,
                                                      OBJC_ASSOCIATION_RETAIN_NONATOMIC);
                             objc_setAssociatedObject(label, &NEAppliedSeparateKey, @(sep2),
                                                      OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                            if ([f2 isEqualToString:@"NEDeviceRange"] && sep2)
+                                sRangeNumberLabel = label;
                         }
                         NESetLabelPlainText(label, fixed);
+                    } else if (gDeviceRange && label == sRangeNumberLabel) {
+                        // v0.5.9：续航开关打开/改值不实时更新——设备页不在 key
+                        // window 里时，重匹配要算窗口坐标相邻（“续航”在旁边），
+                        // 算不出来刷新就空转；关开关能实时恢复是因为按存的原文
+                        // 恢复、不用重匹配；车辆名能实时更新是因为按钮标题匹配
+                        // 不用坐标。钩子第一次认出续航数字 label 就记下来，
+                        // 刷新时认得出它、直接按当前值写，不用重匹配。
+                        // 当前文本去单位后是纯数字（“78.1”或旧自定义值“588km”）
+                        // 才认——别的 label 即使被错指过来也不会被写。
+                        NSString *stripped = NEStripTrailingRangeUnit(cur);
+                        if (stripped.length && NEIsPureNumberString(stripped)) {
+                            NSString *numOnly = NEDeviceRangeNumberOnly();
+                            if (numOnly.length) {
+                                if (!objc_getAssociatedObject(label, &NEOriginalTextKey) &&
+                                    NEIsPureNumberString(cur))
+                                    objc_setAssociatedObject(label, &NEOriginalTextKey, cur,
+                                                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                                objc_setAssociatedObject(label, &NEAppliedFieldKey, @"NEDeviceRange",
+                                                         OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                                objc_setAssociatedObject(label, &NEAppliedSeparateKey, @(YES),
+                                                         OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                                NESetLabelPlainText(label, numOnly);
+                            }
+                        }
                     }
                 }
             } @catch (...) {}
@@ -5655,7 +5785,7 @@ static void NECheckSettingsButton(void) {
     aboutName.text = @"NinebotEnhance";
     aboutName.font = [UIFont boldSystemFontOfSize:16];
     UILabel *aboutVer = [UILabel new];
-    aboutVer.text = @"0.5.8";
+    aboutVer.text = @"0.5.9";
     aboutVer.font = [UIFont systemFontOfSize:15];
     aboutVer.textColor = [UIColor secondaryLabelColor];
     [aboutTitleRow addArrangedSubview:aboutName];
