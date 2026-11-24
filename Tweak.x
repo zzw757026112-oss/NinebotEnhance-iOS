@@ -1,4 +1,4 @@
-// NinebotEnhance iOS v0.6.9 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
+// NinebotEnhance iOS v0.6.10 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
 //
 // v0.6.6 加自动分享（每天领 1 N币，用户 2026-11-24 决定做）：24 号凌晨重抓
 //  实锤分享是 App 自己调 share-callback（加密包，只能重放）+ task/reward
@@ -6287,10 +6287,13 @@ static void NECheckSettingsButton(void) {
     tipsStack.spacing = 6;
     [tipsStack addArrangedSubview:[self sectionLabel:@"使用提示"]];
     NSArray<NSString *> *neFooterTips = @[
-        @"恢复原图立即生效，不用重启 App。",
         @"HUD 开关打开后会一直保持，重启也不丢。",
         @"等级最高 9 级，填 10 以上不显示。",
-        @"导航增强功能只能在APP投屏导航的时候生效。"
+        @"导航增强功能只能在APP投屏导航的时候生效。",
+        @"每天第一次打开 App 会弹签到结果（成功/失败），3 秒自己消失，点一下也能关。",
+        @"N币、里程、等级这些自定义显示，关掉开关就恢复真实值。",
+        @"HUD 位置和字号只动小胶囊，翻页时钟固定在右边，不跟位置走。",
+        @"插件基于九号出行6.10.13编写，如有功能失效，请降级应用或者等待更新。"
     ];
     for (NSString *tip in neFooterTips) {
         UILabel *tipLabel = [UILabel new];
@@ -6464,7 +6467,7 @@ static void NECheckSettingsButton(void) {
     aboutName.text = @"Ninebot pro+";
     aboutName.font = [UIFont boldSystemFontOfSize:16];
     UILabel *aboutVer = [UILabel new];
-    aboutVer.text = @"0.6.9";
+    aboutVer.text = @"0.6.10";
     aboutVer.font = [UIFont systemFontOfSize:15];
     aboutVer.textColor = [UIColor secondaryLabelColor];
     [aboutTitleRow addArrangedSubview:aboutName];
