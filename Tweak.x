@@ -6288,7 +6288,6 @@ static void NECheckSettingsButton(void) {
     [tipsStack addArrangedSubview:[self sectionLabel:@"使用提示"]];
     NSArray<NSString *> *neFooterTips = @[
         @"HUD 开关打开后会一直保持，重启也不丢。",
-        @"等级最高 9 级，填 10 以上不显示。",
         @"导航增强功能只能在APP投屏导航的时候生效。",
         @"每天第一次打开 App 会弹签到结果（成功/失败），3 秒自己消失，点一下也能关。",
         @"N币、里程、等级这些自定义显示，关掉开关就恢复真实值。",
@@ -6392,6 +6391,12 @@ static void NECheckSettingsButton(void) {
     [beautyStack addArrangedSubview:[self customDisplayRow:@"N币余额" toggleKey:@"NENCoins" valueKey:@"NENCoinsValue" on:NEBoolDefault(@"NENCoins") value:[defs stringForKey:@"NENCoinsValue"] placeholder:@"如 99999"]];
     [beautyStack addArrangedSubview:[self customDisplayRow:@"总里程" toggleKey:@"NEMileage" valueKey:@"NEMileageValue" on:NEBoolDefault(@"NEMileage") value:[defs stringForKey:@"NEMileageValue"] placeholder:@"如 99999.9 km"]];
     [beautyStack addArrangedSubview:[self customDisplayRow:@"等级（1-9）" toggleKey:@"NELevel" valueKey:@"NELevelValue" on:NEBoolDefault(@"NELevel") value:[defs stringForKey:@"NELevelValue"] placeholder:@"如 Lv.99"]];
+    UILabel *levelNote = [UILabel new];
+    levelNote.text = @"等级最高 9 级，填 10 以上不显示。";
+    levelNote.font = [UIFont systemFontOfSize:13];
+    levelNote.textColor = [UIColor secondaryLabelColor];
+    levelNote.numberOfLines = 0;
+    [beautyStack addArrangedSubview:[self ne_footnoteView:levelNote]];
     [beautyStack addArrangedSubview:[self customDisplayRow:@"称号" toggleKey:@"NETitle" valueKey:@"NETitleValue" on:NEBoolDefault(@"NETitle") value:[defs stringForKey:@"NETitleValue"] placeholder:@"如 车神"]];
     [beautyStack addArrangedSubview:[self customDisplayRow:@"签到天数" toggleKey:@"NESignDays" valueKey:@"NESignDaysValue" on:NEBoolDefault(@"NESignDays") value:[defs stringForKey:@"NESignDaysValue"] placeholder:@"如 365"]];
     [beautyStack addArrangedSubview:[self customDisplayRow:@"车辆名字" toggleKey:@"NEDeviceName" valueKey:@"NEDeviceNameValue" on:NEBoolDefault(@"NEDeviceName") value:[defs stringForKey:@"NEDeviceNameValue"] placeholder:@"如 我的爱车"]];
