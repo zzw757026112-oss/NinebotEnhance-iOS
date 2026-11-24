@@ -1,4 +1,4 @@
-// NinebotEnhance iOS v0.7.2 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
+// NinebotEnhance iOS v0.7.3 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
 //
 // v0.7.0 加七彩日行灯（车上的 LED 灯带，ELK-BLEDOB，duoCo Strip 同款，
 //  用户 2026-11-24 决定做）：协议照 Pro+ App 的 ELKStrip.swift，服务
@@ -7,6 +7,8 @@
 //  日行灯”（默认折叠、功能默认关），开关/预设色/自选色/亮度/白色/灯效。
 //  含 0.6.12 全部内容。
 //
+// v0.7.3（用户 2026-11-24 15:06 要求）：磨砂玻璃调得更偏白——卡片白遮罩
+//   0.12→0.35，底图橙色退得更快、光斑更淡。
 // v0.7.2（用户 2026-11-24 14:48 定）：设置页改磨砂玻璃（Liquid Glass 近似
 //   效果，iOS 16 能做到的样子：彩色渐变底 + 磨砂卡片）。
 // v0.7.1（用户 2026-11-24 13:08 实测反馈）：颜色圆点 30pt→26pt、行上下
@@ -5412,7 +5414,7 @@ static void NEAutoSignInShowResultPopupOnMain(BOOL success) {
     [card addSubview:blurView];
     // 白色亮层：提亮一点，跟设置页磨砂卡片同款
     UIView *tint = [UIView new];
-    tint.backgroundColor = [[UIColor whiteColor] colorWithAlphaComponent:0.12];
+    tint.backgroundColor = [[UIColor whiteColor] colorWithAlphaComponent:0.35];
     tint.frame = blurView.contentView.bounds;
     tint.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     [blurView.contentView addSubview:tint];
@@ -6690,10 +6692,10 @@ static UIImage *NEGlassBackdropImage(CGSize size) {
     CGContextRef ctx = UIGraphicsGetCurrentContext();
     // 纵向渐变：顶部九号橙 -> 中部浅橙 -> 底部浅灰
     CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
-    CGFloat locs[3] = {0, 0.35, 1};
+    CGFloat locs[3] = {0, 0.18, 1};
     CGFloat comps[12] = {
         1.0, 0.48, 0.10, 1.0,   // #FF7A1A
-        1.0, 0.72, 0.45, 1.0,   // 浅橙
+        1.0, 0.78, 0.62, 1.0,   // 浅橙（更淡）
         0.96, 0.96, 0.97, 1.0   // 浅灰
     };
     CGGradientRef grad = CGGradientCreateWithColorComponents(cs, comps, locs, 3);
@@ -6712,7 +6714,7 @@ static UIImage *NEGlassBackdropImage(CGSize size) {
         CGFloat cx = blobs[i].x * size.width, cy = blobs[i].y * size.height;
         CGFloat rr = blobs[i].r * size.width;
         CGFloat bcomps[8] = {
-            blobs[i].c[0], blobs[i].c[1], blobs[i].c[2], 0.45,
+            blobs[i].c[0], blobs[i].c[1], blobs[i].c[2], 0.30,
             blobs[i].c[0], blobs[i].c[1], blobs[i].c[2], 0.0
         };
         CGFloat bloc[2] = {0, 1};
@@ -7123,7 +7125,7 @@ static UIImage *NEGlassBackdropImage(CGSize size) {
     aboutName.text = @"Ninebot pro+";
     aboutName.font = [UIFont boldSystemFontOfSize:16];
     UILabel *aboutVer = [UILabel new];
-    aboutVer.text = @"0.7.2";
+    aboutVer.text = @"0.7.3";
     aboutVer.font = [UIFont systemFontOfSize:15];
     aboutVer.textColor = [UIColor secondaryLabelColor];
     [aboutTitleRow addArrangedSubview:aboutName];
@@ -7338,7 +7340,7 @@ static UIImage *NEGlassBackdropImage(CGSize size) {
     [card addSubview:blurView];
     // 白色亮层：提亮一点，更接近效果图的玻璃感
     UIView *tint = [UIView new];
-    tint.backgroundColor = [[UIColor whiteColor] colorWithAlphaComponent:0.12];
+    tint.backgroundColor = [[UIColor whiteColor] colorWithAlphaComponent:0.35];
     tint.frame = blurView.contentView.bounds;
     tint.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     [blurView.contentView addSubview:tint];
