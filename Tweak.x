@@ -1,4 +1,4 @@
-// NinebotEnhance iOS v0.6.10 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
+// NinebotEnhance iOS v0.6.11 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
 //
 // v0.6.6 加自动分享（每天领 1 N币，用户 2026-11-24 决定做）：24 号凌晨重抓
 //  实锤分享是 App 自己调 share-callback（加密包，只能重放）+ task/reward
@@ -6294,10 +6294,20 @@ static void NECheckSettingsButton(void) {
         @"HUD 位置和字号只动小胶囊，翻页时钟固定在右边，不跟位置走。",
         @"插件基于九号出行6.10.13编写，如有功能失效，请降级应用或者等待更新。"
     ];
+    // v0.6.11：悬挂缩进——换行后第二行起与第一行文字对齐，不顶到圆点下面。
+    // “• ”的实测宽度当 headIndent，第一行不缩进。
+    UIFont *tipFont = [UIFont systemFontOfSize:14];
+    CGFloat bulletW = [@"• " sizeWithAttributes:@{NSFontAttributeName: tipFont}].width;
+    NSMutableParagraphStyle *tipPS = [NSMutableParagraphStyle new];
+    tipPS.firstLineHeadIndent = 0;
+    tipPS.headIndent = bulletW;
+    tipPS.lineBreakMode = NSLineBreakByWordWrapping;
     for (NSString *tip in neFooterTips) {
         UILabel *tipLabel = [UILabel new];
-        tipLabel.text = [NSString stringWithFormat:@"• %@", tip];
-        tipLabel.font = [UIFont systemFontOfSize:14];
+        tipLabel.attributedText = [[NSAttributedString alloc]
+            initWithString:[NSString stringWithFormat:@"• %@", tip]
+            attributes:@{NSFontAttributeName: tipFont,
+                         NSParagraphStyleAttributeName: tipPS}];
         tipLabel.numberOfLines = 0;
         [tipsStack addArrangedSubview:tipLabel];
     }
@@ -6472,7 +6482,7 @@ static void NECheckSettingsButton(void) {
     aboutName.text = @"Ninebot pro+";
     aboutName.font = [UIFont boldSystemFontOfSize:16];
     UILabel *aboutVer = [UILabel new];
-    aboutVer.text = @"0.6.10";
+    aboutVer.text = @"0.6.11";
     aboutVer.font = [UIFont systemFontOfSize:15];
     aboutVer.textColor = [UIColor secondaryLabelColor];
     [aboutTitleRow addArrangedSubview:aboutName];
