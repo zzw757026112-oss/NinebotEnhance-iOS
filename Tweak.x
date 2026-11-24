@@ -7175,9 +7175,22 @@ static UIImage *NEGlassBackdropImage(CGSize size) {
 
 // 签到记录行：打开设置页时按最新状态刷一遍（签到可能在设置页打开前已跑完；
 // v0.4.7 诊断行不再在设置页显示，只进 ne-diag.txt）
+// v0.7.2：签到记录行按结果着色——今天已签过显示绿色，今天检查失败显示红色，
+// 其他情况（暂无记录 / 还没检查）保持灰色，一眼就能看出来。失败看最近一次
+// 检查结果（gSignInDiagLastResult：除“已签到”外都是失败：无 token / 网络
+// 失败 / 会话失效 / code N）。
 - (void)refreshSignInRecord {
     UILabel *record = objc_getAssociatedObject(self, &NESignInRecordKey);
-    if (record) record.text = NEAutoSignInRecordText();
+    if (!record) return;
+    record.text = NEAutoSignInRecordText();
+    NSString *last = [[NSUserDefaults standardUserDefaults] stringForKey:@"NEAutoSignInLastDate"];
+    if (last.length && [last isEqualToString:NEAutoSignInTodayString()]) {
+        record.textColor = [UIColor systemGreenColor];
+    } else if (gSignInDiagLastResult.length && ![gSignInDiagLastResult isEqualToString:@"已签到"]) {
+        record.textColor = [UIColor systemRedColor];
+    } else {
+        record.textColor = [UIColor secondaryLabelColor];
+    }
 }
 
 // 签到跑完发来的通知（成功或今天已签过都发）：设置页开着时也刷新记录行
