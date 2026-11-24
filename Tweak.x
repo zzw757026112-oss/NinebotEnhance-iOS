@@ -1,4 +1,4 @@
-// NinebotEnhance iOS v0.7.20 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
+// NinebotEnhance iOS v0.7.21 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
 //
 // v0.7.0 加七彩日行灯（车上的 LED 灯带，ELK-BLEDOB，duoCo Strip 同款，
 //  用户 2026-11-24 决定做）：协议照 Pro+ App 的 ELKStrip.swift，服务
@@ -6,6 +6,10 @@
 //  认名字含 bledob 的设备，收 3 秒选 RSSI 最强的一台。设置页新分组“七彩
 //  日行灯”（默认折叠、功能默认关），开关/预设色/自选色/亮度/白色/灯效。
 //  含 0.6.12 全部内容。
+//
+// v0.7.21（用户 2026-11-24 22:40 要求）：设备页“最近骑行”→“最近行驶”——
+//   用户是电摩，车图换成跑车后“骑行”不搭。没有单独开关：自定义车辆图一开
+//   就默认换，恢复原图就自动还原（字段 NERecentRide + 原文存 NEOriginalTextKey）。
 //
 // v0.7.20（用户 2026-11-24 19:30 要求）：我的页创作/关注/粉丝三个数可自定义，
 //   跟 N币 一样，开关+输入框；UILabel 路径靠正下方相邻 label 认，RN 路径
@@ -753,6 +757,8 @@ static CGFloat NEHUDFontRefPt(void) {
 // 类/方法不存在时 orig 为 NULL，只记日志绝不崩（shim 的行为，见 substrate_shim.m）。
 // 前向声明：NEKeyWindow 定义在后面（设置按钮那节），这里先声明。
 static UIWindow *NEKeyWindow(void);
+// v0.7.21：gHasVehicleImage 定义在后面（图片那节），文字钩子的安装条件要用，先声明。
+static BOOL gHasVehicleImage;
 static const char NEPickKindKey = 0;        // 设置页：当前选图是车辆图(0)/背景图(1)
 static const char NEVehicleStatusKey = 0;   // 设置页：车辆图状态 label
 static const char NEBackgroundStatusKey = 0;// 设置页：背景图状态 label
@@ -1142,6 +1148,15 @@ static NSString *NEFixedLabelString(NSString *text, UILabel *label,
     if ([label.superview isKindOfClass:[UIButton class]]) return nil;
     // 我们自己的设置页的 label 不碰（见上文 NEIsLabelInOwnSettingsPage）
     if (NEIsLabelInOwnSettingsPage(label)) return nil;
+    // 0. 最近骑行 → 最近行驶（v0.7.21）：用户是电摩，车图换成跑车后“骑行”不搭。
+    // 没有单独开关：自定义车辆图开着就默认换，恢复原图就自动还原（字段
+    // NERecentRide，NEFieldCurrentValue 按 gHasVehicleImage 返回“最近行驶”/nil，
+    // 恢复时按存的原文 NEOriginalTextKey 写回）。整句是“最近骑行”才换。
+    if (gHasVehicleImage &&
+        [[text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]] isEqualToString:@"最近骑行"]) {
+        if (fieldOut) *fieldOut = @"NERecentRide";
+        return @"最近行驶";
+    }
     // 1. 服务有效期（自定义值；没填就不换，显示真实有效期）
     NSString *validityValue = NEValidityDisplayValue();
     if (gValidity9999 && validityValue.length > 0) {
@@ -1598,7 +1613,8 @@ static BOOL gLabelHookInstalled = NO;
 static void NEInstallLabelHookIfNeeded(void) {
     if (gLabelHookInstalled) return;
     if (!gValidity9999 && !gNCoins && !gMileage && !gLevel && !gTitle && !gSignDays &&
-        !gDeviceName && !gDeviceRange && !gPosts && !gFollowing && !gFollowers) return;
+        !gDeviceName && !gDeviceRange && !gPosts && !gFollowing && !gFollowers &&
+        !gHasVehicleImage) return;
     Class cls = objc_getClass("UILabel");
     if (!cls || !class_getInstanceMethod(cls, @selector(setText:))) {
         os_log(gLog, "[LBL] UILabel/setText: 不存在，不装钩子");
@@ -1767,6 +1783,15 @@ static NSString *NEFixedRNText(NSString *text, UIView *view, NSString *page, NSS
     if (!text.length || !view || !page.length) return nil;
     BOOL isMine = [page isEqualToString:@"我的"];
     BOOL isService = [page isEqualToString:@"服务"];
+    // 0. 最近骑行 → 最近行驶（v0.7.21）：设备页卡片标题。放 early return 之前，
+    // 不限页面——设备页不是“我的”/“服务”，放后面会被提前 return 掉。
+    if (gHasVehicleImage) {
+        NSString *t0 = [text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if ([t0 isEqualToString:@"最近骑行"]) {
+            if (fieldOut) *fieldOut = @"NERecentRide";
+            return @"最近行驶";
+        }
+    }
     if (!isMine && !isService) return nil;
     NSString *trim = [text stringByTrimmingCharactersInSet:
                       [NSCharacterSet whitespaceAndNewlineCharacterSet]];
@@ -2056,7 +2081,8 @@ static BOOL gRNTextHookInstalled = NO;
 static void NEInstallRNTextHookIfNeeded(void) {
     if (gRNTextHookInstalled) return;
     if (!gValidity9999 && !gNCoins && !gMileage && !gLevel && !gTitle && !gSignDays &&
-        !gDeviceName && !gDeviceRange && !gPosts && !gFollowing && !gFollowers) return;
+        !gDeviceName && !gDeviceRange && !gPosts && !gFollowing && !gFollowers &&
+        !gHasVehicleImage) return;
     BOOL any = NO;
     Class textCls = objc_getClass("RCTParagraphTextView");
     if (textCls && class_getInstanceMethod(textCls, @selector(drawRect:))) {
@@ -2115,6 +2141,8 @@ static NSString *NEFieldCurrentValue(NSString *field, BOOL separate) {
         return (gMileage && gMileageValue.length > 0) ? gMileageValue : nil;
     if ([field isEqualToString:@"NENCoins"])
         return (gNCoins && gNCoinsValue.length > 0) ? gNCoinsValue : nil;
+    if ([field isEqualToString:@"NERecentRide"])
+        return gHasVehicleImage ? @"最近行驶" : nil;
     if ([field isEqualToString:@"NEPosts"])
         return (gPosts && gPostsValue.length > 0) ? gPostsValue : nil;
     if ([field isEqualToString:@"NEFollowing"])
@@ -7313,7 +7341,7 @@ static void NECheckSettingsButton(void) {
     aboutName.text = @"Ninebot pro+";
     aboutName.font = [UIFont boldSystemFontOfSize:16];
     UILabel *aboutVer = [UILabel new];
-    aboutVer.text = @"0.7.20";
+    aboutVer.text = @"0.7.21";
     aboutVer.font = [UIFont systemFontOfSize:15];
     aboutVer.textColor = [UIColor secondaryLabelColor];
     [aboutTitleRow addArrangedSubview:aboutName];
@@ -8063,11 +8091,14 @@ static void NECheckSettingsButton(void) {
     if (kind == 0) gHasVehicleImage = NO; else gHasBgImage = NO;
     NEClearImageCache();
     [self refreshImageStatus];
+    // v0.7.21：恢复车辆图时，最近行驶文案也立刻还原成“最近骑行”。
+    if (kind == 0) { NEForceRefreshLabels(); NEForceRedrawRNText(); }
     // 第十二修：立刻把设备页的图恢复成暂存的原图，不用等切 tab / 重启
     //（savePickedImage 同款：立刻刷一次 + 1 秒后再刷一次，防 App 异步重载）。
     NEForceRefreshImages();
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         @try { NEForceRefreshImages(); } @catch (...) {}
+        if (kind == 0) { @try { NEForceRefreshLabels(); NEForceRedrawRNText(); } @catch (...) {} }
     });
     os_log(gLog, "[IMG] 已恢复原%{public}@", kind == 0 ? @"车辆图" : @"背景图");
 }
@@ -8101,11 +8132,19 @@ static void NECheckSettingsButton(void) {
     NEClearImageCache();
     NEInstallImageHooksIfNeeded();
     [self refreshImageStatus];
+    // v0.7.21：选了车辆图就装文字钩子、立刻把“最近骑行”换成“最近行驶”。
+    if (kind == 0) {
+        NEInstallLabelHookIfNeeded();
+        NEInstallRNTextHookIfNeeded();
+        NEForceRefreshLabels();
+        NEForceRedrawRNText();
+    }
     NEForceRefreshImages(); // v0.3.9 修复：选完图立刻把设备 tab 的图重算一遍，不用等切 tab/重启
     // 第十修：1 秒后再刷一次——App 可能在选图后异步重载主题，把刚换上的
     // 自定义图盖回去；定时器 3 秒才跑一轮，1 秒补刷让结果更快稳定。
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         @try { NEForceRefreshImages(); } @catch (...) {}
+        if (kind == 0) { @try { NEForceRefreshLabels(); NEForceRedrawRNText(); } @catch (...) {} }
     });
     os_log(gLog, "[IMG] 已保存自定义%{public}@（%ldx%ld），已应用到设备页",
            kind == 0 ? @"车辆图" : @"背景图",
@@ -8614,10 +8653,6 @@ static void NEProbeStart(void) {
     // v0.3.9：有效期 9999 / 五个自定义显示项——开关开着就装 UILabel 钩子；主页已选自定义图就装图片钩子
     gValidity9999 = NEValidity9999();
     NESyncCustomDisplayCache();
-    if (gValidity9999 || gNCoins || gMileage || gLevel || gTitle || gSignDays)
-        NEInstallLabelHookIfNeeded();
-    if (gValidity9999 || gNCoins || gMileage || gLevel || gTitle || gSignDays)
-        NEInstallRNTextHookIfNeeded();
     gHasVehicleImage = NEVehicleImagePath().length > 0;
     gHasBgImage = NEBackgroundImagePath().length > 0;
     // key 为空但文件还在时也算有图（key 可能丢了），否则图片钩子不装、刷新不跑。
@@ -8629,6 +8664,11 @@ static void NEProbeStart(void) {
         if (!gHasBgImage && doc.length && [fm fileExistsAtPath:[doc stringByAppendingPathComponent:@"ne-bg.png"]])
             gHasBgImage = YES;
     }
+    // v0.7.21：最近行驶文案跟着车辆图走——有自定义车辆图也要装文字钩子。
+    if (gValidity9999 || gNCoins || gMileage || gLevel || gTitle || gSignDays || gHasVehicleImage)
+        NEInstallLabelHookIfNeeded();
+    if (gValidity9999 || gNCoins || gMileage || gLevel || gTitle || gSignDays || gHasVehicleImage)
+        NEInstallRNTextHookIfNeeded();
     if (gHasVehicleImage || gHasBgImage) NEInstallImageHooksIfNeeded();
     // PHPicker（PhotosUI）运行时加载：dlopen 失败也不影响，回退 UIImagePickerController
     dlopen("/System/Library/Frameworks/PhotosUI.framework/PhotosUI", RTLD_NOW | RTLD_LOCAL);
