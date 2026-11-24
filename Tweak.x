@@ -1,4 +1,4 @@
-// NinebotEnhance iOS v0.6.6 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
+// NinebotEnhance iOS v0.6.7 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
 //
 // v0.6.6 加自动分享（每天领 1 N币，用户 2026-11-24 决定做）：24 号凌晨重抓
 //  实锤分享是 App 自己调 share-callback（加密包，只能重放）+ task/reward
@@ -6426,7 +6426,7 @@ static void NECheckSettingsButton(void) {
     aboutTitleRow.axis = UILayoutConstraintAxisHorizontal;
     aboutTitleRow.spacing = 8;
     UILabel *aboutName = [UILabel new];
-    aboutName.text = @"NinebotEnhance";
+    aboutName.text = @"Ninebot pro+";
     aboutName.font = [UIFont boldSystemFontOfSize:16];
     UILabel *aboutVer = [UILabel new];
     aboutVer.text = @"0.6.7";
