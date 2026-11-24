@@ -5351,11 +5351,82 @@ static NSData *NEAutoSignInSignBodyWithDeviceId(NSData *tplBody, NSString *devic
 
 // 本轮结束：清 pending 与本轮状态（终态路径调一次；换候选时不调）。
 // 诊断行（来源·格式、按次 code、message）不清，留着给设置页看。
+
+// ---- v0.6.7：签到结果弹窗（每天第一次出结果时弹一次；失败后又成功了再弹一次报成功）----
+// 弹窗记录（NSUserDefaults）：NEAutoSignInPopupLastDate（yyyy-MM-dd）、
+// NEAutoSignInPopupLastSuccess（上次弹的是成功还是失败）。
+static void NEAutoSignInShowResultPopupOnMain(BOOL success) {
+    UIWindow *win = NEKeyWindow();
+    if (!win) return;
+    // 已有签到弹窗在，先撤掉（防重叠；失败→成功那次会换成新的）
+    UIView *old = [win viewWithTag:987001];
+    if (old) [old removeFromSuperview];
+    UIView *overlay = [[UIView alloc] initWithFrame:win.bounds];
+    overlay.backgroundColor = [UIColor clearColor];
+    overlay.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    overlay.tag = 987001;
+    // 点任意处关闭
+    UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc]
+        initWithTarget:overlay action:@selector(removeFromSuperview)];
+    [overlay addGestureRecognizer:tap];
+    CGFloat cardW = 250, cardH = 96;
+    UIView *card = [[UIView alloc] initWithFrame:CGRectMake(
+        (win.bounds.size.width - cardW) / 2, (win.bounds.size.height - cardH) / 2, cardW, cardH)];
+    card.backgroundColor = [UIColor systemBackgroundColor];
+    card.layer.cornerRadius = 14;
+    // 黑透边框：黑色半透明（alpha 0.55），1.5pt
+    card.layer.borderColor = [[UIColor colorWithWhite:0 alpha:0.55] CGColor];
+    card.layer.borderWidth = 1.5;
+    card.layer.shadowColor = [UIColor blackColor].CGColor;
+    card.layer.shadowOpacity = 0.25;
+    card.layer.shadowOffset = CGSizeMake(0, 2);
+    card.layer.shadowRadius = 8;
+    UILabel *label = [[UILabel alloc] initWithFrame:card.bounds];
+    label.text = success ? @"今日签到成功" : @"今日签到失败";
+    label.font = [UIFont boldSystemFontOfSize:17];
+    label.textColor = success ? [UIColor systemGreenColor] : [UIColor systemRedColor];
+    label.textAlignment = NSTextAlignmentCenter;
+    [card addSubview:label];
+    [overlay addSubview:card];
+    overlay.alpha = 0;
+    [win addSubview:overlay];
+    [UIView animateWithDuration:0.25 animations:^{
+        overlay.alpha = 1;
+    }];
+    // 3 秒后自动消失（点一下也会立即消失）
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        [UIView animateWithDuration:0.25 animations:^{
+            overlay.alpha = 0;
+        } completion:^(BOOL finished) {
+            [overlay removeFromSuperview];
+        }];
+    });
+}
+
+// 本轮结束时决定弹不弹（主线程跑）：每天第一次出结果 → 弹；今天已弹过
+// 且上次是失败、这次成功了 → 再弹一次报成功；成功过当天不再弹。
+static void NEAutoSignInMaybeShowResultPopup(BOOL success) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
+        NSString *today = NEAutoSignInTodayString();
+        NSString *lastDate = [d stringForKey:@"NEAutoSignInPopupLastDate"];
+        BOOL lastSuccess = [d boolForKey:@"NEAutoSignInPopupLastSuccess"];
+        BOOL shownToday = [lastDate isEqualToString:today];
+        if (shownToday && (lastSuccess || !success)) return;
+        NEAutoSignInShowResultPopupOnMain(success);
+        [d setObject:today forKey:@"NEAutoSignInPopupLastDate"];
+        [d setBool:success forKey:@"NEAutoSignInPopupLastSuccess"];
+    });
+}
+
 static void NEAutoSignInEndPass(void) {
     gAutoSignInCheckPending = NO;
     gSignInPassCandidates = nil;
     gSignInPassIndex = -1;
     gSignInPassDeviceId = nil;
+    // v0.6.7：本轮结束，签到结果弹窗（每天第一次出结果时弹；失败后又成功的再弹一次）
+    NEAutoSignInMaybeShowResultPopup(gAutoSignInDoneToday);
 }
 
 // 换下一个候选（同一轮内不重不漏）；没有下一个时结束本轮，诊断停在
@@ -6358,7 +6429,7 @@ static void NECheckSettingsButton(void) {
     aboutName.text = @"NinebotEnhance";
     aboutName.font = [UIFont boldSystemFontOfSize:16];
     UILabel *aboutVer = [UILabel new];
-    aboutVer.text = @"0.6.6";
+    aboutVer.text = @"0.6.7";
     aboutVer.font = [UIFont systemFontOfSize:15];
     aboutVer.textColor = [UIColor secondaryLabelColor];
     [aboutTitleRow addArrangedSubview:aboutName];
