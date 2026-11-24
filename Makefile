@@ -7,7 +7,7 @@ ARCHS  = arm64
 TWEAK_NAME = NinebotEnhance
 
 NinebotEnhance_FILES      = Tweak.x substrate_shim.m
-NinebotEnhance_FRAMEWORKS = Foundation CoreGraphics CoreVideo CoreText ImageIO UIKit CoreLocation CallKit Network CoreTelephony AVFoundation AudioToolbox
+NinebotEnhance_FRAMEWORKS = Foundation CoreGraphics CoreVideo CoreText ImageIO UIKit CoreLocation CallKit Network CoreTelephony AVFoundation AudioToolbox CoreBluetooth
 NinebotEnhance_CFLAGS     = -fobjc-arc -I$(THEOS_PROJECT_DIR)/include
 NinebotEnhance_LDFLAGS    = -Wl,-undefined,dynamic_lookup -install_name @executable_path/Frameworks/NinebotEnhance.dylib
 

@@ -1,4 +1,11 @@
-// NinebotEnhance iOS v0.6.12 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
+// NinebotEnhance iOS v0.7.0 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
+//
+// v0.7.0 加七彩日行灯（车上的 LED 灯带，ELK-BLEDOB，duoCo Strip 同款，
+//  用户 2026-11-24 决定做）：协议照 Pro+ App 的 ELKStrip.swift，服务
+//  FFF0、写 FFF3、通知 FFF4，9 字节 7E…EF 命令，不加密不握手；全量扫描只
+//  认名字含 bledob 的设备，收 3 秒选 RSSI 最强的一台。设置页新分组“七彩
+//  日行灯”（默认折叠、功能默认关），开关/预设色/自选色/亮度/白色/灯效。
+//  含 0.6.12 全部内容。
 //
 // v0.6.6 加自动分享（每天领 1 N币，用户 2026-11-24 决定做）：24 号凌晨重抓
 //  实锤分享是 App 自己调 share-callback（加密包，只能重放）+ task/reward
@@ -564,6 +571,7 @@
 #import <CoreTelephony/CTTelephonyNetworkInfo.h>
 #import <AVFoundation/AVFoundation.h>
 #import <AudioToolbox/AudioServices.h>
+#import <CoreBluetooth/CoreBluetooth.h>
 #import <os/log.h>
 #import <objc/message.h>
 #import <objc/runtime.h>
@@ -6100,7 +6108,431 @@ static const char NEBeautyGroupKey = 0; // 设置页：“美化娱乐”折叠�
 static const char NENavGroupKey = 0;    // 设置页：“导航增强”折叠容器
 static const char NESignInRecordKey = 0; // 设置页：自动签到记录 label
 static const char NEShareRecordKey = 0; // 设置页：自动分享记录 label（v0.6.6）
+static const char NEELKGroupKey = 0;    // 设置页：“七彩日行灯”折叠容器（v0.7.0）
+static const char NEELKStatusKey = 0;   // 设置页：日行灯状态 label（v0.7.0）
+static const char NEELKControlsKey = 0; // 设置页：日行灯命令控件（未连接时禁用，v0.7.0）
+static const char NEELKBrightnessKey = 0; // 设置页：日行灯亮度值 label（v0.7.0）
 static const char NESpeedLimitValueKey = 0;
+
+
+// ---------------- v0.7.0：七彩日行灯（车上的 LED 灯带，ELK-BLEDOB） ----------------
+// duoCo Strip 同款控制器。协议见 Pro+ App 的 ELKStrip.swift：服务 FFF0，
+// 写 FFF3，通知 FFF4；命令都是 9 字节 7E…EF，Write Without Response，不加密，
+// 不发登录握手。扫描全量（withServices:nil），只认名字含 bledob 的设备，
+// 收 3 秒选 RSSI 最强的一台（邻居家同型号也在广播）。连接独占：duoCo 占着
+// 灯时连不上。状态变化发 NEELKStatusChanged 通知，设置页刷新状态行。
+// CBCentralManager 只在主队列建（回调都在主队列）。
+
+static NSString *const NEELKStatusChangedNotification = @"NEELKStatusChanged";
+
+static BOOL NEELKEnabled(void) {
+    id v = [[NSUserDefaults standardUserDefaults] objectForKey:@"NEELKEnabled"];
+    return v ? [v boolValue] : NO; // 默认关：用户 2026-11-24 要求
+}
+
+// 命令表（elkbledom models.json 的 ELK-BLEDOB 条目，逐字节照抄；
+// 别用 ELK-BLEDOM 那份，它的开关命令不一样：第二字节是 04 不是 07）。
+static const uint8_t kELKCmdTurnOn[]  = {0x7E, 0x07, 0x04, 0xFF, 0x00, 0x01, 0x02, 0x01, 0xEF};
+static const uint8_t kELKCmdTurnOff[] = {0x7E, 0x07, 0x04, 0x00, 0x00, 0x00, 0x02, 0x01, 0xEF};
+static const uint8_t kELKCmdQuery[]   = {0x7E, 0x00, 0x01, 0xFA, 0x00, 0x00, 0x00, 0x00, 0xEF};
+// 灯效 id（definitions.json 的 EFFECTS 枚举）：135 红绿蓝跳变，136 七彩跳变，138 七彩渐变。
+static const NSInteger kELKEffectJumpRGB = 135;
+static const NSInteger kELKEffectJump7   = 136;
+static const NSInteger kELKEffectFade7   = 138;
+// 7 个预设色（红/橙/黄/绿/青/蓝/紫），和 Pro+ App 一致。
+static const uint8_t kELKPresets[7][3] = {
+    {255, 0, 0}, {255, 165, 0}, {255, 255, 0}, {0, 255, 0},
+    {0, 255, 255}, {0, 0, 255}, {128, 0, 255}
+};
+
+@interface NEELKStrip : NSObject <CBCentralManagerDelegate, CBPeripheralDelegate>
++ (instancetype)shared;
+- (void)setEnabled:(BOOL)enabled;
+@property (nonatomic, readonly) BOOL enabled;
+@property (nonatomic, readonly) BOOL isConnected;
+@property (nonatomic, readonly) BOOL isScanning;
+@property (nonatomic, readonly, copy) NSString *deviceName;
+@property (nonatomic, readonly) NSInteger rssi;
+@property (nonatomic, readonly, copy) NSString *lastError;
+@property (nonatomic, readonly, copy) NSString *stage;
+@property (nonatomic, readonly) BOOL isOn;
+@property (nonatomic, readonly) NSInteger brightness;
+@property (nonatomic, readonly) NSInteger colorR;
+@property (nonatomic, readonly) NSInteger colorG;
+@property (nonatomic, readonly) NSInteger colorB;
+@property (nonatomic, readonly, copy) NSString *lastEffect;
+- (void)turnOn;
+- (void)turnOff;
+- (void)setColorR:(NSInteger)r g:(NSInteger)g b:(NSInteger)b;
+- (void)setBrightness:(NSInteger)value;
+- (void)setWhite;
+- (void)setEffect:(NSInteger)effectId name:(NSString *)name;
+@end
+
+@implementation NEELKStrip {
+    CBCentralManager *_central;
+    CBPeripheral *_peripheral;
+    CBCharacteristic *_writeChar;
+    CBCharacteristic *_notifyChar;
+    NSMutableDictionary<NSUUID *, NSDictionary *> *_candidates;
+    NSTimer *_scanTimer;
+    NSTimer *_reconnectTimer;
+    NSTimer *_notifyFallbackTimer;
+    BOOL _ready;
+    BOOL _enabled;
+    BOOL _isConnected;
+    BOOL _isScanning;
+    NSString *_deviceName;
+    NSInteger _rssi;
+    NSString *_lastError;
+    NSString *_stage;
+    BOOL _isOn;
+    NSInteger _brightness;
+    NSInteger _colorR;
+    NSInteger _colorG;
+    NSInteger _colorB;
+    NSString *_lastEffect;
+}
+
++ (instancetype)shared {
+    static NEELKStrip *s = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{ s = [[self alloc] init]; });
+    return s;
+}
+
+- (instancetype)init {
+    self = [super init];
+    if (self) {
+        _candidates = [NSMutableDictionary new];
+        _brightness = 100;
+        _colorR = 255; _colorG = 255; _colorB = 255;
+        _stage = @"未启用";
+        _enabled = NEELKEnabled();
+        _central = [[CBCentralManager alloc] initWithDelegate:self
+                                                        queue:dispatch_get_main_queue()
+                                                      options:nil];
+        if (_enabled) [self start];
+    }
+    return self;
+}
+
+- (BOOL)enabled { return _enabled; }
+- (BOOL)isConnected { return _isConnected; }
+- (BOOL)isScanning { return _isScanning; }
+- (NSString *)deviceName { return _deviceName; }
+- (NSInteger)rssi { return _rssi; }
+- (NSString *)lastError { return _lastError; }
+- (NSString *)stage { return _stage; }
+- (BOOL)isOn { return _isOn; }
+- (NSInteger)brightness { return _brightness; }
+- (NSInteger)colorR { return _colorR; }
+- (NSInteger)colorG { return _colorG; }
+- (NSInteger)colorB { return _colorB; }
+- (NSString *)lastEffect { return _lastEffect; }
+
+- (void)postStatusChanged {
+    [[NSNotificationCenter defaultCenter] postNotificationName:NEELKStatusChangedNotification object:nil];
+}
+
+- (void)setEnabled:(BOOL)enabled {
+    _enabled = enabled;
+    [[NSUserDefaults standardUserDefaults] setBool:enabled forKey:@"NEELKEnabled"];
+    if (enabled) [self start]; else [self stop];
+    [self postStatusChanged];
+}
+
+- (void)start {
+    _lastError = nil;
+    _ready = NO;
+    _stage = _central.state == CBManagerStatePoweredOn ? @"搜索中" : @"等蓝牙开启";
+    if (_central.state == CBManagerStatePoweredOn) [self startScan];
+    [self postStatusChanged];
+}
+
+- (void)stop {
+    [_scanTimer invalidate]; _scanTimer = nil;
+    [_reconnectTimer invalidate]; _reconnectTimer = nil;
+    [_notifyFallbackTimer invalidate]; _notifyFallbackTimer = nil;
+    if (_peripheral) [_central cancelPeripheralConnection:_peripheral];
+    _peripheral = nil;
+    _writeChar = nil;
+    _notifyChar = nil;
+    _isConnected = NO;
+    _isScanning = NO;
+    _deviceName = nil;
+    _rssi = 0;
+    _lastError = nil;
+    _stage = @"未启用";
+    _ready = NO;
+    [self postStatusChanged];
+}
+
+- (void)startScan {
+    if (!_enabled || _central.state != CBManagerStatePoweredOn) return;
+    [_candidates removeAllObjects];
+    _isScanning = YES;
+    _stage = @"搜索中";
+    [_central scanForPeripheralsWithServices:nil options:nil];
+    [_scanTimer invalidate];
+    __weak typeof(self) weakSelf = self;
+    _scanTimer = [NSTimer scheduledTimerWithTimeInterval:3 repeats:NO block:^(NSTimer *t) {
+        [weakSelf finishScan];
+    }];
+    [self postStatusChanged];
+}
+
+- (void)finishScan {
+    [_central stopScan];
+    _isScanning = NO;
+    if (!_enabled) { [self postStatusChanged]; return; }
+    // 选 RSSI 最强的一台（邻居家同型号也在广播，弱信号那台不是车上的灯）；
+    // 一台都没发现就继续扫。
+    NSDictionary *best = nil;
+    for (NSDictionary *c in _candidates.allValues) {
+        if (!best || [c[@"rssi"] integerValue] > [best[@"rssi"] integerValue]) best = c;
+    }
+    if (!best) { [self startScan]; return; }
+    _peripheral = best[@"peripheral"];
+    _deviceName = _peripheral.name ?: @"ELK-BLEDOB";
+    _rssi = [best[@"rssi"] integerValue];
+    _stage = @"连接中";
+    [_central connectPeripheral:_peripheral options:nil];
+    [self postStatusChanged];
+}
+
+- (void)scheduleReconnect {
+    if (!_enabled) return;
+    [_reconnectTimer invalidate];
+    __weak typeof(self) weakSelf = self;
+    _reconnectTimer = [NSTimer scheduledTimerWithTimeInterval:2 repeats:NO block:^(NSTimer *t) {
+        [weakSelf startScan];
+    }];
+}
+
+// MARK: - CBCentralManagerDelegate
+
+- (void)centralManagerDidUpdateState:(CBCentralManager *)central {
+    if (central.state == CBManagerStatePoweredOn) {
+        if (_enabled) [self startScan];
+    } else if (_enabled) {
+        _lastError = @"蓝牙未开启";
+        [self postStatusChanged];
+    }
+}
+
+- (void)centralManager:(CBCentralManager *)central didDiscoverPeripheral:(CBPeripheral *)peripheral
+     advertisementData:(NSDictionary<NSString *, id> *)advertisementData RSSI:(NSNumber *)RSSI {
+    // 只认名字含 bledob 的设备：FFF0 是通用 BLE 串口服务，打印机也广播，
+    // 只凭服务会抓错设备。名字先取 peripheral.name，取不到就取广播里的本地名。
+    NSString *name = peripheral.name
+        ?: advertisementData[CBAdvertisementDataLocalNameKey] ?: @"";
+    if (![[name lowercaseString] containsString:@"bledob"]) return;
+    _candidates[peripheral.identifier] = @{@"peripheral": peripheral, @"rssi": RSSI};
+}
+
+- (void)centralManager:(CBCentralManager *)central didConnectPeripheral:(CBPeripheral *)peripheral {
+    _isConnected = YES;
+    _lastError = nil;
+    _ready = NO;
+    _stage = @"发现服务";
+    peripheral.delegate = self;
+    [peripheral discoverServices:@[[CBUUID UUIDWithString:@"FFF0"]]];
+    [self postStatusChanged];
+}
+
+- (void)centralManager:(CBCentralManager *)central didFailToConnectPeripheral:(CBPeripheral *)peripheral error:(NSError *)error {
+    // 最常见的原因就是 duoCo 正占着灯：一个灯一次只能连一个 App。
+    _lastError = [NSString stringWithFormat:@"连接失败：%@（可能被 duoCo 占用，请先退出 duoCo 再试）",
+                  error.localizedDescription ?: @"?"];
+    _stage = @"连接失败，重连中";
+    [self scheduleReconnect];
+    [self postStatusChanged];
+}
+
+- (void)centralManager:(CBCentralManager *)central didDisconnectPeripheral:(CBPeripheral *)peripheral error:(NSError *)error {
+    _isConnected = NO;
+    _writeChar = nil;
+    _notifyChar = nil;
+    _ready = NO;
+    _stage = @"已断开，重连中";
+    [self scheduleReconnect];
+    [self postStatusChanged];
+}
+
+// MARK: - CBPeripheralDelegate
+
+- (void)peripheral:(CBPeripheral *)peripheral didDiscoverServices:(NSError *)error {
+    if (error) {
+        _lastError = @"发现服务失败";
+        [_central cancelPeripheralConnection:peripheral];
+        [self scheduleReconnect];
+        [self postStatusChanged];
+        return;
+    }
+    CBService *service = nil;
+    for (CBService *s in peripheral.services) {
+        if ([s.UUID isEqual:[CBUUID UUIDWithString:@"FFF0"]]) { service = s; break; }
+    }
+    if (!service) {
+        _lastError = @"没找到 FFF0 服务";
+        [_central cancelPeripheralConnection:peripheral];
+        [self scheduleReconnect];
+        [self postStatusChanged];
+        return;
+    }
+    [peripheral discoverCharacteristics:@[[CBUUID UUIDWithString:@"FFF3"],
+                                          [CBUUID UUIDWithString:@"FFF4"]] forService:service];
+    _stage = @"发现特征";
+    [self postStatusChanged];
+}
+
+- (void)peripheral:(CBPeripheral *)peripheral didDiscoverCharacteristicsForService:(CBService *)service error:(NSError *)error {
+    if (error) {
+        _lastError = @"发现特征失败";
+        [_central cancelPeripheralConnection:peripheral];
+        [self scheduleReconnect];
+        [self postStatusChanged];
+        return;
+    }
+    CBCharacteristic *w = nil, *n = nil;
+    for (CBCharacteristic *c in service.characteristics) {
+        if ([c.UUID isEqual:[CBUUID UUIDWithString:@"FFF3"]]) w = c;
+        if ([c.UUID isEqual:[CBUUID UUIDWithString:@"FFF4"]]) n = c;
+    }
+    if (!w || !n) {
+        _lastError = @"没找到 FFF3/FFF4 特征";
+        [_central cancelPeripheralConnection:peripheral];
+        [self scheduleReconnect];
+        [self postStatusChanged];
+        return;
+    }
+    _writeChar = w;
+    _notifyChar = n;
+    _stage = @"订阅中";
+    [peripheral setNotifyValue:YES forCharacteristic:n];
+    // 正常 1 秒内回调 didUpdateNotificationStateFor；3 秒没回调也先就绪
+    // （有的栈不回调），避免卡死在订阅这一步。
+    [_notifyFallbackTimer invalidate];
+    __weak typeof(self) weakSelf = self;
+    _notifyFallbackTimer = [NSTimer scheduledTimerWithTimeInterval:3 repeats:NO block:^(NSTimer *t) {
+        [weakSelf markReadyIfNeeded];
+    }];
+    [self postStatusChanged];
+}
+
+- (void)markReadyIfNeeded {
+    if (!_enabled || !_isConnected || !_writeChar || _ready) return;
+    _ready = YES;
+    _stage = @"就绪";
+    [self sendBytes:kELKCmdQuery length:sizeof(kELKCmdQuery)];
+    [self postStatusChanged];
+}
+
+- (void)peripheral:(CBPeripheral *)peripheral didUpdateNotificationStateForCharacteristic:(CBCharacteristic *)characteristic error:(NSError *)error {
+    [_notifyFallbackTimer invalidate]; _notifyFallbackTimer = nil;
+    if (error) {
+        _lastError = [NSString stringWithFormat:@"订阅通知失败：%@", error.localizedDescription];
+        _stage = @"订阅失败";
+        [self postStatusChanged];
+        return;
+    }
+    if (characteristic.isNotifying) {
+        [self markReadyIfNeeded];
+    } else {
+        _lastError = @"通知未开启";
+        _stage = @"订阅失败";
+        [self postStatusChanged];
+    }
+}
+
+- (void)peripheral:(CBPeripheral *)peripheral didUpdateValueForCharacteristic:(CBCharacteristic *)characteristic error:(NSError *)error {
+    // 灯的回包不解析：状态回包格式没在 models.json 里定，只证明灯在回话。
+    if (error || !characteristic.value.length) return;
+}
+
+// MARK: - 发命令（全是 Write Without Response，9 字节）
+
+- (void)sendBytes:(const uint8_t *)bytes length:(NSUInteger)len {
+    if (!_peripheral || !_writeChar || !_isConnected) return;
+    [_peripheral writeValue:[NSData dataWithBytes:bytes length:len]
+          forCharacteristic:_writeChar type:CBCharacteristicWriteWithoutResponse];
+}
+
+- (BOOL)canSend { return _isConnected && _writeChar != nil; }
+
+/// 颜色/亮度/白色/灯效都是“开灯”的意思：灯关着时先发开灯再发本命令（同 Home Assistant 的做法）。
+- (void)ensureOn {
+    if (![self canSend] || _isOn) return;
+    [self sendBytes:kELKCmdTurnOn length:sizeof(kELKCmdTurnOn)];
+    _isOn = YES;
+}
+
+- (void)turnOn {
+    if (![self canSend]) return;
+    [self sendBytes:kELKCmdTurnOn length:sizeof(kELKCmdTurnOn)];
+    _isOn = YES;
+    [self postStatusChanged];
+}
+
+- (void)turnOff {
+    if (![self canSend]) return;
+    [self sendBytes:kELKCmdTurnOff length:sizeof(kELKCmdTurnOff)];
+    _isOn = NO;
+    [self postStatusChanged];
+}
+
+- (void)setColorR:(NSInteger)r g:(NSInteger)g b:(NSInteger)b {
+    if (![self canSend]) return;
+    [self ensureOn];
+    uint8_t cmd[] = {0x7E, 0x07, 0x05, 0x03, (uint8_t)r, (uint8_t)g, (uint8_t)b, 0x0A, 0xEF};
+    [self sendBytes:cmd length:sizeof(cmd)];
+    _colorR = r; _colorG = g; _colorB = b;
+    [self postStatusChanged];
+}
+
+- (void)setBrightness:(NSInteger)value {
+    if (![self canSend]) return;
+    NSInteger v = MAX(0, MIN(100, value));
+    [self ensureOn];
+    uint8_t cmd[] = {0x7E, 0x04, 0x01, (uint8_t)v, 0x01, 0xFF, 0x02, 0x01, 0xEF};
+    [self sendBytes:cmd length:sizeof(cmd)];
+    _brightness = v;
+    [self postStatusChanged];
+}
+
+/// 白光：亮度用当前亮度值。
+- (void)setWhite {
+    if (![self canSend]) return;
+    [self ensureOn];
+    uint8_t cmd[] = {0x7E, 0x07, 0x01, (uint8_t)_brightness, 0x00, 0x00, 0x00, 0x00, 0xEF};
+    [self sendBytes:cmd length:sizeof(cmd)];
+    [self postStatusChanged];
+}
+
+- (void)setEffect:(NSInteger)effectId name:(NSString *)name {
+    if (![self canSend]) return;
+    [self ensureOn];
+    uint8_t cmd[] = {0x7E, 0x07, 0x03, (uint8_t)effectId, 0x03, 0xFF, 0xFF, 0x00, 0xEF};
+    [self sendBytes:cmd length:sizeof(cmd)];
+    _lastEffect = name;
+    [self postStatusChanged];
+}
+
+@end
+
+/// 灯带状态行文字（设置页用）：连接状态 + 设备名 + 信号，失败时附原因。
+static NSString *NEELKStatusText(void) {
+    NEELKStrip *elk = [NEELKStrip shared];
+    if (!elk.enabled) return @"未启用";
+    if (elk.isConnected) {
+        NSString *name = elk.deviceName ?: @"ELK-BLEDOB";
+        return [NSString stringWithFormat:@"已连接 %@ %lddBm", name, (long)elk.rssi];
+    }
+    if (elk.isScanning) return @"搜索中…";
+    if (elk.lastError.length) return elk.lastError;
+    return @"未连接";
+}
 
 @interface NEHUDSettingsVC : UIViewController
     <PHPickerViewControllerDelegate, UIImagePickerControllerDelegate, UINavigationControllerDelegate>
@@ -6292,7 +6724,8 @@ static void NECheckSettingsButton(void) {
         @"每天第一次打开 App 会弹签到结果（成功/失败），3 秒自己消失，点一下也能关。",
         @"N币、里程、等级这些自定义显示，关掉开关就恢复真实值。",
         @"HUD 位置和字号只动小胶囊，翻页时钟固定在右边，不跟位置走。",
-        @"插件基于九号出行6.10.13编写，如有功能失效，请降级应用或者等待更新。"
+        @"插件基于九号出行6.10.13编写，如有功能失效，请降级应用或者等待更新。",
+        @"日行灯只支持 ELK-BLEDOB 控制器（duoCo Strip 同款），别的灯带控制不了。"
     ];
     // v0.6.11：悬挂缩进——换行后第二行起与第一行文字对齐，不顶到圆点下面。
     // “• ”的实测宽度当 headIndent，第一行不缩进。
@@ -6363,6 +6796,10 @@ static void NECheckSettingsButton(void) {
     [[NSNotificationCenter defaultCenter] addObserver:self
                                              selector:@selector(onSignInRecordChanged:)
                                                  name:@"NEAutoSignInRecordChanged" object:nil];
+    // v0.7.0 日行灯状态变化：设置页开着时刷新状态行和命令控件
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(onELKStatusChanged:)
+                                                 name:NEELKStatusChangedNotification object:nil];
     // v0.6.4：键盘弹起会盖住底下的输入框（续航在最底下，输的时候看不
     // 见自己在输什么，用户 14:42 视频实锤）。键盘出现时给 scroll view
     // 底部加内边距、把正在编辑的输入框滚到可见处；键盘收起时恢复。
@@ -6464,6 +6901,140 @@ static void NECheckSettingsButton(void) {
     [stack addArrangedSubview:[self groupHeader:@"导航增强" tag:1]];
     [stack addArrangedSubview:navCard];
 
+    // ---- 七彩日行灯组（默认折叠，功能默认关；v0.7.0）----
+    UIStackView *elkStack = [UIStackView new];
+    elkStack.axis = UILayoutConstraintAxisVertical;
+    elkStack.spacing = 0;
+    [elkStack addArrangedSubview:[self switchRow:@"启用七彩日行灯" key:@"NEELKEnabled" on:NEELKEnabled()]];
+    UILabel *elkStatus = [UILabel new];
+    elkStatus.text = NEELKStatusText();
+    elkStatus.font = [UIFont systemFontOfSize:13];
+    elkStatus.textColor = [UIColor secondaryLabelColor];
+    elkStatus.numberOfLines = 0;
+    objc_setAssociatedObject(self, &NEELKStatusKey, elkStatus, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    [elkStack addArrangedSubview:[self ne_footnoteView:elkStatus]];
+    // 开灯 / 关灯
+    NSMutableArray<UIControl *> *elkControls = [NSMutableArray new];
+    UIStackView *elkOnOffRow = [UIStackView new];
+    elkOnOffRow.axis = UILayoutConstraintAxisHorizontal;
+    elkOnOffRow.spacing = 12;
+    elkOnOffRow.distribution = UIStackViewDistributionFillEqually;
+    UIButton *elkOnBtn = [self elkButtonWithTitle:@"开灯" action:@selector(elkTurnOnTapped:)];
+    UIButton *elkOffBtn = [self elkButtonWithTitle:@"关灯" action:@selector(elkTurnOffTapped:)];
+    [elkControls addObject:elkOnBtn];
+    [elkControls addObject:elkOffBtn];
+    [elkOnOffRow addArrangedSubview:elkOnBtn];
+    [elkOnOffRow addArrangedSubview:elkOffBtn];
+    [elkStack addArrangedSubview:elkOnOffRow];
+    // 7 个预设色：点一下就发颜色命令（灯关着时先开灯再变色）
+    UIStackView *elkColorRow = [UIStackView new];
+    elkColorRow.axis = UILayoutConstraintAxisHorizontal;
+    elkColorRow.spacing = 10;
+    elkColorRow.distribution = UIStackViewDistributionEqualSpacing;
+    for (NSInteger i = 0; i < 7; i++) {
+        UIButton *c = [self elkColorButtonWithPresetIndex:i];
+        [elkControls addObject:c];
+        [elkColorRow addArrangedSubview:c];
+    }
+    [elkStack addArrangedSubview:elkColorRow];
+    // 自选颜色
+    UIView *elkWellRow = [UIView new];
+    UILabel *elkWellLabel = [UILabel new];
+    elkWellLabel.text = @"自选颜色";
+    elkWellLabel.font = [UIFont systemFontOfSize:16];
+    elkWellLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    UIColorWell *elkWell = [UIColorWell new];
+    elkWell.selectedColor = [UIColor colorWithRed:[NEELKStrip shared].colorR / 255.0
+                                            green:[NEELKStrip shared].colorG / 255.0
+                                             blue:[NEELKStrip shared].colorB / 255.0 alpha:1];
+    elkWell.translatesAutoresizingMaskIntoConstraints = NO;
+    [elkWell addTarget:self action:@selector(elkColorWellChanged:)
+        forControlEvents:UIControlEventValueChanged];
+    [elkControls addObject:elkWell];
+    [elkWellRow addSubview:elkWellLabel];
+    [elkWellRow addSubview:elkWell];
+    [NSLayoutConstraint activateConstraints:@[
+        [elkWellLabel.leadingAnchor constraintEqualToAnchor:elkWellRow.leadingAnchor],
+        [elkWellLabel.centerYAnchor constraintEqualToAnchor:elkWellRow.centerYAnchor],
+        [elkWell.trailingAnchor constraintEqualToAnchor:elkWellRow.trailingAnchor],
+        [elkWell.centerYAnchor constraintEqualToAnchor:elkWellRow.centerYAnchor],
+        [elkWellRow.heightAnchor constraintEqualToConstant:44]
+    ]];
+    [elkStack addArrangedSubview:elkWellRow];
+    // 亮度 + 白色
+    UIView *elkBrightRow = [UIView new];
+    UILabel *elkBrightLabel = [UILabel new];
+    elkBrightLabel.text = @"亮度";
+    elkBrightLabel.font = [UIFont systemFontOfSize:16];
+    elkBrightLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    UILabel *elkBrightValue = [UILabel new];
+    elkBrightValue.text = [NSString stringWithFormat:@"%ld%%", (long)[NEELKStrip shared].brightness];
+    elkBrightValue.font = [UIFont systemFontOfSize:16];
+    elkBrightValue.translatesAutoresizingMaskIntoConstraints = NO;
+    objc_setAssociatedObject(self, &NEELKBrightnessKey, elkBrightValue, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    UISlider *elkSlider = [UISlider new];
+    elkSlider.minimumValue = 0;
+    elkSlider.maximumValue = 100;
+    elkSlider.value = (float)[NEELKStrip shared].brightness;
+    elkSlider.translatesAutoresizingMaskIntoConstraints = NO;
+    [elkSlider addTarget:self action:@selector(elkBrightnessSliderChanged:)
+        forControlEvents:UIControlEventValueChanged];
+    // 松手再发：拖动一路狂发会把灯的命令队列堵满
+    [elkSlider addTarget:self action:@selector(elkBrightnessSliderEnded:)
+        forControlEvents:UIControlEventTouchUpInside | UIControlEventTouchUpOutside];
+    [elkControls addObject:elkSlider];
+    UIButton *elkWhiteBtn = [self elkButtonWithTitle:@"白色" action:@selector(elkWhiteTapped:)];
+    [elkControls addObject:elkWhiteBtn];
+    [elkBrightRow addSubview:elkBrightLabel];
+    [elkBrightRow addSubview:elkBrightValue];
+    [elkBrightRow addSubview:elkSlider];
+    [elkBrightRow addSubview:elkWhiteBtn];
+    [NSLayoutConstraint activateConstraints:@[
+        [elkBrightLabel.leadingAnchor constraintEqualToAnchor:elkBrightRow.leadingAnchor],
+        [elkBrightLabel.centerYAnchor constraintEqualToAnchor:elkBrightRow.centerYAnchor],
+        [elkBrightValue.leadingAnchor constraintEqualToAnchor:elkBrightLabel.trailingAnchor constant:8],
+        [elkBrightValue.centerYAnchor constraintEqualToAnchor:elkBrightRow.centerYAnchor],
+        [elkSlider.leadingAnchor constraintEqualToAnchor:elkBrightValue.trailingAnchor constant:8],
+        [elkSlider.centerYAnchor constraintEqualToAnchor:elkBrightRow.centerYAnchor],
+        [elkWhiteBtn.leadingAnchor constraintEqualToAnchor:elkSlider.trailingAnchor constant:8],
+        [elkWhiteBtn.trailingAnchor constraintEqualToAnchor:elkBrightRow.trailingAnchor],
+        [elkWhiteBtn.centerYAnchor constraintEqualToAnchor:elkBrightRow.centerYAnchor],
+        [elkBrightRow.heightAnchor constraintEqualToConstant:44]
+    ]];
+    [elkStack addArrangedSubview:elkBrightRow];
+    // 3 个灯效
+    UIStackView *elkEffectRow = [UIStackView new];
+    elkEffectRow.axis = UILayoutConstraintAxisHorizontal;
+    elkEffectRow.spacing = 8;
+    elkEffectRow.distribution = UIStackViewDistributionFillEqually;
+    NSArray<NSArray *> *elkEffects = @[
+        @[@"七彩跳变", @(kELKEffectJump7)],
+        @[@"七彩渐变", @(kELKEffectFade7)],
+        @[@"红绿蓝跳变", @(kELKEffectJumpRGB)],
+    ];
+    for (NSArray *e in elkEffects) {
+        UIButton *b = [self elkButtonWithTitle:e[0] action:@selector(elkEffectTapped:)];
+        b.tag = [e[1] integerValue];
+        [elkControls addObject:b];
+        [elkEffectRow addArrangedSubview:b];
+    }
+    [elkStack addArrangedSubview:elkEffectRow];
+    UILabel *elkNote = [UILabel new];
+    elkNote.text = @"连不上时：先退出 duoCo（一个灯一次只能连一个 App），再等它重连；卡片上的名字和信号帮你确认连的是自己车上的灯——开关一按，看车灯变不变就知道。";
+    elkNote.font = [UIFont systemFontOfSize:13];
+    elkNote.textColor = [UIColor secondaryLabelColor];
+    elkNote.numberOfLines = 0;
+    [elkStack addArrangedSubview:[self ne_footnoteView:elkNote]];
+    objc_setAssociatedObject(self, &NEELKControlsKey, elkControls, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    [self ne_styleSeparatorsInStack:elkStack];
+    UIView *elkCard = [self ne_cardWrappingStack:elkStack];
+    elkCard.hidden = YES; // 默认折叠，折叠状态存在卡片上
+    objc_setAssociatedObject(self, &NEELKGroupKey, elkCard,
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    [stack addArrangedSubview:[self groupHeader:@"七彩日行灯" tag:2]];
+    [stack addArrangedSubview:elkCard];
+
+
     // ---- 关于卡（填补底下空白）----
     UIStackView *aboutStack = [UIStackView new];
     aboutStack.axis = UILayoutConstraintAxisVertical;
@@ -6476,7 +7047,7 @@ static void NECheckSettingsButton(void) {
     aboutName.text = @"Ninebot pro+";
     aboutName.font = [UIFont boldSystemFontOfSize:16];
     UILabel *aboutVer = [UILabel new];
-    aboutVer.text = @"0.6.12";
+    aboutVer.text = @"0.7.0";
     aboutVer.font = [UIFont systemFontOfSize:15];
     aboutVer.textColor = [UIColor secondaryLabelColor];
     [aboutTitleRow addArrangedSubview:aboutName];
@@ -6523,6 +7094,7 @@ static void NECheckSettingsButton(void) {
     [super viewWillAppear:animated];
     [self refreshSignInRecord];
     [self refreshShareRecord];
+    [self refreshELKStatus];
 }
 
 // 签到记录行：打开设置页时按最新状态刷一遍（签到可能在设置页打开前已跑完；
@@ -6546,6 +7118,96 @@ static void NECheckSettingsButton(void) {
 // 分享跑完发来的通知：设置页开着时也刷新记录行
 - (void)onShareRecordChanged:(NSNotification *)note {
     [self refreshShareRecord];
+}
+
+// 日行灯状态行：打开设置页时按最新状态刷一遍；状态变化（连接/断开/失败）
+// 发通知，设置页开着时也刷新。未连接时命令控件禁用，免得点了没反应。
+- (void)refreshELKStatus {
+    NEELKStrip *elk = [NEELKStrip shared];
+    UILabel *status = objc_getAssociatedObject(self, &NEELKStatusKey);
+    if (status) {
+        status.text = NEELKStatusText();
+        status.textColor = elk.lastError.length ? [UIColor systemRedColor] : [UIColor secondaryLabelColor];
+    }
+    NSArray<UIControl *> *controls = objc_getAssociatedObject(self, &NEELKControlsKey);
+    for (UIControl *c in controls) c.enabled = elk.isConnected;
+}
+
+- (void)onELKStatusChanged:(NSNotification *)note {
+    [self refreshELKStatus];
+}
+
+// 日行灯命令按钮（圆角 12，浅灰底）
+- (UIButton *)elkButtonWithTitle:(NSString *)title action:(SEL)action {
+    UIButton *btn = [UIButton buttonWithType:UIButtonTypeSystem];
+    [btn setTitle:title forState:UIControlStateNormal];
+    btn.titleLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightSemibold];
+    btn.backgroundColor = [UIColor tertiarySystemFillColor];
+    btn.layer.cornerRadius = 12;
+    btn.clipsToBounds = YES;
+    btn.translatesAutoresizingMaskIntoConstraints = NO;
+    [btn.heightAnchor constraintEqualToConstant:44].active = YES;
+    [btn addTarget:self action:action forControlEvents:UIControlEventTouchUpInside];
+    return btn;
+}
+
+// 预设色圆钮（30pt，tag = 预设下标）
+- (UIButton *)elkColorButtonWithPresetIndex:(NSInteger)idx {
+    UIButton *btn = [UIButton buttonWithType:UIButtonTypeCustom];
+    btn.backgroundColor = [UIColor colorWithRed:kELKPresets[idx][0] / 255.0
+                                          green:kELKPresets[idx][1] / 255.0
+                                           blue:kELKPresets[idx][2] / 255.0 alpha:1];
+    btn.layer.cornerRadius = 15;
+    btn.layer.borderWidth = 1;
+    btn.layer.borderColor = [UIColor tertiaryLabelColor].CGColor;
+    btn.clipsToBounds = YES;
+    btn.translatesAutoresizingMaskIntoConstraints = NO;
+    [btn.widthAnchor constraintEqualToConstant:30].active = YES;
+    [btn.heightAnchor constraintEqualToConstant:30].active = YES;
+    btn.tag = (NSInteger)idx;
+    [btn addTarget:self action:@selector(elkPresetColorTapped:)
+        forControlEvents:UIControlEventTouchUpInside];
+    return btn;
+}
+
+- (void)elkTurnOnTapped:(UIButton *)sender {
+    [[NEELKStrip shared] turnOn];
+}
+
+- (void)elkTurnOffTapped:(UIButton *)sender {
+    [[NEELKStrip shared] turnOff];
+}
+
+- (void)elkPresetColorTapped:(UIButton *)sender {
+    NSInteger idx = sender.tag;
+    if (idx < 0 || idx >= 7) return;
+    [[NEELKStrip shared] setColorR:kELKPresets[idx][0] g:kELKPresets[idx][1] b:kELKPresets[idx][2]];
+}
+
+- (void)elkColorWellChanged:(UIColorWell *)well {
+    CGFloat r = 0, g = 0, b = 0, a = 0;
+    if (![well.selectedColor getRed:&r green:&g blue:&b alpha:&a]) return;
+    [[NEELKStrip shared] setColorR:(NSInteger)llround(r * 255)
+                                 g:(NSInteger)llround(g * 255)
+                                 b:(NSInteger)llround(b * 255)];
+}
+
+- (void)elkBrightnessSliderChanged:(UISlider *)slider {
+    UILabel *value = objc_getAssociatedObject(self, &NEELKBrightnessKey);
+    if (value) value.text = [NSString stringWithFormat:@"%ld%%", (long)llround(slider.value)];
+}
+
+- (void)elkBrightnessSliderEnded:(UISlider *)slider {
+    [[NEELKStrip shared] setBrightness:(NSInteger)llround(slider.value)];
+}
+
+- (void)elkWhiteTapped:(UIButton *)sender {
+    [[NEELKStrip shared] setWhite];
+}
+
+- (void)elkEffectTapped:(UIButton *)sender {
+    NSString *name = sender.titleLabel.text ?: @"";
+    [[NEELKStrip shared] setEffect:sender.tag name:name];
 }
 
 - (void)dealloc {
@@ -6639,11 +7301,13 @@ static void NECheckSettingsButton(void) {
 }
 
 - (void)groupHeaderTapped:(UIButton *)sender {
-    const char *key = (sender.tag == 0) ? &NEBeautyGroupKey : &NENavGroupKey;
+    const char *key = (sender.tag == 0) ? &NEBeautyGroupKey
+        : (sender.tag == 1) ? &NENavGroupKey : &NEELKGroupKey;
     UIView *container = objc_getAssociatedObject(self, key); // 卡片（折叠状态存在卡片上）
     if (!container) return;
     container.hidden = !container.hidden;
-    NSString *title = (sender.tag == 0) ? @"美化娱乐" : @"导航增强";
+    NSString *title = (sender.tag == 0) ? @"美化娱乐"
+        : (sender.tag == 1) ? @"导航增强" : @"七彩日行灯";
     [sender setTitle:[NSString stringWithFormat:@"%@ %@", container.hidden ? @"▸" : @"▾", title]
             forState:UIControlStateNormal];
 }
@@ -6873,6 +7537,8 @@ static void NECheckSettingsButton(void) {
     if ([key isEqualToString:@"NEAutoSignIn"] && sw.isOn) NEAutoSignInScheduleAfter(1.0);
     // v0.6.6 自动分享：打开开关就排一次静默分享（今天没领成、且没已排的检查时）
     if ([key isEqualToString:@"NEAutoShare"] && sw.isOn) NEAutoShareScheduleAfter(1.0);
+    // v0.7.0 七彩日行灯：开关管 BLE 管理器的启停（默认关）
+    if ([key isEqualToString:@"NEELKEnabled"]) [[NEELKStrip shared] setEnabled:sw.isOn];
 }
 
 // 限速行：左边“限速”+ 中间值 + 右边步进器（30–120，每 5 一档）
@@ -7696,6 +8362,10 @@ static void NEProbeStart(void) {
         gLocMgr = [CLLocationManager new];
         gLocMgr.delegate = gLocDelegate;
         NEApplySpeedLocationMode(); // 提醒开着 → 连续定位；关着 → 单次定位（只够天气用）
+
+        // v0.7.0 七彩日行灯：开关开着就建 BLE 管理器开始搜灯（只在主队列建，
+        // 回调都在主队列；开关关着时只建不启动）
+        [NEELKStrip shared];
 
         // v0.4.1 自动签到（保险）：每次进前台时静默补签（今天没签成时才跑，开关默认开）
         NEAutoSignInTriggerIfNeeded();
