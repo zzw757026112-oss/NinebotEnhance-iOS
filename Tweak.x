@@ -1,4 +1,4 @@
-// NinebotEnhance iOS v0.7.5 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
+// NinebotEnhance iOS v0.7.6 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
 //
 // v0.7.0 加七彩日行灯（车上的 LED 灯带，ELK-BLEDOB，duoCo Strip 同款，
 //  用户 2026-11-24 决定做）：协议照 Pro+ App 的 ELKStrip.swift，服务
@@ -7,6 +7,9 @@
 //  日行灯”（默认折叠、功能默认关），开关/预设色/自选色/亮度/白色/灯效。
 //  含 0.6.12 全部内容。
 //
+// v0.7.6（用户 2026-11-24 15:40 截图）：修导航栏——给 nav bar 加磨砂底，
+//   盖住“我的”页齿轮、让标题可见（0.7.5 导航栏全透明，标题没显示、
+//   “关闭”和齿轮重叠）。
 // v0.7.5（用户 2026-11-24 15:28 要求）：设置页底图换成九号 App“我的”页
 //   真实底图（OverFullScreen 弹出 + 页面透明，删掉橙色渐变底图）。
 // v0.7.4（用户 2026-11-24 15:13 要求）：签到记录改成 10 天历史，超 10 天
@@ -6637,6 +6640,23 @@ static UIViewController *NETopViewController(void) {
     // v0.7.5：OverFullScreen 弹出——“我的”页在弹出后仍留在视图层级里，磨砂卡片
     // 才能透出它。默认全屏弹出会把原页面从层级里拿掉，透明底只会看到黑底。
     nav.modalPresentationStyle = UIModalPresentationOverFullScreen;
+    // v0.7.6：导航栏给一个磨砂底。iOS 15+ 的导航栏在内容滚到顶时用
+    // scrollEdgeAppearance，默认是全透明的——0.7.5 页面改透明后导航栏
+    // 就彻底没底了：标题没显示、“关闭”和“我的”页的齿轮重叠。
+    // SystemMaterial 模糊 + 白色 0.70 遮罩（比卡片的 0.35 更不透，
+    // 顶栏必须把齿轮盖住）；标题字色明确写死深色 17pt 半粗体。
+    // 三处外观都设，否则滚到顶时还是透明那套。
+    UINavigationBarAppearance *navAppearance = [[UINavigationBarAppearance alloc] init];
+    navAppearance.backgroundEffect = [UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemMaterial];
+    navAppearance.backgroundColor = [[UIColor whiteColor] colorWithAlphaComponent:0.70];
+    navAppearance.titleTextAttributes = @{
+        NSForegroundColorAttributeName : [UIColor labelColor],
+        NSFontAttributeName : [UIFont systemFontOfSize:17 weight:UIFontWeightSemibold]
+    };
+    nav.navigationBar.standardAppearance = navAppearance;
+    nav.navigationBar.scrollEdgeAppearance = navAppearance;
+    nav.navigationBar.compactAppearance = navAppearance;
+    vc.navigationItem.title = @"Ninebot pro+";
     [top presentViewController:nav animated:YES completion:nil];
 }
 @end
@@ -7104,7 +7124,7 @@ static void NECheckSettingsButton(void) {
     aboutName.text = @"Ninebot pro+";
     aboutName.font = [UIFont boldSystemFontOfSize:16];
     UILabel *aboutVer = [UILabel new];
-    aboutVer.text = @"0.7.5";
+    aboutVer.text = @"0.7.6";
     aboutVer.font = [UIFont systemFontOfSize:15];
     aboutVer.textColor = [UIColor secondaryLabelColor];
     [aboutTitleRow addArrangedSubview:aboutName];
