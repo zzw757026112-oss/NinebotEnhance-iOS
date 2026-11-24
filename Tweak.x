@@ -1,4 +1,4 @@
-// NinebotEnhance iOS v0.7.7 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
+// NinebotEnhance iOS v0.7.8 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
 //
 // v0.7.0 加七彩日行灯（车上的 LED 灯带，ELK-BLEDOB，duoCo Strip 同款，
 //  用户 2026-11-24 决定做）：协议照 Pro+ App 的 ELKStrip.swift，服务
@@ -7,6 +7,9 @@
 //  日行灯”（默认折叠、功能默认关），开关/预设色/自选色/亮度/白色/灯效。
 //  含 0.6.12 全部内容。
 //
+// v0.7.8（用户 2026-11-24 15:59 视频）：删掉白色白纱，只留全屏磨砂——
+//   0.7.7 的白纱 0.45 太浓，“我的”页本身底色浅，磨砂后已很淡，再盖
+//   白纱直接冲成纯白，底图全没了。磨砂本身就能把字模糊到看不清。
 // v0.7.7（用户 2026-11-24 15:46 截图）：整页底加全屏磨砂 + 白纱，把“我的”页
 //   整页模糊掉——0.7.5 只有卡片是磨砂的，缝隙/组头/底部露出的“我的”页
 //   全是清晰的，跟设置页内容打架。本版含 0.7.6 导航栏修法，可跳过 0.7.6。
@@ -6751,15 +6754,13 @@ static void NECheckSettingsButton(void) {
     // 内容打架。全屏磨砂后“我的”页变成一团柔和的底色，字看不清、
     // 颜色也淡了，设置页内容就干净了。放在 scroll view 后面（所有
     // 卡片/组头/文字的底下），卡片本身还是磨砂（双层模糊无妨）。
+    // v0.7.8：白纱删了。0.7.7 的白纱 0.45 太浓，“我的”页本身底色浅，
+    // 磨砂后已很淡，再盖白纱直接冲成纯白。只留磨砂，底图以磨砂形态透出来。
     UIVisualEffectView *bgBlur = [[UIVisualEffectView alloc]
         initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemMaterial]];
     bgBlur.frame = self.view.bounds;
     bgBlur.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     [self.view addSubview:bgBlur];
-    UIView *bgVeil = [[UIView alloc] initWithFrame:self.view.bounds];
-    bgVeil.backgroundColor = [[UIColor whiteColor] colorWithAlphaComponent:0.45];
-    bgVeil.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-    [self.view addSubview:bgVeil];
     self.title = @"Ninebot pro+";
     self.navigationItem.rightBarButtonItem =
         [[UIBarButtonItem alloc] initWithTitle:@"关闭" style:UIBarButtonItemStyleDone
@@ -7142,7 +7143,7 @@ static void NECheckSettingsButton(void) {
     aboutName.text = @"Ninebot pro+";
     aboutName.font = [UIFont boldSystemFontOfSize:16];
     UILabel *aboutVer = [UILabel new];
-    aboutVer.text = @"0.7.7";
+    aboutVer.text = @"0.7.8";
     aboutVer.font = [UIFont systemFontOfSize:15];
     aboutVer.textColor = [UIColor secondaryLabelColor];
     [aboutTitleRow addArrangedSubview:aboutName];
