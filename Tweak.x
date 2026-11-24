@@ -1,4 +1,4 @@
-// NinebotEnhance iOS v0.7.18 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
+// NinebotEnhance iOS v0.7.19 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
 //
 // v0.7.0 加七彩日行灯（车上的 LED 灯带，ELK-BLEDOB，duoCo Strip 同款，
 //  用户 2026-11-24 决定做）：协议照 Pro+ App 的 ELKStrip.swift，服务
@@ -7,6 +7,10 @@
 //  日行灯”（默认折叠、功能默认关），开关/预设色/自选色/亮度/白色/灯效。
 //  含 0.6.12 全部内容。
 //
+// v0.7.19（用户 2026-11-24 18:10 决定）：改回瞬间切换，动画彻底拿掉——
+//   动画六轮都没修好（弹簧、高度约束、去回弹、裁剪、淡入淡出、
+//   布局同步），磨砂卡片 + 固定高度的行跟动画合不来。改回 0.7.12
+//   之前的瞬间切换：点一下马上展开/收起，干净利落。
 // v0.7.18（用户 2026-11-24 17:59 视频）：淡入淡出时强制布局立即同步——
 //   0.7.17 还是卡：hidden 切换只把布局标脏，更新推迟到下一个
 //   runloop，淡入已经开始了——卡片先以满高度淡入，下面内容还没
@@ -7201,7 +7205,7 @@ static void NECheckSettingsButton(void) {
     aboutName.text = @"Ninebot pro+";
     aboutName.font = [UIFont boldSystemFontOfSize:16];
     UILabel *aboutVer = [UILabel new];
-    aboutVer.text = @"0.7.18";
+    aboutVer.text = @"0.7.19";
     aboutVer.font = [UIFont systemFontOfSize:15];
     aboutVer.textColor = [UIColor secondaryLabelColor];
     [aboutTitleRow addArrangedSubview:aboutName];
@@ -7503,31 +7507,9 @@ static void NECheckSettingsButton(void) {
         : (sender.tag == 1) ? @"导航增强" : @"七彩日行灯";
     [sender setTitle:[NSString stringWithFormat:@"%@ %@", willShow ? @"▾" : @"▸", title]
             forState:UIControlStateNormal];
-    // v0.7.17：淡入淡出，不碰高度。展开先取消隐藏、再 0.3s 淡入；
-    // 收起先 0.3s 淡出、动画完再隐藏并把 alpha 复位回 1。
-    // v0.7.18：hidden 切换后立刻 layoutIfNeeded，强制布局当场同步，
-    // 再开始淡入淡出——不然布局更新推迟，卡片先以满高度淡入、下面
-    // 内容还没移开，两边重叠。
-    if (willShow) {
-        container.alpha = 0;
-        container.hidden = NO;
-        [self.view layoutIfNeeded];
-        [UIView animateWithDuration:0.3 delay:0
-                            options:UIViewAnimationOptionCurveEaseInOut
-                         animations:^{
-            container.alpha = 1;
-        } completion:nil];
-    } else {
-        [UIView animateWithDuration:0.3 delay:0
-                            options:UIViewAnimationOptionCurveEaseInOut
-                         animations:^{
-            container.alpha = 0;
-        } completion:^(BOOL finished){
-            container.hidden = YES;
-            container.alpha = 1;
-            [self.view layoutIfNeeded];
-        }];
-    }
+    // v0.7.19：瞬间切换，不做动画。动画六轮都没修好，改回 0.7.12
+    // 之前的样子：点一下马上展开/收起，干净利落。
+    container.hidden = !willShow;
 }
 
 // v0.3.9 追加：自定义显示项行——左边标题 + 中间输入框 + 右边开关。
