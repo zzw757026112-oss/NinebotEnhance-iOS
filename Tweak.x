@@ -1,4 +1,4 @@
-// NinebotEnhance iOS v0.7.6 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
+// NinebotEnhance iOS v0.7.7 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
 //
 // v0.7.0 加七彩日行灯（车上的 LED 灯带，ELK-BLEDOB，duoCo Strip 同款，
 //  用户 2026-11-24 决定做）：协议照 Pro+ App 的 ELKStrip.swift，服务
@@ -7,6 +7,9 @@
 //  日行灯”（默认折叠、功能默认关），开关/预设色/自选色/亮度/白色/灯效。
 //  含 0.6.12 全部内容。
 //
+// v0.7.7（用户 2026-11-24 15:46 截图）：整页底加全屏磨砂 + 白纱，把“我的”页
+//   整页模糊掉——0.7.5 只有卡片是磨砂的，缝隙/组头/底部露出的“我的”页
+//   全是清晰的，跟设置页内容打架。本版含 0.7.6 导航栏修法，可跳过 0.7.6。
 // v0.7.6（用户 2026-11-24 15:40 截图）：修导航栏——给 nav bar 加磨砂底，
 //   盖住“我的”页齿轮、让标题可见（0.7.5 导航栏全透明，标题没显示、
 //   “关闭”和齿轮重叠）。
@@ -6742,6 +6745,21 @@ static void NECheckSettingsButton(void) {
     // v0.7.5：页面改透明，底下透出的是九号 App“我的”页真实内容（OverFullScreen
     // 弹出后原页面仍在层级里）。橙色渐变底图已删。卡片磨砂后透出的就是真实底图。
     self.view.backgroundColor = [UIColor clearColor];
+    // v0.7.7：整页底加一层全屏磨砂 + 白纱，把“我的”页整页模糊掉。
+    // 0.7.5 只有卡片是磨砂的，卡片缝隙、组头、底部露出来的“我的”页
+    // 全是清晰的——菜单文字碎片、横幅土黄、tab bar 都透出来跟设置页
+    // 内容打架。全屏磨砂后“我的”页变成一团柔和的底色，字看不清、
+    // 颜色也淡了，设置页内容就干净了。放在 scroll view 后面（所有
+    // 卡片/组头/文字的底下），卡片本身还是磨砂（双层模糊无妨）。
+    UIVisualEffectView *bgBlur = [[UIVisualEffectView alloc]
+        initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemMaterial]];
+    bgBlur.frame = self.view.bounds;
+    bgBlur.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    [self.view addSubview:bgBlur];
+    UIView *bgVeil = [[UIView alloc] initWithFrame:self.view.bounds];
+    bgVeil.backgroundColor = [[UIColor whiteColor] colorWithAlphaComponent:0.45];
+    bgVeil.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    [self.view addSubview:bgVeil];
     self.title = @"Ninebot pro+";
     self.navigationItem.rightBarButtonItem =
         [[UIBarButtonItem alloc] initWithTitle:@"关闭" style:UIBarButtonItemStyleDone
@@ -7124,7 +7142,7 @@ static void NECheckSettingsButton(void) {
     aboutName.text = @"Ninebot pro+";
     aboutName.font = [UIFont boldSystemFontOfSize:16];
     UILabel *aboutVer = [UILabel new];
-    aboutVer.text = @"0.7.6";
+    aboutVer.text = @"0.7.7";
     aboutVer.font = [UIFont systemFontOfSize:15];
     aboutVer.textColor = [UIColor secondaryLabelColor];
     [aboutTitleRow addArrangedSubview:aboutName];
