@@ -1,4 +1,4 @@
-// NinebotEnhance iOS v0.7.19 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
+// NinebotEnhance iOS v0.7.20 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
 //
 // v0.7.0 加七彩日行灯（车上的 LED 灯带，ELK-BLEDOB，duoCo Strip 同款，
 //  用户 2026-11-24 决定做）：协议照 Pro+ App 的 ELKStrip.swift，服务
@@ -6,6 +6,10 @@
 //  认名字含 bledob 的设备，收 3 秒选 RSSI 最强的一台。设置页新分组“七彩
 //  日行灯”（默认折叠、功能默认关），开关/预设色/自选色/亮度/白色/灯效。
 //  含 0.6.12 全部内容。
+//
+// v0.7.20（用户 2026-11-24 19:30 要求）：我的页创作/关注/粉丝三个数可自定义，
+//   跟 N币 一样，开关+输入框；UILabel 路径靠正下方相邻 label 认，RN 路径
+//   靠正下方段落认（兄弟段落四个 label 互相都含，分不出来）。
 //
 // v0.7.19（用户 2026-11-24 18:10 决定）：改回瞬间切换，动画彻底拿掉——
 //   动画六轮都没修好（弹簧、高度约束、去回弹、裁剪、淡入淡出、
@@ -771,10 +775,12 @@ static BOOL NEBoolDefault(NSString *key) {
     return v ? [v boolValue] : NO;
 }
 static BOOL gNCoins = NO, gMileage = NO, gLevel = NO, gTitle = NO, gSignDays = NO,
-            gDeviceName = NO, gDeviceRange = NO;
+            gDeviceName = NO, gDeviceRange = NO,
+            gPosts = NO, gFollowing = NO, gFollowers = NO;
 static NSString *gNCoinsValue = nil, *gMileageValue = nil, *gLevelValue = nil,
                 *gTitleValue = nil, *gSignDaysValue = nil,
-                *gDeviceNameValue = nil, *gDeviceRangeValue = nil;
+                *gDeviceNameValue = nil, *gDeviceRangeValue = nil,
+                *gPostsValue = nil, *gFollowingValue = nil, *gFollowersValue = nil;
 static void NESyncCustomDisplayCache(void) {
     NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
     gNCoins = NEBoolDefault(@"NENCoins");
@@ -784,6 +790,9 @@ static void NESyncCustomDisplayCache(void) {
     gSignDays = NEBoolDefault(@"NESignDays");
     gDeviceName = NEBoolDefault(@"NEDeviceName");
     gDeviceRange = NEBoolDefault(@"NEDeviceRange");
+    gPosts = NEBoolDefault(@"NEPosts");
+    gFollowing = NEBoolDefault(@"NEFollowing");
+    gFollowers = NEBoolDefault(@"NEFollowers");
     gNCoinsValue = [d stringForKey:@"NENCoinsValue"];
     gMileageValue = [d stringForKey:@"NEMileageValue"];
     gLevelValue = [d stringForKey:@"NELevelValue"];
@@ -791,6 +800,9 @@ static void NESyncCustomDisplayCache(void) {
     gSignDaysValue = [d stringForKey:@"NESignDaysValue"];
     gDeviceNameValue = [d stringForKey:@"NEDeviceNameValue"];
     gDeviceRangeValue = [d stringForKey:@"NEDeviceRangeValue"];
+    gPostsValue = [d stringForKey:@"NEPostsValue"];
+    gFollowingValue = [d stringForKey:@"NEFollowingValue"];
+    gFollowersValue = [d stringForKey:@"NEFollowersValue"];
     gValidityValue = [d stringForKey:@"NEValidityValue"];
 }
 
@@ -1299,8 +1311,33 @@ static NSString *NEFixedLabelString(NSString *text, UILabel *label,
             return gSignDaysValue;
         }
     }
+    // 6a. 创作：单独数字，正下方有“创作”label（窗口坐标相邻才认）；
+    // 旁边有 % 就是电量，不换。三个数各认各的正下方 label，互不抢。
+    if (gPosts && gPostsValue.length > 0 && isNum &&
+        !NEHasAdjacentPercentLabel(label) &&
+        NEAdjacentLabelContaining(label, @"创作")) {
+        if (fieldOut) *fieldOut = @"NEPosts";
+        if (separateOut) *separateOut = YES;
+        return gPostsValue;
+    }
+    // 6b. 关注：同上，正下方是“关注”label。
+    if (gFollowing && gFollowingValue.length > 0 && isNum &&
+        !NEHasAdjacentPercentLabel(label) &&
+        NEAdjacentLabelContaining(label, @"关注")) {
+        if (fieldOut) *fieldOut = @"NEFollowing";
+        if (separateOut) *separateOut = YES;
+        return gFollowingValue;
+    }
+    // 6c. 粉丝：同上，正下方是“粉丝”label。
+    if (gFollowers && gFollowersValue.length > 0 && isNum &&
+        !NEHasAdjacentPercentLabel(label) &&
+        NEAdjacentLabelContaining(label, @"粉丝")) {
+        if (fieldOut) *fieldOut = @"NEFollowers";
+        if (separateOut) *separateOut = YES;
+        return gFollowersValue;
+    }
     // 6. N币余额：单独数字，旁边有“N币”label（窗口坐标相邻才认，帧没布局时不认）；
-    // 旁边有 % 就是电量，不换。认不出宁可不换，绝不能把创作/关注/粉丝的数字换了。
+    // 旁边有 % 就是电量，不换。认不出宁可不换。
     if (gNCoins && gNCoinsValue.length > 0 && isNum &&
         !NEHasAdjacentPercentLabel(label) &&
         NEAdjacentLabelContaining(label, @"N币")) {
@@ -1561,7 +1598,7 @@ static BOOL gLabelHookInstalled = NO;
 static void NEInstallLabelHookIfNeeded(void) {
     if (gLabelHookInstalled) return;
     if (!gValidity9999 && !gNCoins && !gMileage && !gLevel && !gTitle && !gSignDays &&
-        !gDeviceName && !gDeviceRange) return;
+        !gDeviceName && !gDeviceRange && !gPosts && !gFollowing && !gFollowers) return;
     Class cls = objc_getClass("UILabel");
     if (!cls || !class_getInstanceMethod(cls, @selector(setText:))) {
         os_log(gLog, "[LBL] UILabel/setText: 不存在，不装钩子");
@@ -1667,6 +1704,45 @@ static BOOL NERNSiblingContains(NSArray<NSString *> *sibs, NSString *kw) {
         if (s.length && [s rangeOfString:kw].location != NSNotFound) return YES;
     }
     return NO;
+}
+
+// RN：找当前段落正下方最近的一个段落文字。创作/关注/粉丝/N币四个数在同一行，
+// 兄弟段落互相都含四个 label，用兄弟段落认分不出来；只能看正下方那一个段落是谁
+// （每个数正下方就是它自己的 label）。框不在 key window 里时算不出，返回 nil。
+static NSString *NERNDirectlyBelowText(UIView *view) {
+    if (!view) return nil;
+    UIWindow *w = NEKeyWindow();
+    if (!w) return nil;
+    CGRect lf = NEFrameInWindow(view, w);
+    if (CGRectIsEmpty(lf)) return nil;
+    Class paraCls = objc_getClass("RCTParagraphComponentView");
+    if (!paraCls) return nil;
+    NSString *best = nil;
+    CGFloat bestGap = CGFLOAT_MAX;
+    UIView *cur = view;
+    for (int level = 0; level < 2 && cur.superview; level++) {
+        UIView *parent = cur.superview;
+        for (UIView *sub in parent.subviews) {
+            if (sub == view) continue;
+            if (![sub isKindOfClass:paraCls]) continue;
+            CGRect cf = NEFrameInWindow(sub, w);
+            if (CGRectIsEmpty(cf)) continue;
+            CGFloat top = CGRectGetMinY(cf), bottom = CGRectGetMaxY(lf);
+            if (top < bottom - 4 || top > bottom + 60) continue;
+            CGFloat ox = MIN(CGRectGetMaxX(cf), CGRectGetMaxX(lf))
+                       - MAX(CGRectGetMinX(cf), CGRectGetMinX(lf));
+            CGFloat mw = MIN(CGRectGetWidth(cf), CGRectGetWidth(lf));
+            if (mw <= 0 || ox <= mw * 0.5) continue;
+            CGFloat gap = top - bottom;
+            if (gap >= bestGap) continue;
+            @try {
+                NSAttributedString *a = [(RCTParagraphComponentView *)sub attributedText];
+                if (a.string.length) { best = a.string; bestGap = gap; }
+            } @catch (...) {}
+        }
+        cur = parent;
+    }
+    return best;
 }
 
 // 值里可能带了单位（如用户填了 "9999 km"）：只换数字部分时先去掉值末尾的
@@ -1872,6 +1948,29 @@ static NSString *NEFixedRNText(NSString *text, UIView *view, NSString *page, NSS
         }
     }
 
+    // 6a. 创作/关注/粉丝（只在我的页）：纯数字，正下方段落是“创作”/“关注”/“粉丝”。
+    // 注意：不能用兄弟段落含关键字认——四个数在同一行，兄弟段落互相都含四个 label，
+    // 第一个认到的会把四个数全抢走。只能看正下方那一个段落。
+    if (isNum && isMine) {
+        NSString *below = NERNDirectlyBelowText(view);
+        if (below.length) {
+            if (gPosts && gPostsValue.length > 0 &&
+                [below rangeOfString:@"创作"].location != NSNotFound) {
+                if (fieldOut) *fieldOut = @"NEPosts";
+                return gPostsValue;
+            }
+            if (gFollowing && gFollowingValue.length > 0 &&
+                [below rangeOfString:@"关注"].location != NSNotFound) {
+                if (fieldOut) *fieldOut = @"NEFollowing";
+                return gFollowingValue;
+            }
+            if (gFollowers && gFollowersValue.length > 0 &&
+                [below rangeOfString:@"粉丝"].location != NSNotFound) {
+                if (fieldOut) *fieldOut = @"NEFollowers";
+                return gFollowersValue;
+            }
+        }
+    }
     // 6. N币（只在我的页）：纯数字，且是已知的当前值，或兄弟段落有“N币”；
     // 兄弟段落有 % 就是电量，不换。认不出宁可不换。
     if (gNCoins && gNCoinsValue.length > 0 && isNum && isMine) {
@@ -1957,7 +2056,7 @@ static BOOL gRNTextHookInstalled = NO;
 static void NEInstallRNTextHookIfNeeded(void) {
     if (gRNTextHookInstalled) return;
     if (!gValidity9999 && !gNCoins && !gMileage && !gLevel && !gTitle && !gSignDays &&
-        !gDeviceName && !gDeviceRange) return;
+        !gDeviceName && !gDeviceRange && !gPosts && !gFollowing && !gFollowers) return;
     BOOL any = NO;
     Class textCls = objc_getClass("RCTParagraphTextView");
     if (textCls && class_getInstanceMethod(textCls, @selector(drawRect:))) {
@@ -2016,6 +2115,12 @@ static NSString *NEFieldCurrentValue(NSString *field, BOOL separate) {
         return (gMileage && gMileageValue.length > 0) ? gMileageValue : nil;
     if ([field isEqualToString:@"NENCoins"])
         return (gNCoins && gNCoinsValue.length > 0) ? gNCoinsValue : nil;
+    if ([field isEqualToString:@"NEPosts"])
+        return (gPosts && gPostsValue.length > 0) ? gPostsValue : nil;
+    if ([field isEqualToString:@"NEFollowing"])
+        return (gFollowing && gFollowingValue.length > 0) ? gFollowingValue : nil;
+    if ([field isEqualToString:@"NEFollowers"])
+        return (gFollowers && gFollowersValue.length > 0) ? gFollowersValue : nil;
     if ([field isEqualToString:@"NETitle"])
         return (gTitle && gTitleValue.length > 0) ? gTitleValue : nil;
     if ([field isEqualToString:@"NELevel"]) {
@@ -6986,6 +7091,9 @@ static void NECheckSettingsButton(void) {
     [beautyStack addArrangedSubview:[self customDisplayRow:@"服务有效期" toggleKey:@"NEValidity9999" valueKey:@"NEValidityValue" on:NEValidity9999() value:[defs stringForKey:@"NEValidityValue"] placeholder:@"留空显示真实日期"]];
     // v0.3.9 追加：五个自定义显示项（开关 + 输入框，自己填想显示的值）
     [beautyStack addArrangedSubview:[self customDisplayRow:@"N币余额" toggleKey:@"NENCoins" valueKey:@"NENCoinsValue" on:NEBoolDefault(@"NENCoins") value:[defs stringForKey:@"NENCoinsValue"] placeholder:@"如 99999"]];
+    [beautyStack addArrangedSubview:[self customDisplayRow:@"创作" toggleKey:@"NEPosts" valueKey:@"NEPostsValue" on:NEBoolDefault(@"NEPosts") value:[defs stringForKey:@"NEPostsValue"] placeholder:@"如 999"]];
+    [beautyStack addArrangedSubview:[self customDisplayRow:@"关注" toggleKey:@"NEFollowing" valueKey:@"NEFollowingValue" on:NEBoolDefault(@"NEFollowing") value:[defs stringForKey:@"NEFollowingValue"] placeholder:@"如 999"]];
+    [beautyStack addArrangedSubview:[self customDisplayRow:@"粉丝" toggleKey:@"NEFollowers" valueKey:@"NEFollowersValue" on:NEBoolDefault(@"NEFollowers") value:[defs stringForKey:@"NEFollowersValue"] placeholder:@"如 999"]];
     [beautyStack addArrangedSubview:[self customDisplayRow:@"总里程" toggleKey:@"NEMileage" valueKey:@"NEMileageValue" on:NEBoolDefault(@"NEMileage") value:[defs stringForKey:@"NEMileageValue"] placeholder:@"如 99999.9 km"]];
     [beautyStack addArrangedSubview:[self customDisplayRow:@"等级（1-9）" toggleKey:@"NELevel" valueKey:@"NELevelValue" on:NEBoolDefault(@"NELevel") value:[defs stringForKey:@"NELevelValue"] placeholder:@"只能0-9"]];
     [beautyStack addArrangedSubview:[self customDisplayRow:@"称号" toggleKey:@"NETitle" valueKey:@"NETitleValue" on:NEBoolDefault(@"NETitle") value:[defs stringForKey:@"NETitleValue"] placeholder:@"如 车神"]];
@@ -7205,7 +7313,7 @@ static void NECheckSettingsButton(void) {
     aboutName.text = @"Ninebot pro+";
     aboutName.font = [UIFont boldSystemFontOfSize:16];
     UILabel *aboutVer = [UILabel new];
-    aboutVer.text = @"0.7.19";
+    aboutVer.text = @"0.7.20";
     aboutVer.font = [UIFont systemFontOfSize:15];
     aboutVer.textColor = [UIColor secondaryLabelColor];
     [aboutTitleRow addArrangedSubview:aboutName];
@@ -7721,7 +7829,9 @@ static void NECheckSettingsButton(void) {
     if ([key isEqualToString:@"NENCoins"] || [key isEqualToString:@"NEMileage"] ||
         [key isEqualToString:@"NELevel"] || [key isEqualToString:@"NETitle"] ||
         [key isEqualToString:@"NESignDays"] ||
-        [key isEqualToString:@"NEDeviceName"] || [key isEqualToString:@"NEDeviceRange"]) {
+        [key isEqualToString:@"NEDeviceName"] || [key isEqualToString:@"NEDeviceRange"] ||
+        [key isEqualToString:@"NEPosts"] || [key isEqualToString:@"NEFollowing"] ||
+        [key isEqualToString:@"NEFollowers"]) {
         NESyncCustomDisplayCache();
         if (sw.isOn) { NEInstallLabelHookIfNeeded(); NEInstallRNTextHookIfNeeded(); }
         NEForceRefreshLabels(); // v0.3.9 修复：同上
