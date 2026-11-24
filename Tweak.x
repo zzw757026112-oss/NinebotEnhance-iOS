@@ -1,4 +1,4 @@
-// NinebotEnhance iOS v0.7.10 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
+// NinebotEnhance iOS v0.7.11 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
 //
 // v0.7.0 加七彩日行灯（车上的 LED 灯带，ELK-BLEDOB，duoCo Strip 同款，
 //  用户 2026-11-24 决定做）：协议照 Pro+ App 的 ELKStrip.swift，服务
@@ -7,6 +7,9 @@
 //  日行灯”（默认折叠、功能默认关），开关/预设色/自选色/亮度/白色/灯效。
 //  含 0.6.12 全部内容。
 //
+// v0.7.11（用户 2026-11-24 16:23 截图）：顶栏白遮罩全去掉——
+//   0.7.10 顶栏还是不通透，白 0.30 还是太浓，把头像/昵称/齿轮
+//   全盖住了。改透明只留 UltraThin 磨砂，跟底图完全一致。
 // v0.7.10（用户 2026-11-24 16:17 截图）：顶栏改成和底图一致——
 //   导航栏还是 SystemMaterial + 白 0.70，又白又实，跟底图的
 //   UltraThin 不一致。换 UltraThin、白遮罩降到 0.30（留个保险，
@@ -6660,11 +6663,12 @@ static UIViewController *NETopViewController(void) {
     // SystemMaterial 模糊 + 白色 0.70 遮罩（比卡片的 0.35 更不透，
     // 顶栏必须把齿轮盖住）；标题字色明确写死深色 17pt 半粗体。
     // 三处外观都设，否则滚到顶时还是透明那套。
-    // v0.7.10：顶栏跟底图统一成 UltraThin。白遮罩 0.70 -> 0.30（没全去掉，
-    // 顶栏正后方就是“我的”页齿轮，全透明齿轮会透出来又跟“关闭”打架）。
+    // v0.7.11：顶栏白遮罩全去掉，只留 UltraThin 磨砂。0.7.10 的白 0.30
+    // 还是太浓，顶栏看着还是一条浅灰白带子。齿轮会透出来，但只是磨砂
+    // 后的一团软影子，“关闭”是蓝色粗字，压在上面照样清楚。
     UINavigationBarAppearance *navAppearance = [[UINavigationBarAppearance alloc] init];
     navAppearance.backgroundEffect = [UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemUltraThinMaterial];
-    navAppearance.backgroundColor = [[UIColor whiteColor] colorWithAlphaComponent:0.30];
+    navAppearance.backgroundColor = [UIColor clearColor];
     navAppearance.titleTextAttributes = @{
         NSForegroundColorAttributeName : [UIColor labelColor],
         NSFontAttributeName : [UIFont systemFontOfSize:17 weight:UIFontWeightSemibold]
@@ -7156,7 +7160,7 @@ static void NECheckSettingsButton(void) {
     aboutName.text = @"Ninebot pro+";
     aboutName.font = [UIFont boldSystemFontOfSize:16];
     UILabel *aboutVer = [UILabel new];
-    aboutVer.text = @"0.7.10";
+    aboutVer.text = @"0.7.11";
     aboutVer.font = [UIFont systemFontOfSize:15];
     aboutVer.textColor = [UIColor secondaryLabelColor];
     [aboutTitleRow addArrangedSubview:aboutName];
