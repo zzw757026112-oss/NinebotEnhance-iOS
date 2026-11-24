@@ -1,4 +1,4 @@
-// NinebotEnhance iOS v0.7.4 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
+// NinebotEnhance iOS v0.7.5 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
 //
 // v0.7.0 加七彩日行灯（车上的 LED 灯带，ELK-BLEDOB，duoCo Strip 同款，
 //  用户 2026-11-24 决定做）：协议照 Pro+ App 的 ELKStrip.swift，服务
@@ -7,6 +7,8 @@
 //  日行灯”（默认折叠、功能默认关），开关/预设色/自选色/亮度/白色/灯效。
 //  含 0.6.12 全部内容。
 //
+// v0.7.5（用户 2026-11-24 15:28 要求）：设置页底图换成九号 App“我的”页
+//   真实底图（OverFullScreen 弹出 + 页面透明，删掉橙色渐变底图）。
 // v0.7.4（用户 2026-11-24 15:13 要求）：签到记录改成 10 天历史，超 10 天
 //   自动覆盖最旧的（新 key NEAutoSignInHistory，最新在前）。
 // v0.7.3（用户 2026-11-24 15:06 要求）：磨砂玻璃调得更偏白——卡片白遮罩
@@ -6632,6 +6634,9 @@ static UIViewController *NETopViewController(void) {
     if (!top) return;
     NEHUDSettingsVC *vc = [NEHUDSettingsVC new];
     UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:vc];
+    // v0.7.5：OverFullScreen 弹出——“我的”页在弹出后仍留在视图层级里，磨砂卡片
+    // 才能透出它。默认全屏弹出会把原页面从层级里拿掉，透明底只会看到黑底。
+    nav.modalPresentationStyle = UIModalPresentationOverFullScreen;
     [top presentViewController:nav animated:YES completion:nil];
 }
 @end
@@ -6710,65 +6715,13 @@ static void NECheckSettingsButton(void) {
 }
 
 
-// v0.7.2 磨砂玻璃：设置页的彩色底图（九号橙渐变 + 柔和彩色光斑），给磨砂卡片
-// 提供可透出的底色。设置页是全屏模态，App 自己的页面在后面不渲染，所以底色
-// 必须自己画，不能靠 view 透明。光斑用径向渐变画，边缘自然化开，不用再模糊。
-static UIImage *NEGlassBackdropImage(CGSize size) {
-    UIGraphicsBeginImageContextWithOptions(size, YES, 0);
-    CGContextRef ctx = UIGraphicsGetCurrentContext();
-    // 纵向渐变：顶部九号橙 -> 中部浅橙 -> 底部浅灰
-    CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
-    CGFloat locs[3] = {0, 0.18, 1};
-    CGFloat comps[12] = {
-        1.0, 0.48, 0.10, 1.0,   // #FF7A1A
-        1.0, 0.78, 0.62, 1.0,   // 浅橙（更淡）
-        0.96, 0.96, 0.97, 1.0   // 浅灰
-    };
-    CGGradientRef grad = CGGradientCreateWithColorComponents(cs, comps, locs, 3);
-    CGContextDrawLinearGradient(ctx, grad,
-        CGPointMake(0, 0), CGPointMake(0, size.height), 0);
-    CGGradientRelease(grad);
-    // 彩色光斑：径向渐变，中心带色、边缘透明
-    struct { CGFloat x, y, r; CGFloat c[3]; } blobs[] = {
-        {0.15, 0.45, 0.35, {0.27, 0.51, 1.00}},
-        {0.85, 0.55, 0.30, {0.24, 0.78, 0.47}},
-        {0.70, 0.75, 0.32, {1.00, 0.35, 0.63}},
-        {0.20, 0.85, 0.28, {0.59, 0.35, 1.00}},
-        {0.55, 0.35, 0.22, {1.00, 0.78, 0.24}},
-    };
-    for (int i = 0; i < 5; i++) {
-        CGFloat cx = blobs[i].x * size.width, cy = blobs[i].y * size.height;
-        CGFloat rr = blobs[i].r * size.width;
-        CGFloat bcomps[8] = {
-            blobs[i].c[0], blobs[i].c[1], blobs[i].c[2], 0.30,
-            blobs[i].c[0], blobs[i].c[1], blobs[i].c[2], 0.0
-        };
-        CGFloat bloc[2] = {0, 1};
-        CGGradientRef bg = CGGradientCreateWithColorComponents(cs, bcomps, bloc, 2);
-        CGContextDrawRadialGradient(ctx, bg,
-            CGPointMake(cx, cy), 0, CGPointMake(cx, cy), rr,
-            kCGGradientDrawsAfterEndLocation);
-        CGGradientRelease(bg);
-    }
-    CGColorSpaceRelease(cs);
-    UIImage *img = UIGraphicsGetImageFromCurrentImageContext();
-    UIGraphicsEndImageContext();
-    return img;
-}
-
 @implementation NEHUDSettingsVC
 
 - (void)viewDidLoad {
     [super viewDidLoad];
-    // v0.7.2 磨砂玻璃：底色换成彩色渐变底图（九号橙 + 彩色光斑），卡片磨砂后
-    // 透出底色才有玻璃感。底图固定在 scroll view 后面，不跟内容滚动。
-    self.view.backgroundColor = [UIColor systemGroupedBackgroundColor];
-    UIImageView *backdrop = [[UIImageView alloc]
-        initWithImage:NEGlassBackdropImage([UIScreen mainScreen].bounds.size)];
-    backdrop.frame = self.view.bounds;
-    backdrop.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-    backdrop.contentMode = UIViewContentModeScaleAspectFill;
-    [self.view addSubview:backdrop];
+    // v0.7.5：页面改透明，底下透出的是九号 App“我的”页真实内容（OverFullScreen
+    // 弹出后原页面仍在层级里）。橙色渐变底图已删。卡片磨砂后透出的就是真实底图。
+    self.view.backgroundColor = [UIColor clearColor];
     self.title = @"Ninebot pro+";
     self.navigationItem.rightBarButtonItem =
         [[UIBarButtonItem alloc] initWithTitle:@"关闭" style:UIBarButtonItemStyleDone
@@ -7151,7 +7104,7 @@ static UIImage *NEGlassBackdropImage(CGSize size) {
     aboutName.text = @"Ninebot pro+";
     aboutName.font = [UIFont boldSystemFontOfSize:16];
     UILabel *aboutVer = [UILabel new];
-    aboutVer.text = @"0.7.4";
+    aboutVer.text = @"0.7.5";
     aboutVer.font = [UIFont systemFontOfSize:15];
     aboutVer.textColor = [UIColor secondaryLabelColor];
     [aboutTitleRow addArrangedSubview:aboutName];
