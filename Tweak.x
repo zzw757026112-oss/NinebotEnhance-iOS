@@ -1,4 +1,4 @@
-// NinebotEnhance iOS v0.7.3 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
+// NinebotEnhance iOS v0.7.4 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
 //
 // v0.7.0 加七彩日行灯（车上的 LED 灯带，ELK-BLEDOB，duoCo Strip 同款，
 //  用户 2026-11-24 决定做）：协议照 Pro+ App 的 ELKStrip.swift，服务
@@ -7,6 +7,8 @@
 //  日行灯”（默认折叠、功能默认关），开关/预设色/自选色/亮度/白色/灯效。
 //  含 0.6.12 全部内容。
 //
+// v0.7.4（用户 2026-11-24 15:13 要求）：签到记录改成 10 天历史，超 10 天
+//   自动覆盖最旧的（新 key NEAutoSignInHistory，最新在前）。
 // v0.7.3（用户 2026-11-24 15:06 要求）：磨砂玻璃调得更偏白——卡片白遮罩
 //   0.12→0.35，底图橙色退得更快、光斑更淡。
 // v0.7.2（用户 2026-11-24 14:48 定）：设置页改磨砂玻璃（Liquid Glass 近似
@@ -4465,19 +4467,43 @@ static NSString *NEAutoSignInTodayString(void) {
     return [fmt stringFromDate:[NSDate date]];
 }
 
-// 签到记录显示文案：今天已签过 → 今天已签到（日期）；有旧日期 → 上次签到：日期；无 → 暂无签到记录
+// 签到记录显示文案：今天已签过 → 今天已签到（日期）；有旧日期 → 上次签到：日期；无 → 暂无签到记录。
+// v0.7.4：第二行加 10 天历史（MM-DD，最新在前），超过 10 天的自动丢掉。
+// 记录行是 13pt 多行 label，能换行显示。
 static NSString *NEAutoSignInRecordText(void) {
     NSString *last = [[NSUserDefaults standardUserDefaults] stringForKey:@"NEAutoSignInLastDate"];
-    if (last.length == 0) return @"暂无签到记录";
-    if ([last isEqualToString:NEAutoSignInTodayString()]) return [NSString stringWithFormat:@"今天已签到（%@）", last];
-    return [NSString stringWithFormat:@"上次签到：%@", last];
+    NSString *main;
+    if (last.length == 0) main = @"暂无签到记录";
+    else if ([last isEqualToString:NEAutoSignInTodayString()]) main = [NSString stringWithFormat:@"今天已签到（%@）", last];
+    else main = [NSString stringWithFormat:@"上次签到：%@", last];
+    NSArray *hist = [[NSUserDefaults standardUserDefaults] arrayForKey:@"NEAutoSignInHistory"];
+    if (hist.count == 0) return main;
+    NSMutableArray *shortDates = [NSMutableArray array];
+    for (NSString *d in hist) {
+        // YYYY-MM-DD -> MM-DD
+        if (d.length >= 10) [shortDates addObject:[d substringFromIndex:5]];
+        else [shortDates addObject:d];
+    }
+    return [NSString stringWithFormat:@"%@\n近10天：%@", main, [shortDates componentsJoinedByString:@" "]];
 }
 
 // 今天签到成功（或接口已报今天签过）就记一笔，供设置页显示。
 // 刷新靠 NEAutoSignInNoteCheck 发的通知（记录行+诊断行一起刷），这里不发。
+// v0.7.4：同时维护 10 天历史（NEAutoSignInHistory，最新在前，最多 10 条，
+// 超了丢最旧的）。首次建历史时把 0.7.4 之前的上次签到日期也带上，别丢了。
 static void NENoteSignInDoneToday(void) {
-    [[NSUserDefaults standardUserDefaults] setObject:NEAutoSignInTodayString()
+    NSString *today = NEAutoSignInTodayString();
+    NSString *prev = [[NSUserDefaults standardUserDefaults] stringForKey:@"NEAutoSignInLastDate"];
+    [[NSUserDefaults standardUserDefaults] setObject:today
                                               forKey:@"NEAutoSignInLastDate"];
+    NSMutableArray *hist = [[[NSUserDefaults standardUserDefaults]
+        arrayForKey:@"NEAutoSignInHistory"] mutableCopy];
+    if (!hist) hist = [NSMutableArray array];
+    if (hist.count == 0 && prev.length && ![prev isEqualToString:today]) [hist addObject:prev];
+    [hist removeObject:today];
+    [hist insertObject:today atIndex:0];
+    while (hist.count > 10) [hist removeLastObject];
+    [[NSUserDefaults standardUserDefaults] setObject:hist forKey:@"NEAutoSignInHistory"];
 }
 
 // ---- token / deviceId：只从 App 自身运行状态取，绝不写死 ----
@@ -7125,7 +7151,7 @@ static UIImage *NEGlassBackdropImage(CGSize size) {
     aboutName.text = @"Ninebot pro+";
     aboutName.font = [UIFont boldSystemFontOfSize:16];
     UILabel *aboutVer = [UILabel new];
-    aboutVer.text = @"0.7.3";
+    aboutVer.text = @"0.7.4";
     aboutVer.font = [UIFont systemFontOfSize:15];
     aboutVer.textColor = [UIColor secondaryLabelColor];
     [aboutTitleRow addArrangedSubview:aboutName];
