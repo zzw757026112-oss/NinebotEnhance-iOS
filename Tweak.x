@@ -1,4 +1,4 @@
-// NinebotEnhance iOS v0.7.24 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
+// NinebotEnhance iOS v0.7.25 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
 //
 // v0.7.0 加七彩日行灯（车上的 LED 灯带，ELK-BLEDOB，duoCo Strip 同款，
 //  用户 2026-11-24 决定做）：协议照 Pro+ App 的 ELKStrip.swift，服务
@@ -6,6 +6,9 @@
 //  认名字含 bledob 的设备，收 3 秒选 RSSI 最强的一台。设置页新分组“七彩
 //  日行灯”（默认折叠、功能默认关），开关/预设色/自选色/亮度/白色/灯效。
 //  含 0.6.12 全部内容。
+//
+// v0.7.25（用户 2026-11-25 00:50）：签到历史只留近 7 天（原来 10 天）；设置页第二行
+//   前缀“近10天”改成“签到历史(近7天)”；日期之间用逗号分隔（11-25, 11-24）。
 //
 // v0.7.24（用户 2026-11-25 00:31）：图标两轮都没换上，算了，替换图标的代码整个删掉，
 //   图标保持原座桶图不动；文字改成“打开尾箱”（电摩没有座桶，是尾箱）。只换文字，
@@ -4699,6 +4702,8 @@ static NSString *NEAutoSignInTodayString(void) {
 
 // 签到记录显示文案：今天已签过 → 今天已签到（日期）；有旧日期 → 上次签到：日期；无 → 暂无签到记录。
 // v0.7.4：第二行加 10 天历史（MM-DD，最新在前），超过 10 天的自动丢掉。
+// v0.7.25（用户 2026-11-25 00:50）：只留近 7 天；前缀改成“签到历史(近7天)”；
+// 日期之间用逗号分隔。
 // 记录行是 13pt 多行 label，能换行显示。
 static NSString *NEAutoSignInRecordText(void) {
     NSString *last = [[NSUserDefaults standardUserDefaults] stringForKey:@"NEAutoSignInLastDate"];
@@ -4714,13 +4719,16 @@ static NSString *NEAutoSignInRecordText(void) {
         if (d.length >= 10) [shortDates addObject:[d substringFromIndex:5]];
         else [shortDates addObject:d];
     }
-    return [NSString stringWithFormat:@"%@\n近10天：%@", main, [shortDates componentsJoinedByString:@" "]];
+    // v0.7.25：显示也只取前 7 条（旧存的 10 条数据下次签到时才会被裁掉）。
+    if (shortDates.count > 7) [shortDates removeObjectsInRange:NSMakeRange(7, shortDates.count - 7)];
+    return [NSString stringWithFormat:@"%@\n签到历史(近7天)：%@", main, [shortDates componentsJoinedByString:@", "]];
 }
 
 // 今天签到成功（或接口已报今天签过）就记一笔，供设置页显示。
 // 刷新靠 NEAutoSignInNoteCheck 发的通知（记录行+诊断行一起刷），这里不发。
 // v0.7.4：同时维护 10 天历史（NEAutoSignInHistory，最新在前，最多 10 条，
 // 超了丢最旧的）。首次建历史时把 0.7.4 之前的上次签到日期也带上，别丢了。
+// v0.7.25：只留近 7 天（最多 7 条）。
 static void NENoteSignInDoneToday(void) {
     NSString *today = NEAutoSignInTodayString();
     NSString *prev = [[NSUserDefaults standardUserDefaults] stringForKey:@"NEAutoSignInLastDate"];
@@ -4732,7 +4740,7 @@ static void NENoteSignInDoneToday(void) {
     if (hist.count == 0 && prev.length && ![prev isEqualToString:today]) [hist addObject:prev];
     [hist removeObject:today];
     [hist insertObject:today atIndex:0];
-    while (hist.count > 10) [hist removeLastObject];
+    while (hist.count > 7) [hist removeLastObject];
     [[NSUserDefaults standardUserDefaults] setObject:hist forKey:@"NEAutoSignInHistory"];
 }
 
@@ -7375,7 +7383,7 @@ static void NECheckSettingsButton(void) {
     aboutName.text = @"Ninebot pro+";
     aboutName.font = [UIFont boldSystemFontOfSize:16];
     UILabel *aboutVer = [UILabel new];
-    aboutVer.text = @"0.7.24";
+    aboutVer.text = @"0.7.25";
     aboutVer.font = [UIFont systemFontOfSize:15];
     aboutVer.textColor = [UIColor secondaryLabelColor];
     [aboutTitleRow addArrangedSubview:aboutName];
