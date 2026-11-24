@@ -1,4 +1,4 @@
-// NinebotEnhance iOS v0.7.8 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
+// NinebotEnhance iOS v0.7.9 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
 //
 // v0.7.0 加七彩日行灯（车上的 LED 灯带，ELK-BLEDOB，duoCo Strip 同款，
 //  用户 2026-11-24 决定做）：协议照 Pro+ App 的 ELKStrip.swift，服务
@@ -7,6 +7,10 @@
 //  日行灯”（默认折叠、功能默认关），开关/预设色/自选色/亮度/白色/灯效。
 //  含 0.6.12 全部内容。
 //
+// v0.7.9（用户 2026-11-24 16:07 视频）：背景磨砂换更透的材质——
+//   0.7.8 液态效果不太明显，SystemMaterial 自带浅灰白底色把“我的”页
+//   的颜色压住了。换 SystemUltraThinMaterial（系统最透的一档），
+//   模糊不变、底色更透，横幅和图标的颜色透得更明显。卡片不动。
 // v0.7.8（用户 2026-11-24 15:59 视频）：删掉白色白纱，只留全屏磨砂——
 //   0.7.7 的白纱 0.45 太浓，“我的”页本身底色浅，磨砂后已很淡，再盖
 //   白纱直接冲成纯白，底图全没了。磨砂本身就能把字模糊到看不清。
@@ -6756,8 +6760,11 @@ static void NECheckSettingsButton(void) {
     // 卡片/组头/文字的底下），卡片本身还是磨砂（双层模糊无妨）。
     // v0.7.8：白纱删了。0.7.7 的白纱 0.45 太浓，“我的”页本身底色浅，
     // 磨砂后已很淡，再盖白纱直接冲成纯白。只留磨砂，底图以磨砂形态透出来。
+    // v0.7.9：背景磨砂换 SystemUltraThinMaterial（系统最透的一档）。
+    // SystemMaterial 自带浅灰白底色，把“我的”页颜色压住了，液态感出不来。
+    // UltraThin 模糊不变、底色更透，横幅红黑和图标颜色透得更明显。
     UIVisualEffectView *bgBlur = [[UIVisualEffectView alloc]
-        initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemMaterial]];
+        initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemUltraThinMaterial]];
     bgBlur.frame = self.view.bounds;
     bgBlur.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     [self.view addSubview:bgBlur];
@@ -7143,7 +7150,7 @@ static void NECheckSettingsButton(void) {
     aboutName.text = @"Ninebot pro+";
     aboutName.font = [UIFont boldSystemFontOfSize:16];
     UILabel *aboutVer = [UILabel new];
-    aboutVer.text = @"0.7.8";
+    aboutVer.text = @"0.7.9";
     aboutVer.font = [UIFont systemFontOfSize:15];
     aboutVer.textColor = [UIColor secondaryLabelColor];
     [aboutTitleRow addArrangedSubview:aboutName];
