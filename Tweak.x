@@ -1,4 +1,4 @@
-// NinebotEnhance iOS v0.7.14 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
+// NinebotEnhance iOS v0.7.15 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
 //
 // v0.7.0 加七彩日行灯（车上的 LED 灯带，ELK-BLEDOB，duoCo Strip 同款，
 //  用户 2026-11-24 决定做）：协议照 Pro+ App 的 ELKStrip.swift，服务
@@ -7,6 +7,10 @@
 //  日行灯”（默认折叠、功能默认关），开关/预设色/自选色/亮度/白色/灯效。
 //  含 0.6.12 全部内容。
 //
+// v0.7.15（用户 2026-11-24 17:14 视频）：收起改无回弹平滑动画，展开保持弹簧——
+//   0.7.14 收起还是怪：弹簧回弹时下面内容往上冲过头、顶进卡片还没
+//   收完的空间。展开回弹往外只留缝没事；收起改 ease-in-out（0.35s，
+//   不冲过头），卡片和下面内容一起平滑收回去。
 // v0.7.14（用户 2026-11-24 16:47 视频）：修收起时下面文字顶上去盖住卡片——
 //   0.7.13 收起时卡片还没收完、下面内容已经顶上来重叠。根因是 hidden
 //   不可动画、两边不是同一条曲线；改成高度约束驱动布局动画，卡片
@@ -7197,7 +7201,7 @@ static void NECheckSettingsButton(void) {
     aboutName.text = @"Ninebot pro+";
     aboutName.font = [UIFont boldSystemFontOfSize:16];
     UILabel *aboutVer = [UILabel new];
-    aboutVer.text = @"0.7.14";
+    aboutVer.text = @"0.7.15";
     aboutVer.font = [UIFont systemFontOfSize:15];
     aboutVer.textColor = [UIColor secondaryLabelColor];
     [aboutTitleRow addArrangedSubview:aboutName];
@@ -7502,13 +7506,14 @@ static void NECheckSettingsButton(void) {
         : (sender.tag == 1) ? @"导航增强" : @"七彩日行灯";
     [sender setTitle:[NSString stringWithFormat:@"%@ %@", willShow ? @"▾" : @"▸", title]
             forState:UIControlStateNormal];
-    // v0.7.14：高度约束驱动弹簧（修 0.7.13 收起重叠）。0.7.13 是 hidden
-    // 切换 + layoutIfNeeded——hidden 不可动画，收起时卡片瞬间消失、下面
-    // 内容弹簧滑上去，弹簧回弹时下面内容会冲过头、顶进卡片还没收完的
-    // 空间。改成：展开时动画块里取消隐藏 + 关掉高度约束，卡片高度带
-    // 回弹长出来；收起时动画块里打开高度约束（压到 0），卡片高度带回弹
-    // 收回去、动画完再 hidden。卡片高度和下面内容位置由同一条布局动画
-    // 驱动，全程同步，不会顶；里面 blurView 本来就开了裁剪，内容不溢出。
+    // v0.7.14：高度约束驱动动画（修 0.7.13 收起重叠）。展开时动画块里
+    // 取消隐藏 + 关掉高度约束，卡片高度长出来；收起时动画块里打开高度
+    // 约束（压到 0），卡片高度收回去、动画完再 hidden。卡片高度和下面
+    // 内容位置由同一条布局动画驱动，全程同步；里面 blurView 本来就开了
+    // 裁剪，内容不溢出。
+    // v0.7.15：展开保持弹簧（回弹往外、只留缝不重叠）；收起改无回弹的
+    // ease-in-out——弹簧收起时下面内容会往上冲过头、顶进卡片还没收完的
+    // 空间，就是 0.7.14 视频里「收起来有点怪」的原因。
     if (willShow) {
         [UIView animateWithDuration:0.45 delay:0
              usingSpringWithDamping:0.75 initialSpringVelocity:0.5
@@ -7519,8 +7524,7 @@ static void NECheckSettingsButton(void) {
             [self.view layoutIfNeeded];
         } completion:nil];
     } else {
-        [UIView animateWithDuration:0.45 delay:0
-             usingSpringWithDamping:0.75 initialSpringVelocity:0.5
+        [UIView animateWithDuration:0.35 delay:0
                             options:UIViewAnimationOptionCurveEaseInOut
                          animations:^{
             heightC.active = YES;
