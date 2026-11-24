@@ -1,4 +1,4 @@
-// NinebotEnhance iOS v0.7.0 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
+// NinebotEnhance iOS v0.7.1 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
 //
 // v0.7.0 加七彩日行灯（车上的 LED 灯带，ELK-BLEDOB，duoCo Strip 同款，
 //  用户 2026-11-24 决定做）：协议照 Pro+ App 的 ELKStrip.swift，服务
@@ -6,6 +6,11 @@
 //  认名字含 bledob 的设备，收 3 秒选 RSSI 最强的一台。设置页新分组“七彩
 //  日行灯”（默认折叠、功能默认关），开关/预设色/自选色/亮度/白色/灯效。
 //  含 0.6.12 全部内容。
+//
+// v0.7.1（用户 2026-11-24 13:08 实测反馈）：颜色圆点 30pt→26pt、行上下
+//  各留 8pt 空隙（0.7.0 里贴着上下两行，看着紧）；删亮度行右边的白色
+//  按钮（用户基本不用白光）。白光命令仍在 NEELKStrip 里，只是卡片上
+//  不放按钮。
 //
 // v0.6.6 加自动分享（每天领 1 N币，用户 2026-11-24 决定做）：24 号凌晨重抓
 //  实锤分享是 App 自己调 share-callback（加密包，只能重放）+ task/reward
@@ -6926,17 +6931,29 @@ static void NECheckSettingsButton(void) {
     [elkOnOffRow addArrangedSubview:elkOnBtn];
     [elkOnOffRow addArrangedSubview:elkOffBtn];
     [elkStack addArrangedSubview:elkOnOffRow];
-    // 7 个预设色：点一下就发颜色命令（灯关着时先开灯再变色）
+    // 7 个预设色：点一下就发颜色命令（灯关着时先开灯再变色）。
+    // v0.7.1：行上下各留 8pt 空隙，不再贴着开灯/关灯和自选颜色两行。
     UIStackView *elkColorRow = [UIStackView new];
     elkColorRow.axis = UILayoutConstraintAxisHorizontal;
-    elkColorRow.spacing = 10;
+    elkColorRow.spacing = 12;
     elkColorRow.distribution = UIStackViewDistributionEqualSpacing;
     for (NSInteger i = 0; i < 7; i++) {
         UIButton *c = [self elkColorButtonWithPresetIndex:i];
         [elkControls addObject:c];
         [elkColorRow addArrangedSubview:c];
     }
-    [elkStack addArrangedSubview:elkColorRow];
+    UIView *elkColorWrap = [UIView new];
+    elkColorWrap.translatesAutoresizingMaskIntoConstraints = NO;
+    elkColorRow.translatesAutoresizingMaskIntoConstraints = NO;
+    [elkColorWrap addSubview:elkColorRow];
+    [NSLayoutConstraint activateConstraints:@[
+        [elkColorRow.leadingAnchor constraintEqualToAnchor:elkColorWrap.leadingAnchor],
+        [elkColorRow.trailingAnchor constraintEqualToAnchor:elkColorWrap.trailingAnchor],
+        [elkColorRow.topAnchor constraintEqualToAnchor:elkColorWrap.topAnchor constant:8],
+        [elkColorRow.bottomAnchor constraintEqualToAnchor:elkColorWrap.bottomAnchor constant:-8],
+        [elkColorWrap.heightAnchor constraintEqualToConstant:42]
+    ]];
+    [elkStack addArrangedSubview:elkColorWrap];
     // 自选颜色
     UIView *elkWellRow = [UIView new];
     UILabel *elkWellLabel = [UILabel new];
@@ -6983,22 +7000,18 @@ static void NECheckSettingsButton(void) {
     [elkSlider addTarget:self action:@selector(elkBrightnessSliderEnded:)
         forControlEvents:UIControlEventTouchUpInside | UIControlEventTouchUpOutside];
     [elkControls addObject:elkSlider];
-    UIButton *elkWhiteBtn = [self elkButtonWithTitle:@"白色" action:@selector(elkWhiteTapped:)];
-    [elkControls addObject:elkWhiteBtn];
+    // v0.7.1：白色按钮已删（用户基本不用白光）；滑条直接拉到行尾。
     [elkBrightRow addSubview:elkBrightLabel];
     [elkBrightRow addSubview:elkBrightValue];
     [elkBrightRow addSubview:elkSlider];
-    [elkBrightRow addSubview:elkWhiteBtn];
     [NSLayoutConstraint activateConstraints:@[
         [elkBrightLabel.leadingAnchor constraintEqualToAnchor:elkBrightRow.leadingAnchor],
         [elkBrightLabel.centerYAnchor constraintEqualToAnchor:elkBrightRow.centerYAnchor],
         [elkBrightValue.leadingAnchor constraintEqualToAnchor:elkBrightLabel.trailingAnchor constant:8],
         [elkBrightValue.centerYAnchor constraintEqualToAnchor:elkBrightRow.centerYAnchor],
         [elkSlider.leadingAnchor constraintEqualToAnchor:elkBrightValue.trailingAnchor constant:8],
+        [elkSlider.trailingAnchor constraintEqualToAnchor:elkBrightRow.trailingAnchor],
         [elkSlider.centerYAnchor constraintEqualToAnchor:elkBrightRow.centerYAnchor],
-        [elkWhiteBtn.leadingAnchor constraintEqualToAnchor:elkSlider.trailingAnchor constant:8],
-        [elkWhiteBtn.trailingAnchor constraintEqualToAnchor:elkBrightRow.trailingAnchor],
-        [elkWhiteBtn.centerYAnchor constraintEqualToAnchor:elkBrightRow.centerYAnchor],
         [elkBrightRow.heightAnchor constraintEqualToConstant:44]
     ]];
     [elkStack addArrangedSubview:elkBrightRow];
@@ -7047,7 +7060,7 @@ static void NECheckSettingsButton(void) {
     aboutName.text = @"Ninebot pro+";
     aboutName.font = [UIFont boldSystemFontOfSize:16];
     UILabel *aboutVer = [UILabel new];
-    aboutVer.text = @"0.7.0";
+    aboutVer.text = @"0.7.1";
     aboutVer.font = [UIFont systemFontOfSize:15];
     aboutVer.textColor = [UIColor secondaryLabelColor];
     [aboutTitleRow addArrangedSubview:aboutName];
@@ -7151,19 +7164,20 @@ static void NECheckSettingsButton(void) {
     return btn;
 }
 
-// 预设色圆钮（30pt，tag = 预设下标）
+// 预设色圆钮（26pt，tag = 预设下标；v0.7.1：0.7.0 的 30pt 贴着上下两行
+// 看着紧，改小一圈、行上下再各留 8pt 空隙）
 - (UIButton *)elkColorButtonWithPresetIndex:(NSInteger)idx {
     UIButton *btn = [UIButton buttonWithType:UIButtonTypeCustom];
     btn.backgroundColor = [UIColor colorWithRed:kELKPresets[idx][0] / 255.0
                                           green:kELKPresets[idx][1] / 255.0
                                            blue:kELKPresets[idx][2] / 255.0 alpha:1];
-    btn.layer.cornerRadius = 15;
+    btn.layer.cornerRadius = 13;
     btn.layer.borderWidth = 1;
     btn.layer.borderColor = [UIColor tertiaryLabelColor].CGColor;
     btn.clipsToBounds = YES;
     btn.translatesAutoresizingMaskIntoConstraints = NO;
-    [btn.widthAnchor constraintEqualToConstant:30].active = YES;
-    [btn.heightAnchor constraintEqualToConstant:30].active = YES;
+    [btn.widthAnchor constraintEqualToConstant:26].active = YES;
+    [btn.heightAnchor constraintEqualToConstant:26].active = YES;
     btn.tag = (NSInteger)idx;
     [btn addTarget:self action:@selector(elkPresetColorTapped:)
         forControlEvents:UIControlEventTouchUpInside];
@@ -7199,10 +7213,6 @@ static void NECheckSettingsButton(void) {
 
 - (void)elkBrightnessSliderEnded:(UISlider *)slider {
     [[NEELKStrip shared] setBrightness:(NSInteger)llround(slider.value)];
-}
-
-- (void)elkWhiteTapped:(UIButton *)sender {
-    [[NEELKStrip shared] setWhite];
 }
 
 - (void)elkEffectTapped:(UIButton *)sender {
