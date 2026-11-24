@@ -1,4 +1,4 @@
-// NinebotEnhance iOS v0.7.11 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
+// NinebotEnhance iOS v0.7.12 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
 //
 // v0.7.0 加七彩日行灯（车上的 LED 灯带，ELK-BLEDOB，duoCo Strip 同款，
 //  用户 2026-11-24 决定做）：协议照 Pro+ App 的 ELKStrip.swift，服务
@@ -7,6 +7,11 @@
 //  日行灯”（默认折叠、功能默认关），开关/预设色/自选色/亮度/白色/灯效。
 //  含 0.6.12 全部内容。
 //
+// v0.7.12（用户 2026-11-24 16:31 截图）：顶栏彻底透明，只留一层全屏磨砂——
+//   0.7.11 顶栏跟底图还是不一样、中间还有分割线。根因是结构问题：
+//   顶栏和底图是两块各自糊不同东西的磨砂，颜色永远对不上。修法是
+//   导航栏自己的磨砂整个拿掉、底边阴影也清掉，透出底下那层满屏
+//   bgBlur，整个屏幕只有一层磨砂，顶栏和底图真正完全一致。
 // v0.7.11（用户 2026-11-24 16:23 截图）：顶栏白遮罩全去掉——
 //   0.7.10 顶栏还是不通透，白 0.30 还是太浓，把头像/昵称/齿轮
 //   全盖住了。改透明只留 UltraThin 磨砂，跟底图完全一致。
@@ -6663,16 +6668,20 @@ static UIViewController *NETopViewController(void) {
     // SystemMaterial 模糊 + 白色 0.70 遮罩（比卡片的 0.35 更不透，
     // 顶栏必须把齿轮盖住）；标题字色明确写死深色 17pt 半粗体。
     // 三处外观都设，否则滚到顶时还是透明那套。
-    // v0.7.11：顶栏白遮罩全去掉，只留 UltraThin 磨砂。0.7.10 的白 0.30
-    // 还是太浓，顶栏看着还是一条浅灰白带子。齿轮会透出来，但只是磨砂
-    // 后的一团软影子，“关闭”是蓝色粗字，压在上面照样清楚。
+    // v0.7.12：导航栏自己的磨砂整个拿掉，彻底透明。顶栏和底图各糊各的
+    // 永远对不上色——顶栏糊头像区（浅），底图糊横幅区（彩）。改成只留
+    // 底下那层满屏 bgBlur（已伸到导航栏后面），整个屏幕只有一层磨砂，
+    // 顶栏和底图是同一块玻璃。底边阴影也清掉（分割线就是它 + 色差）。
+    // 齿轮会以磨砂影子透出来，若碍眼再加回一点白遮罩（0.15）。
     UINavigationBarAppearance *navAppearance = [[UINavigationBarAppearance alloc] init];
-    navAppearance.backgroundEffect = [UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemUltraThinMaterial];
+    navAppearance.backgroundEffect = nil;
     navAppearance.backgroundColor = [UIColor clearColor];
+    navAppearance.shadowColor = [UIColor clearColor];
     navAppearance.titleTextAttributes = @{
         NSForegroundColorAttributeName : [UIColor labelColor],
         NSFontAttributeName : [UIFont systemFontOfSize:17 weight:UIFontWeightSemibold]
     };
+    nav.navigationBar.translucent = YES;
     nav.navigationBar.standardAppearance = navAppearance;
     nav.navigationBar.scrollEdgeAppearance = navAppearance;
     nav.navigationBar.compactAppearance = navAppearance;
@@ -7160,7 +7169,7 @@ static void NECheckSettingsButton(void) {
     aboutName.text = @"Ninebot pro+";
     aboutName.font = [UIFont boldSystemFontOfSize:16];
     UILabel *aboutVer = [UILabel new];
-    aboutVer.text = @"0.7.11";
+    aboutVer.text = @"0.7.12";
     aboutVer.font = [UIFont systemFontOfSize:15];
     aboutVer.textColor = [UIColor secondaryLabelColor];
     [aboutTitleRow addArrangedSubview:aboutName];
