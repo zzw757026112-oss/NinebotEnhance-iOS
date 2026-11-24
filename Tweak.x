@@ -1,4 +1,4 @@
-// NinebotEnhance iOS v0.7.23 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
+// NinebotEnhance iOS v0.7.24 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
 //
 // v0.7.0 加七彩日行灯（车上的 LED 灯带，ELK-BLEDOB，duoCo Strip 同款，
 //  用户 2026-11-24 决定做）：协议照 Pro+ App 的 ELKStrip.swift，服务
@@ -6,6 +6,10 @@
 //  认名字含 bledob 的设备，收 3 秒选 RSSI 最强的一台。设置页新分组“七彩
 //  日行灯”（默认折叠、功能默认关），开关/预设色/自选色/亮度/白色/灯效。
 //  含 0.6.12 全部内容。
+//
+// v0.7.24（用户 2026-11-25 00:31）：图标两轮都没换上，算了，替换图标的代码整个删掉，
+//   图标保持原座桶图不动；文字改成“打开尾箱”（电摩没有座桶，是尾箱）。只换文字，
+//   跟最近行驶同逻辑：自定义车辆图开着就换，恢复原图自动还原。一次过，不再折腾图标。
 //
 // v0.7.23（用户 2026-11-24 23:49 实测：文字变了、图标没变）：图标认法修法——
 //   九号 App 的按钮常把图标做成 UIImageView 子视图（不是 button.image），导航栏车辆名
@@ -1151,202 +1155,6 @@ static NSString *NEFieldCurrentValue(NSString *field, BOOL separate);
 // 所有文字替换共用：输入 label 的纯文本（setText: 的 text 或 attributedText.string），
 // 返回替换后的字符串；没有可换的返回 nil。
 // fieldOut/separateOut（可为 NULL）返回命中的字段 key 和是不是“分开 label”式替换。
-// ---------------- v0.7.22：打开座桶 → 车机互联（文字+图标） ----------------
-// 图标运行时画（Core Graphics），跟 v3 预览图一致：车机大屏（横屏）+手机（竖屏）
-// 叠在一起，深蓝线条、透明底（原图标就是透明底 glyph，浅灰圆底是按钮自己的背景）。
-// 在原图同样尺寸上画，只换 UIImage、不动 imageView 的 frame，所以大小位置
-// 跟原图标完全一致。原图暂存在 imageView 的关联对象里，恢复原图时设回去。
-static const char NESeatMapOriginalIconKey = 0; // 座桶原图标暂存
-// 车机互联图标（v0.7.22）：运行时画，跟 v3 预览图一致——车机大屏（横屏）+手机
-// （竖屏）叠在一起，深蓝线条、透明底（原图标就是透明底 glyph，浅灰圆底是
-// 按钮自己的背景）。图形占圆直径宽 50%、高 44%，跟原座桶图标（49%/46%）
-// 基本一致、居中。在原图同样尺寸上画，只换 UIImage、不动 imageView 的
-// frame，所以大小位置跟原图标完全一致。
-static UIImage *NECarLinkIconImage(CGSize size) {
-    if (size.width <= 0 || size.height <= 0) return nil;
-    if (![NSThread isMainThread]) return nil;
-    CGFloat scale = [UIScreen mainScreen].scale;
-    if (scale <= 0) scale = 2;
-    UIGraphicsBeginImageContextWithOptions(size, NO, scale);
-    CGContextRef ctx = UIGraphicsGetCurrentContext();
-    if (!ctx) { UIGraphicsEndImageContext(); return nil; }
-    // 归一化到 100x100 作画，等比缩放居中（原图基本是方的）。
-    CGFloat s = MIN(size.width, size.height) / 100.0;
-    CGContextTranslateCTM(ctx, (size.width - 100 * s) / 2, (size.height - 100 * s) / 2);
-    CGContextScaleCTM(ctx, s, s);
-    UIColor *ink = [UIColor colorWithRed:28/255.0 green:28/255.0 blue:46/255.0 alpha:1];
-    [ink setStroke];
-    [ink setFill];
-    // 车机屏（横屏，线条风）
-    UIBezierPath *screen = [UIBezierPath bezierPathWithRoundedRect:CGRectMake(26.46, 36.46, 31.87, 28.12) cornerRadius:3.75];
-    screen.lineWidth = 3.75;
-    [screen stroke];
-    // 屏内 UI 线
-    UIBezierPath *bar = [UIBezierPath bezierPath];
-    [bar moveToPoint:CGPointMake(30.21, 42.71)];
-    [bar addLineToPoint:CGPointMake(48.96, 42.71)];
-    bar.lineWidth = 1.875;
-    [bar stroke];
-    UIBezierPath *dot = [UIBezierPath bezierPathWithOvalInRect:CGRectMake(30.21, 50.63, 3.75, 3.75)];
-    [dot fill];
-    UIBezierPath *line2 = [UIBezierPath bezierPath];
-    [line2 moveToPoint:CGPointMake(36.46, 52.5)];
-    [line2 addLineToPoint:CGPointMake(48.96, 52.5)];
-    line2.lineWidth = 1.875;
-    [line2 stroke];
-    UIBezierPath *bar2 = [UIBezierPath bezierPath];
-    [bar2 moveToPoint:CGPointMake(30.21, 59.38)];
-    [bar2 addLineToPoint:CGPointMake(45.83, 59.38)];
-    bar2.lineWidth = 1.875;
-    [bar2 stroke];
-    // 手机（竖屏，叠在屏右上角前面）：先把这块区域抠透明（盖住后面车机屏的线），
-    // 再画手机外框，这样手机里是透明的、透出按钮自己的浅灰圆底。
-    UIBezierPath *phone = [UIBezierPath bezierPathWithRoundedRect:CGRectMake(51.04, 29.17, 22.29, 41.66) cornerRadius:3.75];
-    CGContextSetBlendMode(ctx, kCGBlendModeClear);
-    [phone fill];
-    CGContextSetBlendMode(ctx, kCGBlendModeNormal);
-    phone.lineWidth = 3.75;
-    [phone stroke];
-    // 手机内细节：听筒、内容线、Home 条
-    UIBezierPath *spk = [UIBezierPath bezierPath];
-    [spk moveToPoint:CGPointMake(58.33, 34.38)];
-    [spk addLineToPoint:CGPointMake(66.04, 34.38)];
-    spk.lineWidth = 1.67;
-    [spk stroke];
-    UIBezierPath *cline = [UIBezierPath bezierPath];
-    [cline moveToPoint:CGPointMake(55.21, 47.92)];
-    [cline addLineToPoint:CGPointMake(69.17, 47.92)];
-    cline.lineWidth = 1.875;
-    [cline stroke];
-    UIBezierPath *home = [UIBezierPath bezierPath];
-    [home moveToPoint:CGPointMake(58.33, 65.63)];
-    [home addLineToPoint:CGPointMake(66.04, 65.63)];
-    home.lineWidth = 1.67;
-    [home stroke];
-    UIImage *img = UIGraphicsGetImageFromCurrentImageContext();
-    UIGraphicsEndImageContext();
-    return img;
-}
-// 找“打开座桶/车机互联”文字控件对应的图标 view。找不到返回 nil（图标不换，文字照换）。
-static BOOL NEIsSeatMapIconImageView(UIImageView *iv);
-static UIImageView *NESeatMapIconViewForTextView(UIView *textView) {
-    if (!textView) return nil;
-    if ([textView isKindOfClass:[UIButton class]]) {
-        UIButton *btn = (UIButton *)textView;
-        if (btn.imageView) return btn.imageView;
-        // v0.7.23：九号 App 的按钮常把图标做成 UIImageView 子视图（不是 button.image），
-        // 导航栏车辆名按钮就是这样。imageView 为 nil 时在按钮的子视图里找。
-        for (UIView *sub in btn.subviews) {
-            if ([sub isKindOfClass:[UIImageView class]]) return (UIImageView *)sub;
-        }
-        // 图标不在按钮里时，看按钮的兄弟视图里有没有（用兄弟文字验明正身，
-        // 不会抓到旁边滑动开机/更多功能那个按钮的图标）。
-        UIView *parent = btn.superview;
-        if (parent) {
-            for (UIView *sub in parent.subviews) {
-                if ([sub isKindOfClass:[UIImageView class]] &&
-                    NEIsSeatMapIconImageView((UIImageView *)sub)) return (UIImageView *)sub;
-            }
-        }
-        return nil;
-    }
-    UIView *parent = textView.superview;
-    if (!parent) return nil;
-    for (UIView *sub in parent.subviews) {
-        if ([sub isKindOfClass:[UIImageView class]]) return (UIImageView *)sub;
-    }
-    return nil;
-}
-// 这个 UIImageView 是不是座桶图标：同一容器里有个 label/button 写着
-// “打开座桶”或“车机互联”。图标在 UIButton 里时 superview 就是按钮本身。
-static BOOL NEIsSeatMapIconImageView(UIImageView *iv) {
-    if (!iv) return NO;
-    UIView *parent = iv.superview;
-    if (!parent) return NO;
-    if ([parent isKindOfClass:[UIButton class]]) {
-        NSString *t = [(UIButton *)parent titleForState:UIControlStateNormal];
-        return t && ([t rangeOfString:@"打开座桶"].location != NSNotFound ||
-                     [t rangeOfString:@"车机互联"].location != NSNotFound);
-    }
-    for (UIView *sub in parent.subviews) {
-        if (sub == iv) continue;
-        if ([sub isKindOfClass:[UILabel class]]) {
-            NSString *t = [(UILabel *)sub text];
-            if (t && ([t rangeOfString:@"打开座桶"].location != NSNotFound ||
-                      [t rangeOfString:@"车机互联"].location != NSNotFound)) return YES;
-        }
-        if ([sub isKindOfClass:[UIButton class]]) {
-            NSString *t = [(UIButton *)sub titleForState:UIControlStateNormal];
-            if (t && ([t rangeOfString:@"打开座桶"].location != NSNotFound ||
-                      [t rangeOfString:@"车机互联"].location != NSNotFound)) return YES;
-        }
-    }
-    return NO;
-}
-// setImage: 钩子用：是座桶图标且车辆图开着，存原图、返回自定义图标；
-// 否则返回 nil（放行 App 设的图）。已经换过的不再存（别把自定义图存成“原图”）。
-static UIImage *NESeatMapIconForImageView(UIImageView *iv, UIImage *image) {
-    if (!iv || !image) return nil;
-    if (!NEIsSeatMapIconImageView(iv)) return nil;
-    if (!gHasVehicleImage) return nil;
-    if (objc_getAssociatedObject(iv, &NESeatMapOriginalIconKey)) return nil;
-    objc_setAssociatedObject(iv, &NESeatMapOriginalIconKey, image, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    return NECarLinkIconImage(image.size);
-}
-// 把座桶图标换成车机互联图标（或还原）。幂等：已换过的不再换；
-// 没存过原图的不还原。只换 UIImage，不动 frame。
-static void NEApplySeatMapIconToImageView(UIImageView *iv) {
-    if (!iv) return;
-    if (![NSThread isMainThread]) return;
-    if (gHasVehicleImage) {
-        UIImage *cur = iv.image;
-        if (!cur) return;
-        if (objc_getAssociatedObject(iv, &NESeatMapOriginalIconKey)) return;
-        UIImage *custom = NECarLinkIconImage(cur.size);
-        if (!custom) return;
-        objc_setAssociatedObject(iv, &NESeatMapOriginalIconKey, cur, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        iv.image = custom;
-    } else {
-        UIImage *orig = objc_getAssociatedObject(iv, &NESeatMapOriginalIconKey);
-        if (orig) {
-            iv.image = orig;
-            objc_setAssociatedObject(iv, &NESeatMapOriginalIconKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        }
-    }
-}
-// 显式刷一遍座桶控件（按钮标题+图标；UILabel 文字走 NEForceRefreshLabels）：
-// 选图/恢复原图时立刻生效，不用等 App 重设。只认“打开座桶/车机互联”这两个串。
-static void NEForceRefreshSeatMapControlInView(UIView *view) {
-    for (UIView *sub in view.subviews) {
-        if ([sub isKindOfClass:[UIButton class]]) {
-            UIButton *btn = (UIButton *)sub;
-            NSString *t = [btn titleForState:UIControlStateNormal];
-            if (t && ([t isEqualToString:@"打开座桶"] || [t isEqualToString:@"车机互联"])) {
-                NSString *want = gHasVehicleImage ? @"车机互联" : @"打开座桶";
-                if (![t isEqualToString:want]) [btn setTitle:want forState:UIControlStateNormal];
-                NEApplySeatMapIconToImageView(btn.imageView);
-            }
-        } else if ([sub isKindOfClass:[UILabel class]]) {
-            UILabel *label = (UILabel *)sub;
-            NSString *t = label.text;
-            if (t && ([t isEqualToString:@"打开座桶"] || [t isEqualToString:@"车机互联"])) {
-                UIImageView *iv = NESeatMapIconViewForTextView(label);
-                NEApplySeatMapIconToImageView(iv);
-            }
-        } else if ([sub isKindOfClass:[UIImageView class]]) {
-            UIImageView *iv = (UIImageView *)sub;
-            if (NEIsSeatMapIconImageView(iv)) NEApplySeatMapIconToImageView(iv);
-        }
-        NEForceRefreshSeatMapControlInView(sub);
-    }
-}
-static void NEForceRefreshSeatMapControl(void) {
-    if (![NSThread isMainThread]) return;
-    UIWindow *w = NEKeyWindow();
-    if (!w) return;
-    NEForceRefreshSeatMapControlInView(w);
-}
-
 static NSString *NEFixedLabelString(NSString *text, UILabel *label,
                                     NSString **fieldOut, BOOL *separateOut) {
     if (fieldOut) *fieldOut = nil;
@@ -1365,11 +1173,11 @@ static NSString *NEFixedLabelString(NSString *text, UILabel *label,
         if (fieldOut) *fieldOut = @"NERecentRide";
         return @"最近行驶";
     }
-    // 0b. 打开座桶 → 车机互联（v0.7.22）：跑车没有座桶。跟最近行驶同逻辑。
+    // 0b. 打开座桶 → 打开尾箱（v0.7.24）：电摩没有座桶，是尾箱。跟最近行驶同逻辑。
     if (gHasVehicleImage &&
         [[text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]] isEqualToString:@"打开座桶"]) {
-        if (fieldOut) *fieldOut = @"NESeatToCarLink";
-        return @"车机互联";
+        if (fieldOut) *fieldOut = @"NESeatToTailBox";
+        return @"打开尾箱";
     }
     // 1. 服务有效期（自定义值；没填就不换，显示真实有效期）
     NSString *validityValue = NEValidityDisplayValue();
@@ -1702,11 +1510,6 @@ static NSString *NEValueForKnownLabel(UILabel *label) {
 
 static void NE_UILabel_setText(id self, SEL _cmd, NSString *text) {
     if (text.length > 0 && [self isKindOfClass:[UILabel class]]) {
-        // v0.7.22：座桶图标跟着文字走——App 写“打开座桶/车机互联”时顺手把图标也对上。
-        if ([text isEqualToString:@"打开座桶"] || [text isEqualToString:@"车机互联"]) {
-            UIImageView *siv = NESeatMapIconViewForTextView((UILabel *)self);
-            NEApplySeatMapIconToImageView(siv);
-        }
         NSString *known = NEValueForKnownLabel((UILabel *)self);
         if (known) { orig_UILabel_setText(self, _cmd, known); return; }
         NSString *field = nil; BOOL separate = NO;
@@ -1731,11 +1534,6 @@ static void NE_UILabel_setText(id self, SEL _cmd, NSString *text) {
 
 static void NE_UILabel_setAttributedText(id self, SEL _cmd, NSAttributedString *attr) {
     if (attr.length > 0 && [self isKindOfClass:[UILabel class]]) {
-        // v0.7.22：座桶图标跟着文字走（富文本那路也一样）。
-        if ([attr.string isEqualToString:@"打开座桶"] || [attr.string isEqualToString:@"车机互联"]) {
-            UIImageView *siv = NESeatMapIconViewForTextView((UILabel *)self);
-            NEApplySeatMapIconToImageView(siv);
-        }
         NSString *known = NEValueForKnownLabel((UILabel *)self);
         if (known) {
             orig_UILabel_setAttributedText(self, _cmd,
@@ -1774,10 +1572,10 @@ static void NE_UILabel_setAttributedText(id self, SEL _cmd, NSAttributedString *
 static NSString *NEFixedButtonTitleForField(NSString *title, NSString **fieldOut) {
     if (fieldOut) *fieldOut = nil;
     if (!title.length) return nil;
-    // 打开座桶 → 车机互联（v0.7.22）：跟最近行驶同逻辑，自定义车辆图开着就换。
+    // 打开座桶 → 打开尾箱（v0.7.24）：跟最近行驶同逻辑，自定义车辆图开着就换。
     if (gHasVehicleImage && [title isEqualToString:@"打开座桶"]) {
-        if (fieldOut) *fieldOut = @"NESeatToCarLink";
-        return @"车机互联";
+        if (fieldOut) *fieldOut = @"NESeatToTailBox";
+        return @"打开尾箱";
     }
     if (gLevel && gLevelValue.length > 0 &&
         ([title hasPrefix:@"Lv."] || [title hasPrefix:@"lv."])) {
@@ -1814,11 +1612,6 @@ static NSString *NEFixedButtonTitleForField(NSString *title, NSString **fieldOut
 static void (*orig_UIButton_setTitle)(id, SEL, NSString *, UIControlState);
 static void NE_UIButton_setTitle(id self, SEL _cmd, NSString *title, UIControlState state) {
     if (title.length > 0 && [self isKindOfClass:[UIButton class]]) {
-        // v0.7.22：座桶图标跟着文字走——按钮的 imageView 直接取。
-        if ([title isEqualToString:@"打开座桶"] || [title isEqualToString:@"车机互联"]) {
-            UIImageView *siv = NESeatMapIconViewForTextView((UIView *)self);
-            NEApplySeatMapIconToImageView(siv);
-        }
         NSString *field = nil;
         NSString *fixed = NEFixedButtonTitleForField(title, &field);
         if (fixed) {
@@ -2025,10 +1818,10 @@ static NSString *NEFixedRNText(NSString *text, UIView *view, NSString *page, NSS
             if (fieldOut) *fieldOut = @"NERecentRide";
             return @"最近行驶";
         }
-        // 0b. 打开座桶 → 车机互联（v0.7.22）：同上。
+        // 0b. 打开座桶 → 打开尾箱（v0.7.24）：同上。
         if ([t0 isEqualToString:@"打开座桶"]) {
-            if (fieldOut) *fieldOut = @"NESeatToCarLink";
-            return @"车机互联";
+            if (fieldOut) *fieldOut = @"NESeatToTailBox";
+            return @"打开尾箱";
         }
     }
     if (!isMine && !isService) return nil;
@@ -2382,8 +2175,8 @@ static NSString *NEFieldCurrentValue(NSString *field, BOOL separate) {
         return (gNCoins && gNCoinsValue.length > 0) ? gNCoinsValue : nil;
     if ([field isEqualToString:@"NERecentRide"])
         return gHasVehicleImage ? @"最近行驶" : nil;
-    if ([field isEqualToString:@"NESeatToCarLink"])
-        return gHasVehicleImage ? @"车机互联" : nil;
+    if ([field isEqualToString:@"NESeatToTailBox"])
+        return gHasVehicleImage ? @"打开尾箱" : nil;
     if ([field isEqualToString:@"NEPosts"])
         return (gPosts && gPostsValue.length > 0) ? gPostsValue : nil;
     if ([field isEqualToString:@"NEFollowing"])
@@ -3221,15 +3014,6 @@ static void NE_sd_setImageWithURL_ctx(id self, SEL _cmd, NSURL *url, id placehol
 // 小图（图标/头像）不碰；已是自定义图的放行，不来回换。
 static void (*orig_UIImageView_setImage)(id, SEL, UIImage *);
 static void NE_UIImageView_setImage(id self, SEL _cmd, UIImage *image) {
-    // v0.7.22：座桶图标 → 车机互联图标（跟车辆图走；车辆图关着时放行原图，
-    // App 重设原图即自动还原；立刻还原由 NEForceRefreshSeatMapControl 做）。
-    if (image) {
-        UIImage *seatIcon = NESeatMapIconForImageView((UIImageView *)self, image);
-        if (seatIcon) {
-            orig_UIImageView_setImage(self, _cmd, seatIcon);
-            return;
-        }
-    }
     if (image && (gHasVehicleImage || gHasBgImage) && NEViewIsOnDeviceRootPage((UIImageView *)self)) {
         UIImage *custom = NEClassifyDeviceImage((UIImageView *)self, image);
         if (custom) {
@@ -7591,7 +7375,7 @@ static void NECheckSettingsButton(void) {
     aboutName.text = @"Ninebot pro+";
     aboutName.font = [UIFont boldSystemFontOfSize:16];
     UILabel *aboutVer = [UILabel new];
-    aboutVer.text = @"0.7.23";
+    aboutVer.text = @"0.7.24";
     aboutVer.font = [UIFont systemFontOfSize:15];
     aboutVer.textColor = [UIColor secondaryLabelColor];
     [aboutTitleRow addArrangedSubview:aboutName];
@@ -8342,14 +8126,14 @@ static void NECheckSettingsButton(void) {
     NEClearImageCache();
     [self refreshImageStatus];
     // v0.7.21：恢复车辆图时，最近行驶文案也立刻还原成“最近骑行”。
-    // v0.7.22：座桶文字+图标也一起还原。
-    if (kind == 0) { NEForceRefreshLabels(); NEForceRedrawRNText(); NEForceRefreshSeatMapControl(); }
+    // v0.7.24：座桶文字也一起还原（图标不再替换）。
+    if (kind == 0) { NEForceRefreshLabels(); NEForceRedrawRNText(); }
     // 第十二修：立刻把设备页的图恢复成暂存的原图，不用等切 tab / 重启
     //（savePickedImage 同款：立刻刷一次 + 1 秒后再刷一次，防 App 异步重载）。
     NEForceRefreshImages();
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         @try { NEForceRefreshImages(); } @catch (...) {}
-        if (kind == 0) { @try { NEForceRefreshLabels(); NEForceRedrawRNText(); NEForceRefreshSeatMapControl(); } @catch (...) {} }
+        if (kind == 0) { @try { NEForceRefreshLabels(); NEForceRedrawRNText(); } @catch (...) {} }
     });
     os_log(gLog, "[IMG] 已恢复原%{public}@", kind == 0 ? @"车辆图" : @"背景图");
 }
@@ -8390,14 +8174,13 @@ static void NECheckSettingsButton(void) {
         NEInstallRNTextHookIfNeeded();
         NEForceRefreshLabels();
         NEForceRedrawRNText();
-        NEForceRefreshSeatMapControl();
     }
     NEForceRefreshImages(); // v0.3.9 修复：选完图立刻把设备 tab 的图重算一遍，不用等切 tab/重启
     // 第十修：1 秒后再刷一次——App 可能在选图后异步重载主题，把刚换上的
     // 自定义图盖回去；定时器 3 秒才跑一轮，1 秒补刷让结果更快稳定。
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         @try { NEForceRefreshImages(); } @catch (...) {}
-        if (kind == 0) { @try { NEForceRefreshLabels(); NEForceRedrawRNText(); NEForceRefreshSeatMapControl(); } @catch (...) {} }
+        if (kind == 0) { @try { NEForceRefreshLabels(); NEForceRedrawRNText(); } @catch (...) {} }
     });
     os_log(gLog, "[IMG] 已保存自定义%{public}@（%ldx%ld），已应用到设备页",
            kind == 0 ? @"车辆图" : @"背景图",
