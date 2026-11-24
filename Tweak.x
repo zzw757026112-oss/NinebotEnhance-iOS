@@ -1,4 +1,4 @@
-// NinebotEnhance iOS v0.7.22 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
+// NinebotEnhance iOS v0.7.23 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
 //
 // v0.7.0 加七彩日行灯（车上的 LED 灯带，ELK-BLEDOB，duoCo Strip 同款，
 //  用户 2026-11-24 决定做）：协议照 Pro+ App 的 ELKStrip.swift，服务
@@ -6,6 +6,12 @@
 //  认名字含 bledob 的设备，收 3 秒选 RSSI 最强的一台。设置页新分组“七彩
 //  日行灯”（默认折叠、功能默认关），开关/预设色/自选色/亮度/白色/灯效。
 //  含 0.6.12 全部内容。
+//
+// v0.7.23（用户 2026-11-24 23:49 实测：文字变了、图标没变）：图标认法修法——
+//   九号 App 的按钮常把图标做成 UIImageView 子视图（不是 button.image），导航栏车辆名
+//   按钮就是这样（ne-diag 16:22 实证）。NESeatMapIconViewForTextView 对 UIButton 只取
+//   button.imageView，nil 就停了，图标子视图永远够不着。改成：先取 imageView，没有就
+//   在按钮子视图里找，再没有就在按钮兄弟视图里找（用兄弟文字验明正身）。
 //
 // v0.7.22（用户 2026-11-24 23:12 要求，23:28 改成“车机互联”）：设备页“打开座桶”→
 //   “车机互联”（文字+图标）——跑车没有座桶；“地图寻车”不合适，设备页已有车辆位置地图。
@@ -1221,12 +1227,28 @@ static UIImage *NECarLinkIconImage(CGSize size) {
     UIGraphicsEndImageContext();
     return img;
 }
-// 找“打开座桶/车机互联”文字控件对应的图标 view：UIButton 直接取 imageView；
-// UILabel 取同一容器里的 UIImageView。找不到返回 nil（图标不换，文字照换）。
+// 找“打开座桶/车机互联”文字控件对应的图标 view。找不到返回 nil（图标不换，文字照换）。
+static BOOL NEIsSeatMapIconImageView(UIImageView *iv);
 static UIImageView *NESeatMapIconViewForTextView(UIView *textView) {
     if (!textView) return nil;
     if ([textView isKindOfClass:[UIButton class]]) {
-        return ((UIButton *)textView).imageView;
+        UIButton *btn = (UIButton *)textView;
+        if (btn.imageView) return btn.imageView;
+        // v0.7.23：九号 App 的按钮常把图标做成 UIImageView 子视图（不是 button.image），
+        // 导航栏车辆名按钮就是这样。imageView 为 nil 时在按钮的子视图里找。
+        for (UIView *sub in btn.subviews) {
+            if ([sub isKindOfClass:[UIImageView class]]) return (UIImageView *)sub;
+        }
+        // 图标不在按钮里时，看按钮的兄弟视图里有没有（用兄弟文字验明正身，
+        // 不会抓到旁边滑动开机/更多功能那个按钮的图标）。
+        UIView *parent = btn.superview;
+        if (parent) {
+            for (UIView *sub in parent.subviews) {
+                if ([sub isKindOfClass:[UIImageView class]] &&
+                    NEIsSeatMapIconImageView((UIImageView *)sub)) return (UIImageView *)sub;
+            }
+        }
+        return nil;
     }
     UIView *parent = textView.superview;
     if (!parent) return nil;
@@ -7569,7 +7591,7 @@ static void NECheckSettingsButton(void) {
     aboutName.text = @"Ninebot pro+";
     aboutName.font = [UIFont boldSystemFontOfSize:16];
     UILabel *aboutVer = [UILabel new];
-    aboutVer.text = @"0.7.22";
+    aboutVer.text = @"0.7.23";
     aboutVer.font = [UIFont systemFontOfSize:15];
     aboutVer.textColor = [UIColor secondaryLabelColor];
     [aboutTitleRow addArrangedSubview:aboutName];
