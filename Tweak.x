@@ -1,4 +1,4 @@
-// NinebotEnhance iOS v0.7.25 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
+// NinebotEnhance iOS v0.7.26 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
 //
 // v0.7.0 加七彩日行灯（车上的 LED 灯带，ELK-BLEDOB，duoCo Strip 同款，
 //  用户 2026-11-24 决定做）：协议照 Pro+ App 的 ELKStrip.swift，服务
@@ -6,6 +6,15 @@
 //  认名字含 bledob 的设备，收 3 秒选 RSSI 最强的一台。设置页新分组“七彩
 //  日行灯”（默认折叠、功能默认关），开关/预设色/自选色/亮度/白色/灯效。
 //  含 0.6.12 全部内容。
+//
+// v0.7.26（用户 2026-11-25 01:07 手动分享+领了 N 币、之后导的诊断仍显示模板未捕获）：
+//   根因——插件只钩了 NSURLSession dataTaskWithRequest:completionHandler:，RN 的
+//   share-callback 走 delegate 版 dataTaskWithRequest:（无 completionHandler），钩子
+//   永远看不到它，模板怎么分享都记不上（11-24 那次“重抓成功”是外部抓包，不是插件
+//   钩子，所以一直没暴露）。修法：share-callback 模板观察抽成共用 helper，两个钩子
+//   都调它；新加 delegate 版钩子只读观察 share-callback；体优先取 HTTPBody，空时
+//   读 HTTPBodyStream。装上 0.7.26 后需再手动分享一次记模板（今天 N 币已领过，
+//   明天 11-26 打开 App 才是自动领的实测）。
 //
 // v0.7.25（用户 2026-11-25 00:50）：签到历史只留近 7 天（原来 10 天）；设置页第二行
 //   前缀“近10天”改成“签到历史(近7天)”；日期之间用逗号分隔（11-25, 11-24）。
@@ -4901,6 +4910,62 @@ static void NEAutoSignInRunAttempt(void);
 static void NEAutoSignInDoSignAttempt(void);
 static void NEAutoSignInTryNextCandidate(void);
 
+// v0.7.26：把 HTTPBodyStream 读成 NSData（请求体走流而不是 HTTPBody 时用）。
+// 请求体流几乎总是 NSData 背后的流：读完关掉，session 自己再打开时会回到开头，
+// 不会把真正的请求体读空。只在 HTTPBody 为空时才走这条路。
+static NSData *NEDataFromBodyStream(NSInputStream *stream) {
+    if (!stream) return nil;
+    [stream open];
+    NSMutableData *data = [NSMutableData data];
+    uint8_t buf[8192];
+    NSInteger n;
+    while ((n = [stream read:buf maxLength:sizeof(buf)]) > 0) {
+        [data appendBytes:buf length:n];
+    }
+    [stream close];
+    return data.length ? [data copy] : nil;
+}
+
+// v0.7.26：share-callback 模板观察（completionHandler 版钩子和 delegate 版钩子
+// 共用）。App 自己调 share-callback（真分享）时，把整条请求（URL、头、体）记下来
+// 当模板，存 NSUserDefaults。插件自己的重放走 NESignInSession，不进这里，不会
+// 覆盖模板。只记 POST 且带体的；头里的 token 不存（重放时用当前 token 补）。
+// 体优先取 HTTPBody；HTTPBody 为空时读 HTTPBodyStream（RN 可能走流）。
+static void NEObserveShareCallbackRequest(NSURLSession *session, NSURLRequest *request) {
+    if (!request) return;
+    if (session && session == NESignInSession()) return;
+    NSURL *url = request.URL;
+    if (!url || !url.host || ![url.host containsString:@"ninebot.com"]) return;
+    NSString *path = url.path ?: @"";
+    if (![[path lowercaseString] containsString:@"share-callback"]) return;
+    if (![[request.HTTPMethod uppercaseString] isEqualToString:@"POST"]) return;
+    NSData *body = request.HTTPBody;
+    if (!body.length && request.HTTPBodyStream) body = NEDataFromBodyStream(request.HTTPBodyStream);
+    if (!body.length) return;
+    NSMutableDictionary *cleanShare = [(request.allHTTPHeaderFields ?: @{}) mutableCopy];
+    [cleanShare removeObjectForKey:@"Content-Length"];
+    [cleanShare removeObjectForKey:@"content-length"];
+    [cleanShare removeObjectForKey:@"Host"];
+    [cleanShare removeObjectForKey:@"host"];
+    [cleanShare removeObjectForKey:@"access-token"];
+    [cleanShare removeObjectForKey:@"access_token"];
+    [cleanShare removeObjectForKey:@"Authorization"];
+    [cleanShare removeObjectForKey:@"authorization"];
+    [cleanShare removeObjectForKey:@"service-time"];
+    [cleanShare removeObjectForKey:@"request-id"];
+    gShareTplURL = url;
+    gShareTplHeaders = [cleanShare copy];
+    gShareTplMethod = [request.HTTPMethod copy];
+    gShareTplBody = [body copy];
+    gShareTplCaptured = YES;
+    NSUserDefaults *dd = [NSUserDefaults standardUserDefaults];
+    [dd setObject:url.absoluteString forKey:@"NEAutoShareTplURL"];
+    [dd setObject:gShareTplMethod forKey:@"NEAutoShareTplMethod"];
+    [dd setObject:gShareTplHeaders forKey:@"NEAutoShareTplHeaders"];
+    [dd setObject:gShareTplBody forKey:@"NEAutoShareTplBody"];
+    os_log(gLog, "[SHARE] 已捕获 App 的 share-callback 分享请求模板");
+}
+
 static NSURLSessionDataTask *NE_NSURLSession_dataTaskWithRequest(id self, SEL _cmd, NSURLRequest *request, void (^completionHandler)(NSData *, NSURLResponse *, NSError *)) {
     @try {
         NSURL *url = request.URL;
@@ -5044,35 +5109,8 @@ static NSURLSessionDataTask *NE_NSURLSession_dataTaskWithRequest(id self, SEL _c
                     NSString *path = url.path ?: @"";
                     NSString *lowerPath = [path lowercaseString];
                     // v0.6.6 自动分享：App 自己调 share-callback（真分享）时，把整条
-                    // 请求（URL、头、体）记下来当模板，存 NSUserDefaults。插件自己
-                    // 的重放走 NESignInSession，不进这里，不会覆盖模板。只记 POST
-                    // 且带体的；头里的 token 不存（重放时用当前 token 补）。
-                    if ([lowerPath containsString:@"share-callback"]) {
-                        if ([[request.HTTPMethod uppercaseString] isEqualToString:@"POST"] && request.HTTPBody.length) {
-                            NSMutableDictionary *cleanShare = [(request.allHTTPHeaderFields ?: @{}) mutableCopy];
-                            [cleanShare removeObjectForKey:@"Content-Length"];
-                            [cleanShare removeObjectForKey:@"content-length"];
-                            [cleanShare removeObjectForKey:@"Host"];
-                            [cleanShare removeObjectForKey:@"host"];
-                            [cleanShare removeObjectForKey:@"access-token"];
-                            [cleanShare removeObjectForKey:@"access_token"];
-                            [cleanShare removeObjectForKey:@"Authorization"];
-                            [cleanShare removeObjectForKey:@"authorization"];
-                            [cleanShare removeObjectForKey:@"service-time"];
-                            [cleanShare removeObjectForKey:@"request-id"];
-                            gShareTplURL = url;
-                            gShareTplHeaders = [cleanShare copy];
-                            gShareTplMethod = [request.HTTPMethod copy];
-                            gShareTplBody = [request.HTTPBody copy];
-                            gShareTplCaptured = YES;
-                            NSUserDefaults *dd = [NSUserDefaults standardUserDefaults];
-                            [dd setObject:url.absoluteString forKey:@"NEAutoShareTplURL"];
-                            [dd setObject:gShareTplMethod forKey:@"NEAutoShareTplMethod"];
-                            [dd setObject:gShareTplHeaders forKey:@"NEAutoShareTplHeaders"];
-                            [dd setObject:gShareTplBody forKey:@"NEAutoShareTplBody"];
-                            os_log(gLog, "[SHARE] 已捕获 App 的 share-callback 分享请求模板");
-                        }
-                    }
+                    // 请求记下来当模板（NEObserveShareCallbackRequest）。
+                    NEObserveShareCallbackRequest((NSURLSession *)self, request);
                     if ([lowerPath containsString:@"user-sign"]) {
                         NSString *reqAuth = request.allHTTPHeaderFields[@"Authorization"];
                         if (reqAuth.length >= 20) {
@@ -5110,6 +5148,18 @@ static NSURLSessionDataTask *NE_NSURLSession_dataTaskWithRequest(id self, SEL _c
     return orig_NSURLSession_dataTaskWithRequest(self, _cmd, request, completionHandler);
 }
 
+static NSURLSessionDataTask *(*orig_NSURLSession_dataTaskWithRequestNoCH)(id, SEL, NSURLRequest *);
+
+// v0.7.26：delegate 版 dataTaskWithRequest:（无 completionHandler）观察钩子。
+// RN 的 share-callback 走这条路，completionHandler 版钩子永远看不到它，模板
+// 一直记不上。只读观察 share-callback 模板，不改请求、不碰别的流量。
+static NSURLSessionDataTask *NE_NSURLSession_dataTaskWithRequestNoCH(id self, SEL _cmd, NSURLRequest *request) {
+    @try {
+        NEObserveShareCallbackRequest((NSURLSession *)self, request);
+    } @catch (...) {}
+    return orig_NSURLSession_dataTaskWithRequestNoCH(self, _cmd, request);
+}
+
 static BOOL gAuthHookInstalled = NO;
 static void NEInstallAuthCaptureHookIfNeeded(void) {
     if (gAuthHookInstalled) return;
@@ -5124,6 +5174,15 @@ static void NEInstallAuthCaptureHookIfNeeded(void) {
     if (!orig_NSURLSession_dataTaskWithRequest) {
         os_log(gLog, "[SIGN] NSURLSession 观察钩子安装失败（不影响签到，退回扫 defaults）");
         return;
+    }
+    // v0.7.26：再钩 delegate 版 dataTaskWithRequest:（RN 的 share-callback 走这条路）。
+    if (class_getInstanceMethod(cls, @selector(dataTaskWithRequest:))) {
+        MSHookMessageEx(cls, @selector(dataTaskWithRequest:),
+                        (IMP)NE_NSURLSession_dataTaskWithRequestNoCH,
+                        (IMP *)&orig_NSURLSession_dataTaskWithRequestNoCH);
+        if (orig_NSURLSession_dataTaskWithRequestNoCH) {
+            os_log(gLog, "[SIGN] NSURLSession/dataTaskWithRequest:（delegate 版）观察钩子已装");
+        }
     }
     gAuthHookInstalled = YES;
     os_log(gLog, "[SIGN] NSURLSession 观察钩子已装（只读 Authorization，不改请求）");
@@ -7383,7 +7442,7 @@ static void NECheckSettingsButton(void) {
     aboutName.text = @"Ninebot pro+";
     aboutName.font = [UIFont boldSystemFontOfSize:16];
     UILabel *aboutVer = [UILabel new];
-    aboutVer.text = @"0.7.25";
+    aboutVer.text = @"0.7.26";
     aboutVer.font = [UIFont systemFontOfSize:15];
     aboutVer.textColor = [UIColor secondaryLabelColor];
     [aboutTitleRow addArrangedSubview:aboutName];
