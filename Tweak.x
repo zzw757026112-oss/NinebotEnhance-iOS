@@ -1,4 +1,4 @@
-// NinebotEnhance iOS v0.7.1 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
+// NinebotEnhance iOS v0.7.2 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
 //
 // v0.7.0 加七彩日行灯（车上的 LED 灯带，ELK-BLEDOB，duoCo Strip 同款，
 //  用户 2026-11-24 决定做）：协议照 Pro+ App 的 ELKStrip.swift，服务
@@ -7,6 +7,8 @@
 //  日行灯”（默认折叠、功能默认关），开关/预设色/自选色/亮度/白色/灯效。
 //  含 0.6.12 全部内容。
 //
+// v0.7.2（用户 2026-11-24 14:48 定）：设置页改磨砂玻璃（Liquid Glass 近似
+//   效果，iOS 16 能做到的样子：彩色渐变底 + 磨砂卡片）。
 // v0.7.1（用户 2026-11-24 13:08 实测反馈）：颜色圆点 30pt→26pt、行上下
 //  各留 8pt 空隙（0.7.0 里贴着上下两行，看着紧）；删亮度行右边的白色
 //  按钮（用户基本不用白光）。白光命令仍在 NEELKStrip 里，只是卡片上
@@ -5383,7 +5385,7 @@ static void NEAutoSignInShowResultPopupOnMain(BOOL success) {
     UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc]
         initWithTarget:overlay action:@selector(removeFromSuperview)];
     [overlay addGestureRecognizer:tap];
-    // v0.6.8：卡片只比字大一点（按文字实测尺寸 + 少量内边距），背景黑透磨砂，字白色
+    // v0.7.2：弹窗也改磨砂玻璃（跟设置页卡片同款浅色磨砂），字色改成成功绿/失败红
     NSString *text = success ? @"今日签到成功" : @"今日签到失败";
     UIFont *font = [UIFont boldSystemFontOfSize:17];
     CGSize textSize = [text sizeWithAttributes:@{NSFontAttributeName: font}];
@@ -5393,26 +5395,32 @@ static void NEAutoSignInShowResultPopupOnMain(BOOL success) {
         (win.bounds.size.width - cardW) / 2, (win.bounds.size.height - cardH) / 2, cardW, cardH)];
     card.backgroundColor = [UIColor clearColor];
     card.layer.cornerRadius = 12;
-    // 黑透边框：黑色半透明（alpha 0.55），1.5pt
-    card.layer.borderColor = [[UIColor colorWithWhite:0 alpha:0.55] CGColor];
-    card.layer.borderWidth = 1.5;
+    // 白色亮边 1pt（跟设置页磨砂卡片同款）
+    card.layer.borderColor = [[UIColor colorWithWhite:1 alpha:0.65] CGColor];
+    card.layer.borderWidth = 1;
     card.layer.shadowColor = [UIColor blackColor].CGColor;
-    card.layer.shadowOpacity = 0.25;
+    card.layer.shadowOpacity = 0.12;
     card.layer.shadowOffset = CGSizeMake(0, 2);
     card.layer.shadowRadius = 8;
-    // 黑透磨砂背景
-    UIBlurEffect *blur = [UIBlurEffect effectWithStyle:UIBlurEffectStyleDark];
+    // 浅色磨砂背景（SystemMaterial，随浅色/深色模式自适应）
+    UIBlurEffect *blur = [UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemMaterial];
     UIVisualEffectView *blurView = [[UIVisualEffectView alloc] initWithEffect:blur];
     blurView.frame = card.bounds;
     blurView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     blurView.layer.cornerRadius = 12;
     blurView.clipsToBounds = YES;
     [card addSubview:blurView];
+    // 白色亮层：提亮一点，跟设置页磨砂卡片同款
+    UIView *tint = [UIView new];
+    tint.backgroundColor = [[UIColor whiteColor] colorWithAlphaComponent:0.12];
+    tint.frame = blurView.contentView.bounds;
+    tint.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    [blurView.contentView addSubview:tint];
     UILabel *label = [[UILabel alloc] initWithFrame:blurView.contentView.bounds];
     label.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     label.text = text;
     label.font = font;
-    label.textColor = [UIColor whiteColor];
+    label.textColor = success ? [UIColor systemGreenColor] : [UIColor systemRedColor];
     label.textAlignment = NSTextAlignmentCenter;
     [blurView.contentView addSubview:label];
     [overlay addSubview:card];
@@ -6673,18 +6681,73 @@ static void NECheckSettingsButton(void) {
     os_log(gLog, "[HUD] 已在 %{public}s 上加 Ninebot pro+ 按钮", NSStringFromClass([vc class]).UTF8String);
 }
 
+
+// v0.7.2 磨砂玻璃：设置页的彩色底图（九号橙渐变 + 柔和彩色光斑），给磨砂卡片
+// 提供可透出的底色。设置页是全屏模态，App 自己的页面在后面不渲染，所以底色
+// 必须自己画，不能靠 view 透明。光斑用径向渐变画，边缘自然化开，不用再模糊。
+static UIImage *NEGlassBackdropImage(CGSize size) {
+    UIGraphicsBeginImageContextWithOptions(size, YES, 0);
+    CGContextRef ctx = UIGraphicsGetCurrentContext();
+    // 纵向渐变：顶部九号橙 -> 中部浅橙 -> 底部浅灰
+    CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
+    CGFloat locs[3] = {0, 0.35, 1};
+    CGFloat comps[12] = {
+        1.0, 0.48, 0.10, 1.0,   // #FF7A1A
+        1.0, 0.72, 0.45, 1.0,   // 浅橙
+        0.96, 0.96, 0.97, 1.0   // 浅灰
+    };
+    CGGradientRef grad = CGGradientCreateWithColorComponents(cs, comps, locs, 3);
+    CGContextDrawLinearGradient(ctx, grad,
+        CGPointMake(0, 0), CGPointMake(0, size.height), 0);
+    CGGradientRelease(grad);
+    // 彩色光斑：径向渐变，中心带色、边缘透明
+    struct { CGFloat x, y, r; CGFloat c[3]; } blobs[] = {
+        {0.15, 0.45, 0.35, {0.27, 0.51, 1.00}},
+        {0.85, 0.55, 0.30, {0.24, 0.78, 0.47}},
+        {0.70, 0.75, 0.32, {1.00, 0.35, 0.63}},
+        {0.20, 0.85, 0.28, {0.59, 0.35, 1.00}},
+        {0.55, 0.35, 0.22, {1.00, 0.78, 0.24}},
+    };
+    for (int i = 0; i < 5; i++) {
+        CGFloat cx = blobs[i].x * size.width, cy = blobs[i].y * size.height;
+        CGFloat rr = blobs[i].r * size.width;
+        CGFloat bcomps[8] = {
+            blobs[i].c[0], blobs[i].c[1], blobs[i].c[2], 0.45,
+            blobs[i].c[0], blobs[i].c[1], blobs[i].c[2], 0.0
+        };
+        CGFloat bloc[2] = {0, 1};
+        CGGradientRef bg = CGGradientCreateWithColorComponents(cs, bcomps, bloc, 2);
+        CGContextDrawRadialGradient(ctx, bg,
+            CGPointMake(cx, cy), 0, CGPointMake(cx, cy), rr,
+            kCGGradientDrawsAfterEndLocation);
+        CGGradientRelease(bg);
+    }
+    CGColorSpaceRelease(cs);
+    UIImage *img = UIGraphicsGetImageFromCurrentImageContext();
+    UIGraphicsEndImageContext();
+    return img;
+}
+
 @implementation NEHUDSettingsVC
 
 - (void)viewDidLoad {
     [super viewDidLoad];
-    // v0.3.9 美化：分组表样式——浅灰底 + 白色圆角卡片（iOS 系统分组表观感）。
+    // v0.7.2 磨砂玻璃：底色换成彩色渐变底图（九号橙 + 彩色光斑），卡片磨砂后
+    // 透出底色才有玻璃感。底图固定在 scroll view 后面，不跟内容滚动。
     self.view.backgroundColor = [UIColor systemGroupedBackgroundColor];
+    UIImageView *backdrop = [[UIImageView alloc]
+        initWithImage:NEGlassBackdropImage([UIScreen mainScreen].bounds.size)];
+    backdrop.frame = self.view.bounds;
+    backdrop.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    backdrop.contentMode = UIViewContentModeScaleAspectFill;
+    [self.view addSubview:backdrop];
     self.title = @"Ninebot pro+";
     self.navigationItem.rightBarButtonItem =
         [[UIBarButtonItem alloc] initWithTitle:@"关闭" style:UIBarButtonItemStyleDone
                                          target:self action:@selector(closeTapped)];
 
     UIScrollView *scroll = [UIScrollView new];
+    scroll.backgroundColor = [UIColor clearColor];
     scroll.translatesAutoresizingMaskIntoConstraints = NO;
     [self.view addSubview:scroll];
     UILayoutGuide *guide = self.view.safeAreaLayoutGuide;
@@ -7060,7 +7123,7 @@ static void NECheckSettingsButton(void) {
     aboutName.text = @"Ninebot pro+";
     aboutName.font = [UIFont boldSystemFontOfSize:16];
     UILabel *aboutVer = [UILabel new];
-    aboutVer.text = @"0.7.1";
+    aboutVer.text = @"0.7.2";
     aboutVer.font = [UIFont systemFontOfSize:15];
     aboutVer.textColor = [UIColor secondaryLabelColor];
     [aboutTitleRow addArrangedSubview:aboutName];
@@ -7233,22 +7296,46 @@ static void NECheckSettingsButton(void) {
     return l;
 }
 
-// v0.3.9 美化：把一组行包进白色圆角卡片（iOS 分组表样式）。卡片内边距
-// 上下 8、左右 16；行高 44 + 底部分隔线，开关/按钮离卡片右沿还有 16pt，
-// 再也不会贴着屏幕右边缘。
+// v0.7.2 磨砂玻璃：把一组行包进磨砂玻璃卡片（UIVisualEffectView +
+// 白色亮层 + 白色亮边 + 柔和阴影）。卡片内边距上下 8、左右 16 不变；
+// 内容放进 blurView.contentView，约束锚点跟着 contentView 走。
+// 真的液态玻璃（UIGlassEffect）是 iOS 26 才有的，16.4.1 上没有，这是能
+// 做到最接近的样子（签到弹窗 0.6.8 的黑透磨砂是同款做法）。
 - (UIView *)ne_cardWrappingStack:(UIStackView *)inner {
     UIView *card = [UIView new];
-    card.backgroundColor = [UIColor secondarySystemGroupedBackgroundColor];
+    card.backgroundColor = [UIColor clearColor];
     card.layer.cornerRadius = 12;
-    card.clipsToBounds = YES;
+    // 白色亮边 1pt
+    card.layer.borderColor = [[UIColor colorWithWhite:1 alpha:0.65] CGColor];
+    card.layer.borderWidth = 1;
+    // 柔和阴影（clipsToBounds 必须关，阴影才露得出来）
+    card.layer.shadowColor = [UIColor blackColor].CGColor;
+    card.layer.shadowOpacity = 0.12;
+    card.layer.shadowOffset = CGSizeMake(0, 2);
+    card.layer.shadowRadius = 8;
+    card.clipsToBounds = NO;
     card.translatesAutoresizingMaskIntoConstraints = NO;
+    // 磨砂底：系统材质，随浅色/深色模式自适应
+    UIVisualEffectView *blurView = [[UIVisualEffectView alloc]
+        initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemMaterial]];
+    blurView.frame = card.bounds;
+    blurView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    blurView.layer.cornerRadius = 12;
+    blurView.clipsToBounds = YES;
+    [card addSubview:blurView];
+    // 白色亮层：提亮一点，更接近效果图的玻璃感
+    UIView *tint = [UIView new];
+    tint.backgroundColor = [[UIColor whiteColor] colorWithAlphaComponent:0.12];
+    tint.frame = blurView.contentView.bounds;
+    tint.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    [blurView.contentView addSubview:tint];
     inner.translatesAutoresizingMaskIntoConstraints = NO;
-    [card addSubview:inner];
+    [blurView.contentView addSubview:inner];
     [NSLayoutConstraint activateConstraints:@[
-        [inner.topAnchor constraintEqualToAnchor:card.topAnchor constant:8],
-        [inner.bottomAnchor constraintEqualToAnchor:card.bottomAnchor constant:-8],
-        [inner.leadingAnchor constraintEqualToAnchor:card.leadingAnchor constant:16],
-        [inner.trailingAnchor constraintEqualToAnchor:card.trailingAnchor constant:-16]
+        [inner.topAnchor constraintEqualToAnchor:blurView.contentView.topAnchor constant:8],
+        [inner.bottomAnchor constraintEqualToAnchor:blurView.contentView.bottomAnchor constant:-8],
+        [inner.leadingAnchor constraintEqualToAnchor:blurView.contentView.leadingAnchor constant:16],
+        [inner.trailingAnchor constraintEqualToAnchor:blurView.contentView.trailingAnchor constant:-16]
     ]];
     return card;
 }
