@@ -1,4 +1,4 @@
-// NinebotEnhance iOS v0.6.7 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
+// NinebotEnhance iOS v0.6.8 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
 //
 // v0.6.6 加自动分享（每天领 1 N币，用户 2026-11-24 决定做）：24 号凌晨重抓
 //  实锤分享是 App 自己调 share-callback（加密包，只能重放）+ task/reward
@@ -5369,11 +5369,16 @@ static void NEAutoSignInShowResultPopupOnMain(BOOL success) {
     UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc]
         initWithTarget:overlay action:@selector(removeFromSuperview)];
     [overlay addGestureRecognizer:tap];
-    CGFloat cardW = 250, cardH = 96;
+    // v0.6.8：卡片只比字大一点（按文字实测尺寸 + 少量内边距），背景黑透磨砂，字白色
+    NSString *text = success ? @"今日签到成功" : @"今日签到失败";
+    UIFont *font = [UIFont boldSystemFontOfSize:17];
+    CGSize textSize = [text sizeWithAttributes:@{NSFontAttributeName: font}];
+    CGFloat cardW = ceil(textSize.width) + 36;
+    CGFloat cardH = ceil(textSize.height) + 24;
     UIView *card = [[UIView alloc] initWithFrame:CGRectMake(
         (win.bounds.size.width - cardW) / 2, (win.bounds.size.height - cardH) / 2, cardW, cardH)];
-    card.backgroundColor = [UIColor systemBackgroundColor];
-    card.layer.cornerRadius = 14;
+    card.backgroundColor = [UIColor clearColor];
+    card.layer.cornerRadius = 12;
     // 黑透边框：黑色半透明（alpha 0.55），1.5pt
     card.layer.borderColor = [[UIColor colorWithWhite:0 alpha:0.55] CGColor];
     card.layer.borderWidth = 1.5;
@@ -5381,12 +5386,21 @@ static void NEAutoSignInShowResultPopupOnMain(BOOL success) {
     card.layer.shadowOpacity = 0.25;
     card.layer.shadowOffset = CGSizeMake(0, 2);
     card.layer.shadowRadius = 8;
-    UILabel *label = [[UILabel alloc] initWithFrame:card.bounds];
-    label.text = success ? @"今日签到成功" : @"今日签到失败";
-    label.font = [UIFont boldSystemFontOfSize:17];
-    label.textColor = success ? [UIColor systemGreenColor] : [UIColor systemRedColor];
+    // 黑透磨砂背景
+    UIBlurEffect *blur = [UIBlurEffect effectWithStyle:UIBlurEffectStyleDark];
+    UIVisualEffectView *blurView = [[UIVisualEffectView alloc] initWithEffect:blur];
+    blurView.frame = card.bounds;
+    blurView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    blurView.layer.cornerRadius = 12;
+    blurView.clipsToBounds = YES;
+    [card addSubview:blurView];
+    UILabel *label = [[UILabel alloc] initWithFrame:blurView.contentView.bounds];
+    label.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    label.text = text;
+    label.font = font;
+    label.textColor = [UIColor whiteColor];
     label.textAlignment = NSTextAlignmentCenter;
-    [card addSubview:label];
+    [blurView.contentView addSubview:label];
     [overlay addSubview:card];
     overlay.alpha = 0;
     [win addSubview:overlay];
@@ -6429,7 +6443,7 @@ static void NECheckSettingsButton(void) {
     aboutName.text = @"Ninebot pro+";
     aboutName.font = [UIFont boldSystemFontOfSize:16];
     UILabel *aboutVer = [UILabel new];
-    aboutVer.text = @"0.6.7";
+    aboutVer.text = @"0.6.8";
     aboutVer.font = [UIFont systemFontOfSize:15];
     aboutVer.textColor = [UIColor secondaryLabelColor];
     [aboutTitleRow addArrangedSubview:aboutName];
