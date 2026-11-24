@@ -1,4 +1,4 @@
-// NinebotEnhance iOS v0.7.12 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
+// NinebotEnhance iOS v0.7.13 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
 //
 // v0.7.0 加七彩日行灯（车上的 LED 灯带，ELK-BLEDOB，duoCo Strip 同款，
 //  用户 2026-11-24 决定做）：协议照 Pro+ App 的 ELKStrip.swift，服务
@@ -7,6 +7,10 @@
 //  日行灯”（默认折叠、功能默认关），开关/预设色/自选色/亮度/白色/灯效。
 //  含 0.6.12 全部内容。
 //
+// v0.7.13（用户 2026-11-24 16:38 视频）：分组展开改弹簧动画 + 点组头不再闪——
+//   用户在 4 个预览 GIF 里选了弹簧。原来 hidden 直接切、下面内容硬跳；
+//   改成弹簧动画块里切 hidden + layoutIfNeeded。闪一下是系统按钮的
+//   高亮变色，改自定义按钮、两状态标题色都写死 systemBlue。
 // v0.7.12（用户 2026-11-24 16:31 截图）：顶栏彻底透明，只留一层全屏磨砂——
 //   0.7.11 顶栏跟底图还是不一样、中间还有分割线。根因是结构问题：
 //   顶栏和底图是两块各自糊不同东西的磨砂，颜色永远对不上。修法是
@@ -7169,7 +7173,7 @@ static void NECheckSettingsButton(void) {
     aboutName.text = @"Ninebot pro+";
     aboutName.font = [UIFont boldSystemFontOfSize:16];
     UILabel *aboutVer = [UILabel new];
-    aboutVer.text = @"0.7.12";
+    aboutVer.text = @"0.7.13";
     aboutVer.font = [UIFont systemFontOfSize:15];
     aboutVer.textColor = [UIColor secondaryLabelColor];
     [aboutTitleRow addArrangedSubview:aboutName];
@@ -7445,7 +7449,12 @@ static void NECheckSettingsButton(void) {
 // v0.3.9 追加：折叠分组头（标题 + ▸/▾ 箭头），点一下展开/收起。
 // tag：0 美化娱乐，1 导航增强。折叠状态不持久化，每次进设置页默认都折叠。
 - (UIButton *)groupHeader:(NSString *)title tag:(NSInteger)tag {
-    UIButton *btn = [UIButton buttonWithType:UIButtonTypeSystem];
+    // v0.7.13：系统按钮点按时会自动把标题色变淡一下（高亮态），看着就是
+    // 闪一下。改自定义按钮（不自动变色），Normal/Highlighted 两状态的
+    // 标题色都写死 systemBlue，点的时候只换箭头，字色不动。
+    UIButton *btn = [UIButton buttonWithType:UIButtonTypeCustom];
+    [btn setTitleColor:[UIColor systemBlueColor] forState:UIControlStateNormal];
+    [btn setTitleColor:[UIColor systemBlueColor] forState:UIControlStateHighlighted];
     [btn setTitle:[NSString stringWithFormat:@"▸ %@", title] forState:UIControlStateNormal];
     btn.titleLabel.font = [UIFont boldSystemFontOfSize:16];
     btn.contentHorizontalAlignment = UIControlContentHorizontalAlignmentLeft;
@@ -7461,11 +7470,23 @@ static void NECheckSettingsButton(void) {
         : (sender.tag == 1) ? &NENavGroupKey : &NEELKGroupKey;
     UIView *container = objc_getAssociatedObject(self, key); // 卡片（折叠状态存在卡片上）
     if (!container) return;
-    container.hidden = !container.hidden;
+    BOOL willShow = container.hidden;
     NSString *title = (sender.tag == 0) ? @"美化娱乐"
         : (sender.tag == 1) ? @"导航增强" : @"七彩日行灯";
-    [sender setTitle:[NSString stringWithFormat:@"%@ %@", container.hidden ? @"▸" : @"▾", title]
+    [sender setTitle:[NSString stringWithFormat:@"%@ %@", willShow ? @"▾" : @"▸", title]
             forState:UIControlStateNormal];
+    // v0.7.13：弹簧展开/收起（用户在预览 GIF 里选了弹簧）。hidden 切换 +
+    // layoutIfNeeded 放进弹簧动画块，UIStackView 的布局变化跟着动画走：
+    // 卡片高度带一点回弹地长出来/收回去，下面内容平滑滑动。
+    // 注意 hidden 本身不可动画：展开是真·高度生长；收起时卡片瞬间消失、
+    // 下面内容弹簧滑上去。展开是主要操作，效果跟预览一致。
+    [UIView animateWithDuration:0.45 delay:0
+         usingSpringWithDamping:0.75 initialSpringVelocity:0.5
+                        options:UIViewAnimationOptionCurveEaseInOut
+                     animations:^{
+        container.hidden = !willShow;
+        [self.view layoutIfNeeded];
+    } completion:nil];
 }
 
 // v0.3.9 追加：自定义显示项行——左边标题 + 中间输入框 + 右边开关。
