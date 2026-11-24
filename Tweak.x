@@ -1,4 +1,4 @@
-// NinebotEnhance iOS v0.6.8 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
+// NinebotEnhance iOS v0.6.9 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
 //
 // v0.6.6 加自动分享（每天领 1 N币，用户 2026-11-24 决定做）：24 号凌晨重抓
 //  实锤分享是 App 自己调 share-callback（加密包，只能重放）+ task/reward
@@ -4468,6 +4468,7 @@ static NSString *gCapturedAuthToken = nil; // 仅内存，不写盘、不打日�
 static NSLock *gAuthLock = nil; // %ctor 里建
 static BOOL gAutoSignInDoneToday = NO; // 本次启动已有一次成功/已签（今天不用再试）
 static BOOL gAutoSignInCheckPending = NO; // 已排了一个检查，别重复排
+static BOOL gSignInPopupSuppressOnce = NO; // v0.6.9：本轮是“无 token”跳过，不弹失败窗
 static BOOL gAutoSignInEverScheduled = NO; // 排过一次后重试用 3 秒（首次 6 秒）
 static id gAutoSignInObserver = nil; // become-active 观察者，强引用留着
 
@@ -5421,6 +5422,12 @@ static void NEAutoSignInShowResultPopupOnMain(BOOL success) {
 // 本轮结束时决定弹不弹（主线程跑）：每天第一次出结果 → 弹；今天已弹过
 // 且上次是失败、这次成功了 → 再弹一次报成功；成功过当天不再弹。
 static void NEAutoSignInMaybeShowResultPopup(BOOL success) {
+    // v0.6.9：“无 token”只是还没准备好（等 App 请求抓到 token 会重试），不算失败，不弹
+    if (!success && gSignInPopupSuppressOnce) {
+        gSignInPopupSuppressOnce = NO;
+        return;
+    }
+    gSignInPopupSuppressOnce = NO;
     dispatch_async(dispatch_get_main_queue(), ^{
         NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
         NSString *today = NEAutoSignInTodayString();
@@ -5572,6 +5579,7 @@ static void NEAutoSignInRun(void) {
         NEAutoSignInNoteCheck(@"无 token", -1);
         os_log(gLog, "[SIGN] 跳过：token 或 deviceId 未找到（候选:%ld deviceId:%s）",
                (long)gSignInPassCandidates.count, gSignInPassDeviceId.length >= 8 ? "有" : "无");
+        gSignInPopupSuppressOnce = YES; // v0.6.9：还没准备好，不弹失败窗，等 token 抓到重试
         NEAutoSignInEndPass();
         return;
     }
@@ -5687,15 +5695,28 @@ static void NEAutoSignInScheduleAfter(double seconds) {
 
 // 每次进前台都试着排一次（已签成/已排时 ScheduleAfter 自己会拦）。
 // 万一注入时 App 已在前台（become-active 已发过），直接排一次。
+// v0.6.9：进前台先看本地记录——今天已签过就马上弹成功，不用等网络检查。
+// （只在自动签到开关开着时；每天只弹一次的规则由 MaybeShow 保证。）
+static void NEAutoSignInShowPopupIfSignedToday(void) {
+    if (!NEAutoSignInEnabled()) return;
+    NSString *last = [[NSUserDefaults standardUserDefaults] stringForKey:@"NEAutoSignInLastDate"];
+    if ([NEAutoSignInTodayString() isEqualToString:last]) {
+        NEAutoSignInMaybeShowResultPopup(YES);
+    }
+}
+
 static void NEAutoSignInTriggerIfNeeded(void) {
     if (gAutoSignInObserver) return;
     gAutoSignInObserver = [[NSNotificationCenter defaultCenter]
         addObserverForName:UIApplicationDidBecomeActiveNotification object:nil
         queue:[NSOperationQueue mainQueue] usingBlock:^(NSNotification *note) {
-        NEAutoSignInScheduleAfter(gAutoSignInEverScheduled ? 3.0 : 6.0);
+        NEAutoSignInShowPopupIfSignedToday();
+        NEAutoSignInScheduleAfter(1.0);
     }];
-    if ([[UIApplication sharedApplication] applicationState] == UIApplicationStateActive)
-        NEAutoSignInScheduleAfter(6.0);
+    if ([[UIApplication sharedApplication] applicationState] == UIApplicationStateActive) {
+        NEAutoSignInShowPopupIfSignedToday();
+        NEAutoSignInScheduleAfter(1.0);
+    }
 }
 
 // ---------------- 自动分享（v0.6.6；每天领 1 N币）----------------
@@ -6443,7 +6464,7 @@ static void NECheckSettingsButton(void) {
     aboutName.text = @"Ninebot pro+";
     aboutName.font = [UIFont boldSystemFontOfSize:16];
     UILabel *aboutVer = [UILabel new];
-    aboutVer.text = @"0.6.8";
+    aboutVer.text = @"0.6.9";
     aboutVer.font = [UIFont systemFontOfSize:15];
     aboutVer.textColor = [UIColor secondaryLabelColor];
     [aboutTitleRow addArrangedSubview:aboutName];
