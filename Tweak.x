@@ -1,4 +1,4 @@
-// NinebotEnhance iOS v0.7.13 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
+// NinebotEnhance iOS v0.7.14 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
 //
 // v0.7.0 加七彩日行灯（车上的 LED 灯带，ELK-BLEDOB，duoCo Strip 同款，
 //  用户 2026-11-24 决定做）：协议照 Pro+ App 的 ELKStrip.swift，服务
@@ -7,6 +7,10 @@
 //  日行灯”（默认折叠、功能默认关），开关/预设色/自选色/亮度/白色/灯效。
 //  含 0.6.12 全部内容。
 //
+// v0.7.14（用户 2026-11-24 16:47 视频）：修收起时下面文字顶上去盖住卡片——
+//   0.7.13 收起时卡片还没收完、下面内容已经顶上来重叠。根因是 hidden
+//   不可动画、两边不是同一条曲线；改成高度约束驱动布局动画，卡片
+//   高度和下面内容位置全程同步，卡片开裁剪、内容不溢出。
 // v0.7.13（用户 2026-11-24 16:38 视频）：分组展开改弹簧动画 + 点组头不再闪——
 //   用户在 4 个预览 GIF 里选了弹簧。原来 hidden 直接切、下面内容硬跳；
 //   改成弹簧动画块里切 hidden + layoutIfNeeded。闪一下是系统按钮的
@@ -6177,10 +6181,13 @@ static void NEAutoShareTriggerIfNeeded(void) {
 
 static const char NEHUDButtonKey = 0;
 static const char NEBeautyGroupKey = 0; // 设置页：“美化娱乐”折叠容器
+static const char NEBeautyGroupHeightKey = 0; // “美化娱乐”卡片高度约束（v0.7.14 弹簧同步用）
 static const char NENavGroupKey = 0;    // 设置页：“导航增强”折叠容器
+static const char NENavGroupHeightKey = 0; // “导航增强”卡片高度约束（v0.7.14）
 static const char NESignInRecordKey = 0; // 设置页：自动签到记录 label
 static const char NEShareRecordKey = 0; // 设置页：自动分享记录 label（v0.6.6）
 static const char NEELKGroupKey = 0;    // 设置页：“七彩日行灯”折叠容器（v0.7.0）
+static const char NEELKGroupHeightKey = 0; // “七彩日行灯”卡片高度约束（v0.7.14）
 static const char NEELKStatusKey = 0;   // 设置页：日行灯状态 label（v0.7.0）
 static const char NEELKControlsKey = 0; // 设置页：日行灯命令控件（未连接时禁用，v0.7.0）
 static const char NEELKBrightnessKey = 0; // 设置页：日行灯亮度值 label（v0.7.0）
@@ -6963,6 +6970,13 @@ static void NECheckSettingsButton(void) {
     [self ne_styleSeparatorsInStack:beautyStack];
     UIView *beautyCard = [self ne_cardWrappingStack:beautyStack];
     beautyCard.hidden = YES; // 默认折叠，折叠状态存在卡片上
+    // v0.7.14：高度约束 0（收起时卡片高度由它压到 0，动画里开关它驱动布局）。
+    // 不开 clipsToBounds——卡片阴影靠 clipsToBounds=NO；里面 blurView
+    // 本来就开了裁剪，内容不会溢出。
+    NSLayoutConstraint *beautyH = [beautyCard.heightAnchor constraintEqualToConstant:0];
+    beautyH.active = YES;
+    objc_setAssociatedObject(self, &NEBeautyGroupHeightKey, beautyH,
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     objc_setAssociatedObject(self, &NEBeautyGroupKey, beautyCard,
                              OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     [stack addArrangedSubview:[self groupHeader:@"美化娱乐" tag:0]];
@@ -7014,6 +7028,11 @@ static void NECheckSettingsButton(void) {
     [self ne_styleSeparatorsInStack:navStack];
     UIView *navCard = [self ne_cardWrappingStack:navStack];
     navCard.hidden = YES; // 默认折叠，折叠状态存在卡片上
+    // v0.7.14：高度约束 0（同美化娱乐）。
+    NSLayoutConstraint *navH = [navCard.heightAnchor constraintEqualToConstant:0];
+    navH.active = YES;
+    objc_setAssociatedObject(self, &NENavGroupHeightKey, navH,
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     objc_setAssociatedObject(self, &NENavGroupKey, navCard,
                              OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     [stack addArrangedSubview:[self groupHeader:@"导航增强" tag:1]];
@@ -7155,6 +7174,11 @@ static void NECheckSettingsButton(void) {
     [self ne_styleSeparatorsInStack:elkStack];
     UIView *elkCard = [self ne_cardWrappingStack:elkStack];
     elkCard.hidden = YES; // 默认折叠，折叠状态存在卡片上
+    // v0.7.14：高度约束 0（同美化娱乐）。
+    NSLayoutConstraint *elkH = [elkCard.heightAnchor constraintEqualToConstant:0];
+    elkH.active = YES;
+    objc_setAssociatedObject(self, &NEELKGroupHeightKey, elkH,
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     objc_setAssociatedObject(self, &NEELKGroupKey, elkCard,
                              OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     [stack addArrangedSubview:[self groupHeader:@"七彩日行灯" tag:2]];
@@ -7173,7 +7197,7 @@ static void NECheckSettingsButton(void) {
     aboutName.text = @"Ninebot pro+";
     aboutName.font = [UIFont boldSystemFontOfSize:16];
     UILabel *aboutVer = [UILabel new];
-    aboutVer.text = @"0.7.13";
+    aboutVer.text = @"0.7.14";
     aboutVer.font = [UIFont systemFontOfSize:15];
     aboutVer.textColor = [UIColor secondaryLabelColor];
     [aboutTitleRow addArrangedSubview:aboutName];
@@ -7468,25 +7492,43 @@ static void NECheckSettingsButton(void) {
 - (void)groupHeaderTapped:(UIButton *)sender {
     const char *key = (sender.tag == 0) ? &NEBeautyGroupKey
         : (sender.tag == 1) ? &NENavGroupKey : &NEELKGroupKey;
+    const char *hkey = (sender.tag == 0) ? &NEBeautyGroupHeightKey
+        : (sender.tag == 1) ? &NENavGroupHeightKey : &NEELKGroupHeightKey;
     UIView *container = objc_getAssociatedObject(self, key); // 卡片（折叠状态存在卡片上）
+    NSLayoutConstraint *heightC = objc_getAssociatedObject(self, hkey);
     if (!container) return;
     BOOL willShow = container.hidden;
     NSString *title = (sender.tag == 0) ? @"美化娱乐"
         : (sender.tag == 1) ? @"导航增强" : @"七彩日行灯";
     [sender setTitle:[NSString stringWithFormat:@"%@ %@", willShow ? @"▾" : @"▸", title]
             forState:UIControlStateNormal];
-    // v0.7.13：弹簧展开/收起（用户在预览 GIF 里选了弹簧）。hidden 切换 +
-    // layoutIfNeeded 放进弹簧动画块，UIStackView 的布局变化跟着动画走：
-    // 卡片高度带一点回弹地长出来/收回去，下面内容平滑滑动。
-    // 注意 hidden 本身不可动画：展开是真·高度生长；收起时卡片瞬间消失、
-    // 下面内容弹簧滑上去。展开是主要操作，效果跟预览一致。
-    [UIView animateWithDuration:0.45 delay:0
-         usingSpringWithDamping:0.75 initialSpringVelocity:0.5
-                        options:UIViewAnimationOptionCurveEaseInOut
-                     animations:^{
-        container.hidden = !willShow;
-        [self.view layoutIfNeeded];
-    } completion:nil];
+    // v0.7.14：高度约束驱动弹簧（修 0.7.13 收起重叠）。0.7.13 是 hidden
+    // 切换 + layoutIfNeeded——hidden 不可动画，收起时卡片瞬间消失、下面
+    // 内容弹簧滑上去，弹簧回弹时下面内容会冲过头、顶进卡片还没收完的
+    // 空间。改成：展开时动画块里取消隐藏 + 关掉高度约束，卡片高度带
+    // 回弹长出来；收起时动画块里打开高度约束（压到 0），卡片高度带回弹
+    // 收回去、动画完再 hidden。卡片高度和下面内容位置由同一条布局动画
+    // 驱动，全程同步，不会顶；里面 blurView 本来就开了裁剪，内容不溢出。
+    if (willShow) {
+        [UIView animateWithDuration:0.45 delay:0
+             usingSpringWithDamping:0.75 initialSpringVelocity:0.5
+                            options:UIViewAnimationOptionCurveEaseInOut
+                         animations:^{
+            container.hidden = NO;
+            heightC.active = NO;
+            [self.view layoutIfNeeded];
+        } completion:nil];
+    } else {
+        [UIView animateWithDuration:0.45 delay:0
+             usingSpringWithDamping:0.75 initialSpringVelocity:0.5
+                            options:UIViewAnimationOptionCurveEaseInOut
+                         animations:^{
+            heightC.active = YES;
+            [self.view layoutIfNeeded];
+        } completion:^(BOOL finished){
+            container.hidden = YES;
+        }];
+    }
 }
 
 // v0.3.9 追加：自定义显示项行——左边标题 + 中间输入框 + 右边开关。
