@@ -1,4 +1,4 @@
-// NinebotEnhance iOS v0.7.15 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
+// NinebotEnhance iOS v0.7.16 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
 //
 // v0.7.0 加七彩日行灯（车上的 LED 灯带，ELK-BLEDOB，duoCo Strip 同款，
 //  用户 2026-11-24 决定做）：协议照 Pro+ App 的 ELKStrip.swift，服务
@@ -7,6 +7,16 @@
 //  日行灯”（默认折叠、功能默认关），开关/预设色/自选色/亮度/白色/灯效。
 //  含 0.6.12 全部内容。
 //
+// v0.7.16（用户 2026-11-24 17:30 视频 + 17:31 决定）：动画期间卡片裁剪打开，动画完关回去；展开改平滑无弹簧、速度放慢——
+//   用户 17:31 决定「换成平滑展开算了，速度调慢一点」：展开弹簧改
+//   ease-in-out 0.6s；收起本来就是 ease-in-out，0.35s→0.5s，手感一致。
+// v0.7.16（用户 2026-11-24 17:30 视频）：动画期间卡片裁剪打开，动画完关回去——
+//   0.7.15 只改收起曲线，但展开和收起都还有重叠，根因不是回弹。
+//   动画中途内容还按满尺寸显示、盖住已移位的下面卡片：卡片高度靠
+//   约束在变，但卡片 clipsToBounds=NO（露阴影）、里面 blurView 又
+//   是 autoresizing 不同步，内容没被裁到正在变的高度上。修法：动画
+//   开始设 container.clipsToBounds=YES，内容裁到卡片 bounds 里；
+//   动画完设回 NO，阴影恢复。阴影只在动画 0.35–0.45 秒里藏一下。
 // v0.7.15（用户 2026-11-24 17:14 视频）：收起改无回弹平滑动画，展开保持弹簧——
 //   0.7.14 收起还是怪：弹簧回弹时下面内容往上冲过头、顶进卡片还没
 //   收完的空间。展开回弹往外只留缝没事；收起改 ease-in-out（0.35s，
@@ -7201,7 +7211,7 @@ static void NECheckSettingsButton(void) {
     aboutName.text = @"Ninebot pro+";
     aboutName.font = [UIFont boldSystemFontOfSize:16];
     UILabel *aboutVer = [UILabel new];
-    aboutVer.text = @"0.7.15";
+    aboutVer.text = @"0.7.16";
     aboutVer.font = [UIFont systemFontOfSize:15];
     aboutVer.textColor = [UIColor secondaryLabelColor];
     [aboutTitleRow addArrangedSubview:aboutName];
@@ -7514,23 +7524,31 @@ static void NECheckSettingsButton(void) {
     // v0.7.15：展开保持弹簧（回弹往外、只留缝不重叠）；收起改无回弹的
     // ease-in-out——弹簧收起时下面内容会往上冲过头、顶进卡片还没收完的
     // 空间，就是 0.7.14 视频里「收起来有点怪」的原因。
+    // v0.7.16：动画期间把卡片裁剪打开（clipsToBounds=YES），内容裁到
+    // 卡片正在变的 bounds 里，不溢出盖住下面卡片；动画完设回 NO，阴影
+    // 恢复。只改渲染裁剪，不动布局。
+    // 用户 2026-11-24 17:31 决定「换成平滑展开算了，速度调慢一点」：
+    // 展开和收起都用无回弹的 ease-in-out，展开 0.6s、收起 0.5s。
+    container.clipsToBounds = YES;
     if (willShow) {
-        [UIView animateWithDuration:0.45 delay:0
-             usingSpringWithDamping:0.75 initialSpringVelocity:0.5
+        [UIView animateWithDuration:0.6 delay:0
                             options:UIViewAnimationOptionCurveEaseInOut
                          animations:^{
             container.hidden = NO;
             heightC.active = NO;
             [self.view layoutIfNeeded];
-        } completion:nil];
+        } completion:^(BOOL finished){
+            container.clipsToBounds = NO;
+        }];
     } else {
-        [UIView animateWithDuration:0.35 delay:0
+        [UIView animateWithDuration:0.5 delay:0
                             options:UIViewAnimationOptionCurveEaseInOut
                          animations:^{
             heightC.active = YES;
             [self.view layoutIfNeeded];
         } completion:^(BOOL finished){
             container.hidden = YES;
+            container.clipsToBounds = NO;
         }];
     }
 }
