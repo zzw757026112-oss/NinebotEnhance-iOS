@@ -7442,7 +7442,7 @@ static void NECheckSettingsButton(void) {
     aboutName.text = @"Ninebot pro+";
     aboutName.font = [UIFont boldSystemFontOfSize:16];
     UILabel *aboutVer = [UILabel new];
-    aboutVer.text = @"0.7.26";
+    aboutVer.text = @"0.7.27";
     aboutVer.font = [UIFont systemFontOfSize:15];
     aboutVer.textColor = [UIColor secondaryLabelColor];
     [aboutTitleRow addArrangedSubview:aboutName];
@@ -7518,9 +7518,17 @@ static void NECheckSettingsButton(void) {
 }
 
 // 分享记录行：打开设置页时按最新状态刷一遍（v0.6.6）
+// v0.7.27：今天已分享就显示绿色，跟签到记录一样；否则灰色。
 - (void)refreshShareRecord {
     UILabel *record = objc_getAssociatedObject(self, &NEShareRecordKey);
-    if (record) record.text = NEAutoShareRecordText();
+    if (!record) return;
+    record.text = NEAutoShareRecordText();
+    NSString *last = [[NSUserDefaults standardUserDefaults] stringForKey:@"NEAutoShareLastDate"];
+    if (last.length && [last isEqualToString:NEAutoSignInTodayString()]) {
+        record.textColor = [UIColor systemGreenColor];
+    } else {
+        record.textColor = [UIColor secondaryLabelColor];
+    }
 }
 
 // 分享跑完发来的通知：设置页开着时也刷新记录行
