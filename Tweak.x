@@ -4758,6 +4758,7 @@ static NSString *gCapturedAuthToken = nil; // 仅内存，不写盘、不打日�
 static NSLock *gAuthLock = nil; // %ctor 里建
 static BOOL gAutoSignInDoneToday = NO; // 本次启动已有一次成功/已签（今天不用再试）
 static BOOL gAutoSignInCheckPending = NO; // 已排了一个检查，别重复排
+static BOOL gSignInPassEnded = NO; // v0.7.28：本轮签到已结束（弹窗只在签到跑过时弹）
 static BOOL gSignInPopupSuppressOnce = NO; // v0.6.9：本轮是“无 token”跳过，不弹失败窗
 static BOOL gAutoSignInEverScheduled = NO; // 排过一次后重试用 3 秒（首次 6 秒）
 static id gAutoSignInObserver = nil; // become-active 观察者，强引用留着
@@ -5696,6 +5697,8 @@ static NSData *NEAutoSignInSignBodyWithDeviceId(NSData *tplBody, NSString *devic
 // ---- v0.6.7：签到结果弹窗（每天第一次出结果时弹一次；失败后又成功了再弹一次报成功）----
 // 弹窗记录（NSUserDefaults）：NEAutoSignInPopupLastDate（yyyy-MM-dd）、
 // NEAutoSignInPopupLastSuccess（上次弹的是成功还是失败）。
+static void NEAutoSignInMaybeShowCombinedPopup(void);
+static BOOL NEAutoShareEnabled(void);
 static void NEAutoSignInShowResultPopupOnMain(BOOL success) {
     UIWindow *win = NEKeyWindow();
     if (!win) return;
@@ -5711,11 +5714,28 @@ static void NEAutoSignInShowResultPopupOnMain(BOOL success) {
         initWithTarget:overlay action:@selector(removeFromSuperview)];
     [overlay addGestureRecognizer:tap];
     // v0.7.2：弹窗也改磨砂玻璃（跟设置页卡片同款浅色磨砂），字色改成成功绿/失败红
-    NSString *text = success ? @"今日签到成功" : @"今日签到失败";
+    // v0.7.28：改两行——第一行签到结果，第二行分享结果（分享开关开着才显示），各自变色。
+    NSString *line1 = success ? @"今日签到成功" : @"今日签到失败";
+    BOOL line1OK = success;
+    NSString *line2 = nil;
+    BOOL line2OK = YES;
+    if (NEAutoShareEnabled()) {
+        NSString *shareLast = [[NSUserDefaults standardUserDefaults] stringForKey:@"NEAutoShareLastDate"];
+        NSString *shareRes = [[NSUserDefaults standardUserDefaults] stringForKey:@"NEAutoShareLastResult"];
+        if ([shareLast isEqualToString:NEAutoSignInTodayString()]) {
+            if ([shareRes isEqualToString:@"今天已领过"]) { line2 = @"今日分享已领过"; line2OK = YES; }
+            else if (shareRes.length) { line2 = [NSString stringWithFormat:@"今日分享成功，%@", shareRes]; line2OK = YES; }
+            else { line2 = @"今日分享成功"; line2OK = YES; }
+        } else {
+            line2 = @"今日分享失败"; line2OK = NO;
+        }
+    }
     UIFont *font = [UIFont boldSystemFontOfSize:17];
-    CGSize textSize = [text sizeWithAttributes:@{NSFontAttributeName: font}];
-    CGFloat cardW = ceil(textSize.width) + 36;
-    CGFloat cardH = ceil(textSize.height) + 24;
+    CGSize s1 = [line1 sizeWithAttributes:@{NSFontAttributeName: font}];
+    CGSize s2 = line2 ? [line2 sizeWithAttributes:@{NSFontAttributeName: font}] : CGSizeZero;
+    CGFloat cardW = MAX(ceil(s1.width), ceil(s2.width)) + 36;
+    CGFloat lineH = ceil(s1.height);
+    CGFloat cardH = lineH + (line2 ? (6 + ceil(s2.height)) : 0) + 24;
     UIView *card = [[UIView alloc] initWithFrame:CGRectMake(
         (win.bounds.size.width - cardW) / 2, (win.bounds.size.height - cardH) / 2, cardW, cardH)];
     card.backgroundColor = [UIColor clearColor];
@@ -5741,13 +5761,22 @@ static void NEAutoSignInShowResultPopupOnMain(BOOL success) {
     tint.frame = blurView.contentView.bounds;
     tint.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     [blurView.contentView addSubview:tint];
-    UILabel *label = [[UILabel alloc] initWithFrame:blurView.contentView.bounds];
-    label.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-    label.text = text;
-    label.font = font;
-    label.textColor = success ? [UIColor systemGreenColor] : [UIColor systemRedColor];
-    label.textAlignment = NSTextAlignmentCenter;
-    [blurView.contentView addSubview:label];
+    CGFloat labelY = 12;
+    UILabel *label1 = [[UILabel alloc] initWithFrame:CGRectMake(0, labelY, cardW, lineH)];
+    label1.text = line1;
+    label1.font = font;
+    label1.textColor = line1OK ? [UIColor systemGreenColor] : [UIColor systemRedColor];
+    label1.textAlignment = NSTextAlignmentCenter;
+    [blurView.contentView addSubview:label1];
+    if (line2) {
+        labelY += lineH + 6;
+        UILabel *label2 = [[UILabel alloc] initWithFrame:CGRectMake(0, labelY, cardW, ceil(s2.height))];
+        label2.text = line2;
+        label2.font = font;
+        label2.textColor = line2OK ? [UIColor systemGreenColor] : [UIColor systemRedColor];
+        label2.textAlignment = NSTextAlignmentCenter;
+        [blurView.contentView addSubview:label2];
+    }
     [overlay addSubview:card];
     overlay.alpha = 0;
     [win addSubview:overlay];
@@ -5792,8 +5821,9 @@ static void NEAutoSignInEndPass(void) {
     gSignInPassCandidates = nil;
     gSignInPassIndex = -1;
     gSignInPassDeviceId = nil;
-    // v0.6.7：本轮结束，签到结果弹窗（每天第一次出结果时弹；失败后又成功的再弹一次）
-    NEAutoSignInMaybeShowResultPopup(gAutoSignInDoneToday);
+    gSignInPassEnded = YES;
+    // v0.7.28：本轮结束，等签到和分享都出结果了再一起弹（每天第一次出结果时弹）
+    NEAutoSignInMaybeShowCombinedPopup();
 }
 
 // 换下一个候选（同一轮内不重不漏）；没有下一个时结束本轮，诊断停在
@@ -6171,6 +6201,34 @@ static void NEAutoShareScheduleAfter(double seconds);
 static void NEAutoShareRun(void);
 static void NEAutoShareEndPass(void) {
     gAutoShareCheckPending = NO;
+    // v0.7.28：分享这轮结束，试试弹组合弹窗（签到那轮可能已先结束在等分享）
+    NEAutoSignInMaybeShowCombinedPopup();
+}
+
+// v0.7.28：弹窗等签到和分享都出结果了再一起弹。分享启动晚（首次 6 秒）
+// 跑得慢，签到先结束时先等等；分享结束时再来一次。15 秒兜底：分享迟迟
+// 不结束就先弹（分享行按当时状态显示）。签到开关关着（本轮没跑）时不弹。
+static void NEAutoSignInMaybeShowCombinedPopup(void) {
+    if (!gSignInPassEnded) return;
+    if (gAutoSignInCheckPending) return;
+    BOOL shareEnabled = NEAutoShareEnabled();
+    NSString *today = NEAutoSignInTodayString();
+    NSString *shareLast = [[NSUserDefaults standardUserDefaults] stringForKey:@"NEAutoShareLastDate"];
+    BOOL shareDoneToday = [shareLast isEqualToString:today];
+    BOOL shareSettled = !shareEnabled || shareDoneToday || (gAutoShareEverScheduled && !gAutoShareCheckPending);
+    if (!shareSettled) {
+        static BOOL timeoutScheduled = NO;
+        if (!timeoutScheduled) {
+            timeoutScheduled = YES;
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(15.0 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{
+                timeoutScheduled = NO;
+                NEAutoSignInMaybeShowCombinedPopup();
+            });
+        }
+        return;
+    }
+    NEAutoSignInMaybeShowResultPopup(gAutoSignInDoneToday);
 }
 
 // 任务列表 / 领奖用的头：Authorization + Accept + 四个 H5 头 +
@@ -7442,7 +7500,7 @@ static void NECheckSettingsButton(void) {
     aboutName.text = @"Ninebot pro+";
     aboutName.font = [UIFont boldSystemFontOfSize:16];
     UILabel *aboutVer = [UILabel new];
-    aboutVer.text = @"0.7.27";
+    aboutVer.text = @"0.7.28";
     aboutVer.font = [UIFont systemFontOfSize:15];
     aboutVer.textColor = [UIColor secondaryLabelColor];
     [aboutTitleRow addArrangedSubview:aboutName];
