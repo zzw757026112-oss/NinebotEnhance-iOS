@@ -5740,9 +5740,9 @@ static void NEAutoSignInShowResultPopupOnMain(BOOL success) {
         (win.bounds.size.width - cardW) / 2, (win.bounds.size.height - cardH) / 2, cardW, cardH)];
     card.backgroundColor = [UIColor clearColor];
     card.layer.cornerRadius = 12;
-    // 白色亮边 1pt（跟设置页磨砂卡片同款）
-    card.layer.borderColor = [[UIColor colorWithWhite:1 alpha:0.65] CGColor];
-    card.layer.borderWidth = 1;
+    // v0.7.29：亮边加粗加亮（2pt / alpha 0.9），比设置页卡片的 1pt / 0.65 更明显
+    card.layer.borderColor = [[UIColor colorWithWhite:1 alpha:0.9] CGColor];
+    card.layer.borderWidth = 2;
     card.layer.shadowColor = [UIColor blackColor].CGColor;
     card.layer.shadowOpacity = 0.12;
     card.layer.shadowOffset = CGSizeMake(0, 2);
@@ -7500,7 +7500,7 @@ static void NECheckSettingsButton(void) {
     aboutName.text = @"Ninebot pro+";
     aboutName.font = [UIFont boldSystemFontOfSize:16];
     UILabel *aboutVer = [UILabel new];
-    aboutVer.text = @"0.7.28";
+    aboutVer.text = @"0.7.29";
     aboutVer.font = [UIFont systemFontOfSize:15];
     aboutVer.textColor = [UIColor secondaryLabelColor];
     [aboutTitleRow addArrangedSubview:aboutName];
