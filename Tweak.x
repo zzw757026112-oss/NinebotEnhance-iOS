@@ -717,11 +717,11 @@ static double         gSpeedKmh     = 0;
 static CFAbsoluteTime gSpeedAt      = 0;
 static BOOL           gWasOverspeed = NO;
 
-// 百变仪表行程统计（v0.7.30）：GPS 累计里程 + 最高速，从插件加载后开始记，不持久化、不重置
+// 百变仪表行程统计（v0.7.31）：GPS 累计里程 + 最高速，从插件加载后开始记，不持久化、不重置
 static double gTripDistanceKm = 0;
 static double gTripMaxSpeedKmh = 0;
 static CLLocation *gTripLastLoc = nil;
-// 百变仪表真实车辆数据（v0.7.30）：设备页 label 钩子捕获的原文真值（自定义显示替换前的值）；-1 = 还没读到
+// 百变仪表真实车辆数据（v0.7.31）：设备页 label 钩子捕获的原文真值（自定义显示替换前的值）；-1 = 还没读到
 static int gRealBatteryPct = -1;
 static double gRealRangeKm = -1;
 
@@ -765,7 +765,7 @@ static BOOL NEHUDSpeedAlert(void) {
     id v = [[NSUserDefaults standardUserDefaults] objectForKey:@"NEHUDSpeedAlert"];
     return v ? [v boolValue] : NO;
 }
-// 百变仪表：超维引擎主题开关（v0.7.30，默认关；key: NEThemeHyperdrive）
+// 百变仪表：超维引擎主题开关（v0.7.31，默认关；key: NEThemeHyperdrive）
 static BOOL NEThemeHyperdriveEnabled(void) {
     id v = [[NSUserDefaults standardUserDefaults] objectForKey:@"NEThemeHyperdrive"];
     return v ? [v boolValue] : NO;
@@ -1533,7 +1533,7 @@ static NSString *NEValueForKnownLabel(UILabel *label) {
     return aval;
 }
 
-// 百变仪表：捕获设备页真实电量/续航（v0.7.30）。
+// 百变仪表：捕获设备页真实电量/续航（v0.7.31）。
 // label 钩子收到的原文就是 App 的真值——自定义显示替换前先记下来，
 // 这样主题里显示的永远是真电量/真续航，绝不会是用户自定义的 9999。
 // 只在主题开着时跑（关着时零开销）；读到的值存全局，主题渲染时直接取。
@@ -3682,7 +3682,7 @@ static void RefreshWeatherIfNeeded(void) {
         [gDataLock lock];
         gSpeedKmh = kmh;
         gSpeedAt = CFAbsoluteTimeGetCurrent();
-        // 百变仪表行程统计（v0.7.30）：累计位移 + 最高速（从插件加载后开始记）
+        // 百变仪表行程统计（v0.7.31）：累计位移 + 最高速（从插件加载后开始记）
         if (gTripLastLoc) {
             CLLocationDistance d = [loc distanceFromLocation:gTripLastLoc];
             if (d >= 0 && d < 1000) gTripDistanceKm += d / 1000.0;
@@ -3722,7 +3722,7 @@ static void RefreshWeatherIfNeeded(void) {
 
 // 超速提醒或翻页时钟开 → 连续定位（best 精度）；都关 → 恢复单次定位
 // （3km 精度，只够天气用）。主线程调（gLocMgr 在主队列创建，回调也在主队列）。
-// v0.7.30：百变仪表开着也要连续定位（GPS 车速 + 里程累计）。
+// v0.7.31：百变仪表开着也要连续定位（GPS 车速 + 里程累计）。
 static void NEApplySpeedLocationMode(void) {
     if (!gLocMgr) return;
     if (NEHUDSpeedAlert() || NEHUDShowSlot() || NEThemeHyperdriveEnabled()) {
@@ -4642,7 +4642,7 @@ static CGImageRef OverlayForSize(size_t w, size_t h) {
     return out;
 }
 
-// ---------------- 百变仪表：超维引擎主题（v0.7.30）----------------
+// ---------------- 百变仪表：超维引擎主题（v0.7.31）----------------
 // NinebotDashX HyperdriveTheme 的 Objective-C 翻写（CoreGraphics）。
 // 848×480 全屏画，第一笔就是不透明深蓝底（直接盖掉官方原画面）。
 // 右上角不画东西（车自带的右上角信息卡在那）；功率/电压没有数据源不画，
@@ -4700,19 +4700,11 @@ static void NEThemeDrawCenteredText(CGContextRef ctx, NSString *str, CGFloat cen
     CGSize sz = [str sizeWithAttributes:@{NSFontAttributeName: font}];
     NEThemeDrawText(ctx, str, centerX - sz.width / 2, y, font, color, shadowColor);
 }
-static CGImageRef NEThemeHyperdriveFrame(size_t w, size_t h) {
+// 绘图本体：数据由调用方传入（v0.7.31 从 NEThemeHyperdriveFrame 里拆出来，
+// 预览图复用同一套画法，不另写一份）。
+static CGImageRef NEThemeHyperdriveFrameWithData(size_t w, size_t h,
+        double speedKmh, int batteryPct, double rangeKm, double tripKm, double maxSpeed) {
     if (w == 0 || h == 0) return NULL;
-    // 快照：车速（3 秒内才新鲜，否则按 0）、电量、续航、里程、最高速
-    [gDataLock lock];
-    double speedKmh = gSpeedKmh;
-    CFAbsoluteTime speedAt = gSpeedAt;
-    int batteryPct = gRealBatteryPct;
-    double rangeKm = gRealRangeKm;
-    double tripKm = gTripDistanceKm;
-    double maxSpeed = gTripMaxSpeedKmh;
-    [gDataLock unlock];
-    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
-    if ((now - speedAt) > 3.0) speedKmh = 0;
     if (speedKmh < 0) speedKmh = 0;
 
     const CGFloat W = 848, H = 480;
@@ -4825,6 +4817,27 @@ static CGImageRef NEThemeHyperdriveFrame(size_t w, size_t h) {
     return out;
 }
 
+// 投屏用：读实时数据快照再画（车速 3 秒内才新鲜，否则按 0）
+static CGImageRef NEThemeHyperdriveFrame(size_t w, size_t h) {
+    if (w == 0 || h == 0) return NULL;
+    [gDataLock lock];
+    double speedKmh = gSpeedKmh;
+    CFAbsoluteTime speedAt = gSpeedAt;
+    int batteryPct = gRealBatteryPct;
+    double rangeKm = gRealRangeKm;
+    double tripKm = gTripDistanceKm;
+    double maxSpeed = gTripMaxSpeedKmh;
+    [gDataLock unlock];
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if ((now - speedAt) > 3.0) speedKmh = 0;
+    return NEThemeHyperdriveFrameWithData(w, h, speedKmh, batteryPct, rangeKm, tripKm, maxSpeed);
+}
+
+// 预览图（v0.7.31）：固定示例数据——车速 68、极速 89、电量 78%、续航 42km、里程 12.5km
+static CGImageRef NEThemeHyperdrivePreviewFrame(void) {
+    return NEThemeHyperdriveFrameWithData(848, 480, 68, 78, 42, 12.5, 89);
+}
+
 // 原画面 + 叠加层合成一张新图。全程不翻转：
 // 原图直接画（v0.1.1/0.1.2 已证明这样导航是正的），叠加层也是
 // 直接画——RenderOverlay 本版已不再翻转，出来的就是正向图。
@@ -4835,7 +4848,7 @@ static CGImageRef NEThemeHyperdriveFrame(size_t w, size_t h) {
 static CGImageRef CompositeWithOverlay(CGImageRef original) {
     size_t w = CGImageGetWidth(original), h = CGImageGetHeight(original);
     if (w == 0 || h == 0) return NULL;
-    // 百变仪表（v0.7.30）：开关开时只画超维引擎主题一整帧，不画原图、不画小胶囊/翻页时钟
+    // 百变仪表（v0.7.31）：开关开时只画超维引擎主题一整帧，不画原图、不画小胶囊/翻页时钟
     if (NEThemeHyperdriveEnabled()) return NEThemeHyperdriveFrame(w, h);
     CGImageRef overlay = OverlayForSize(w, h);
     if (!overlay) return NULL;
@@ -5993,7 +6006,7 @@ static void NEAutoSignInShowResultPopupOnMain(BOOL success) {
         (win.bounds.size.width - cardW) / 2, (win.bounds.size.height - cardH) / 2, cardW, cardH)];
     card.backgroundColor = [UIColor clearColor];
     card.layer.cornerRadius = 12;
-    // v0.7.30：亮边加粗加亮（2pt / alpha 0.9），比设置页卡片的 1pt / 0.65 更明显
+    // v0.7.31：亮边加粗加亮（2pt / alpha 0.9），比设置页卡片的 1pt / 0.65 更明显
     card.layer.borderColor = [[UIColor colorWithWhite:1 alpha:0.9] CGColor];
     card.layer.borderWidth = 2;
     card.layer.shadowColor = [UIColor blackColor].CGColor;
@@ -6758,7 +6771,8 @@ static const char NENavGroupKey = 0;    // 设置页：“导航增强”折叠�
 static const char NESignInRecordKey = 0; // 设置页：自动签到记录 label
 static const char NEShareRecordKey = 0; // 设置页：自动分享记录 label（v0.6.6）
 static const char NEELKGroupKey = 0;    // 设置页：“七彩日行灯”折叠容器（v0.7.0）
-static const char NEThemeGroupKey = 0;  // 设置页：“百变仪表”折叠容器（v0.7.30）
+static const char NEThemeGroupKey = 0;  // 设置页：“百变仪表”折叠容器（v0.7.31）
+static const char NEThemePreviewKey = 0; // 设置页：“百变仪表”预览图 UIImageView（v0.7.31）
 static const char NEELKStatusKey = 0;   // 设置页：日行灯状态 label（v0.7.0）
 static const char NEELKControlsKey = 0; // 设置页：日行灯命令控件（未连接时禁用，v0.7.0）
 static const char NEELKBrightnessKey = 0; // 设置页：日行灯亮度值 label（v0.7.0）
@@ -7741,7 +7755,7 @@ static void NECheckSettingsButton(void) {
     [stack addArrangedSubview:[self groupHeader:@"七彩日行灯" tag:2]];
     [stack addArrangedSubview:elkCard];
 
-    // ---- 百变仪表组（默认折叠；v0.7.30）----
+    // ---- 百变仪表组（默认折叠；v0.7.31）----
     UIStackView *themeStack = [UIStackView new];
     themeStack.axis = UILayoutConstraintAxisVertical;
     themeStack.spacing = 0;
@@ -7751,7 +7765,21 @@ static void NECheckSettingsButton(void) {
     themeNote.font = [UIFont systemFontOfSize:13];
     themeNote.textColor = [UIColor secondaryLabelColor];
     themeNote.numberOfLines = 0;
-    [themeStack addArrangedSubview:[self ne_footnoteView:themeNote]];
+    UIView *themeNoteView = [self ne_footnoteView:themeNote];
+    [themeStack addArrangedSubview:themeNoteView];
+    // 预览图（v0.7.31）：运行时现画，示例数据；只在卡片展开时画一次。
+    // 宽跟卡片内容同宽，高按 848:480 自适应；圆角 12 跟卡片一致。
+    UIImageView *themePreview = [UIImageView new];
+    themePreview.translatesAutoresizingMaskIntoConstraints = NO;
+    themePreview.contentMode = UIViewContentModeScaleAspectFill;
+    themePreview.clipsToBounds = YES;
+    themePreview.layer.cornerRadius = 12;
+    [themePreview.heightAnchor constraintEqualToAnchor:themePreview.widthAnchor
+                                            multiplier:(480.0 / 848.0)].active = YES;
+    [themeStack addArrangedSubview:themePreview];
+    [themeStack setCustomSpacing:8 afterView:themeNoteView];
+    objc_setAssociatedObject(self, &NEThemePreviewKey, themePreview,
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     [self ne_styleSeparatorsInStack:themeStack];
     UIView *themeCard = [self ne_cardWrappingStack:themeStack];
     themeCard.hidden = YES; // 默认折叠，折叠状态存在卡片上
@@ -7772,7 +7800,7 @@ static void NECheckSettingsButton(void) {
     aboutName.text = @"Ninebot pro+";
     aboutName.font = [UIFont boldSystemFontOfSize:16];
     UILabel *aboutVer = [UILabel new];
-    aboutVer.text = @"0.7.30";
+    aboutVer.text = @"0.7.31";
     aboutVer.font = [UIFont systemFontOfSize:15];
     aboutVer.textColor = [UIColor secondaryLabelColor];
     [aboutTitleRow addArrangedSubview:aboutName];
@@ -8087,6 +8115,19 @@ static void NECheckSettingsButton(void) {
     // v0.7.19：瞬间切换，不做动画。动画六轮都没修好，改回 0.7.12
     // 之前的样子：点一下马上展开/收起，干净利落。
     container.hidden = !willShow;
+    // v0.7.31 百变仪表：展开时现画预览图（只画一次）
+    if (sender.tag == 3 && willShow) [self ne_renderThemePreviewIfNeeded];
+}
+
+// 百变仪表预览图（v0.7.31）：卡片展开时现画一帧（示例数据），只画一次；
+// 折叠时不画。画出来是 848×480 的静态快照，星流相位取当前 systemUptime。
+- (void)ne_renderThemePreviewIfNeeded {
+    UIImageView *iv = objc_getAssociatedObject(self, &NEThemePreviewKey);
+    if (!iv || iv.image) return;
+    CGImageRef frame = NEThemeHyperdrivePreviewFrame();
+    if (!frame) return;
+    iv.image = [UIImage imageWithCGImage:frame];
+    CGImageRelease(frame);
 }
 
 // v0.3.9 追加：自定义显示项行——左边标题 + 中间输入框 + 右边开关。
@@ -8285,7 +8326,7 @@ static void NECheckSettingsButton(void) {
     if ([key isEqualToString:@"NEHUDSpeedAlert"] ||
         [key isEqualToString:@"NEHUDShowSlot"] ||
         [key isEqualToString:@"NEThemeHyperdrive"]) NEApplySpeedLocationMode();
-    // v0.7.30 百变仪表：开关开着就装 label 钩子（读设备页真电量/真续航）
+    // v0.7.31 百变仪表：开关开着就装 label 钩子（读设备页真电量/真续航）
     if ([key isEqualToString:@"NEThemeHyperdrive"] && sw.isOn) {
         NEInstallLabelHookIfNeeded();
     }
@@ -9113,7 +9154,7 @@ static void NEProbeStart(void) {
             gHasBgImage = YES;
     }
     // v0.7.21：最近行驶文案跟着车辆图走——有自定义车辆图也要装文字钩子。
-    // v0.7.30：百变仪表开着也要装（读设备页真电量/真续航）。
+    // v0.7.31：百变仪表开着也要装（读设备页真电量/真续航）。
     if (gValidity9999 || gNCoins || gMileage || gLevel || gTitle || gSignDays || gHasVehicleImage || NEThemeHyperdriveEnabled())
         NEInstallLabelHookIfNeeded();
     if (gValidity9999 || gNCoins || gMileage || gLevel || gTitle || gSignDays || gHasVehicleImage)
