@@ -1,4 +1,4 @@
-// NinebotEnhance iOS v0.7.26 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
+// NinebotEnhance iOS v0.7.34 — 九号出行(cn.ninebot.segway) 投屏画面 HUD 叠加
 //
 // v0.7.0 加七彩日行灯（车上的 LED 灯带，ELK-BLEDOB，duoCo Strip 同款，
 //  用户 2026-11-24 决定做）：协议照 Pro+ App 的 ELKStrip.swift，服务
@@ -6,6 +6,11 @@
 //  认名字含 bledob 的设备，收 3 秒选 RSSI 最强的一台。设置页新分组“七彩
 //  日行灯”（默认折叠、功能默认关），开关/预设色/自选色/亮度/白色/灯效。
 //  含 0.6.12 全部内容。
+//
+// v0.7.34 — NEW: 百变仪表新增「高达机甲」主题（左高达头内嵌 JPEG、顶部金属横条纯装饰、
+//   G 值条+计时+海拔+极速+均速+指南针+手机电量+实时音乐；右上角灰卡区留空，
+//   不画灰卡数据、顶部不放任何数据；主题互斥，预览图同机制；CoreMotion 海拔/
+//   指南针/行程计时/音乐（MPNowPlayingInfoCenter 1 秒一刷）
 //
 // v0.7.26（用户 2026-11-25 01:07 手动分享+领了 N 币、之后导的诊断仍显示模板未捕获）：
 //   根因——插件只钩了 NSURLSession dataTaskWithRequest:completionHandler:，RN 的
@@ -687,6 +692,8 @@
 #import <objc/runtime.h>
 #import <substrate.h>
 #import <PhotosUI/PhotosUI.h>
+#import <CoreMotion/CoreMotion.h>
+#import <MediaPlayer/MediaPlayer.h>
 #import <dlfcn.h>
 // 翻页时钟不依赖任何图片资源（卡片和数字全是运行时画的）。
 // RiderImage.h / RiderMotion.h（v0.2.0 像素骑行小人）已不用，留在仓库里。
@@ -724,6 +731,19 @@ static CLLocation *gTripLastLoc = nil;
 // 百变仪表真实车辆数据（v0.7.33）：设备页 label 钩子捕获的原文真值（自定义显示替换前的值）；-1 = 还没读到
 static int gRealBatteryPct = -1;
 static double gRealRangeKm = -1;
+// 高达机甲主题数据（v0.7.34）：海拔/指南针/G 值/行程计时/音乐，全部只读缓存，帧回调只读不阻塞
+static double gAltitudeM = -10000;  // GPS 海拔（米，-10000 = 还没读到）
+static double gGpsAccuracyM = -1;   // GPS 水平精度（米，-1 = 还没读到）
+static CFAbsoluteTime gTripStartTime = 0; // 行程计时起点（第一次定位时记）
+static double gHeadingDeg = -1;     // 指南针（度，0=北，-1 = 还没读到）
+static double gGForce = 0;          // 纵向 G 值（加速度计 Y 轴 userAcceleration，低通平滑后），+ 加速 / - 制动
+static CMMotionManager *gMotionMgr = nil; // 高达主题用（懒启动）
+static NSString *gMusicTitle = nil; // 正在播放：歌名（nil = 没在放）
+static NSString *gMusicArtist = nil; // 歌手
+static double gMusicElapsed = 0;    // 已播秒数（读到的那一刻）
+static double gMusicDuration = 0;   // 总时长秒
+static double gMusicRate = 0;       // 播放速率（0=暂停）
+static CFAbsoluteTime gMusicReadAt = 0; // 音乐信息读到的时间
 
 // 超速语音朗读（0.3.8）：合成器 static 持有，边沿触发时读一次；
 //  局部变量说到一半会被释放、没声——所以必须长期持有。
@@ -769,6 +789,25 @@ static BOOL NEHUDSpeedAlert(void) {
 static BOOL NEThemeHyperdriveEnabled(void) {
     id v = [[NSUserDefaults standardUserDefaults] objectForKey:@"NEThemeHyperdrive"];
     return v ? [v boolValue] : NO;
+}
+// 百变仪表：高达机甲主题开关（v0.7.34，默认关；key: NEThemeGundam；与超维引擎互斥）
+static BOOL NEThemeGundamEnabled(void) {
+    id v = [[NSUserDefaults standardUserDefaults] objectForKey:@"NEThemeGundam"];
+    return v ? [v boolValue] : NO;
+}
+// 在设置页视图层级里按 key 找 UISwitch（主题互斥时把另一个开关拨掉；
+// accessibilityIdentifier 由 switchRow 设成 key）
+static UISwitch *NEFindSwitchWithKey(UIView *root, NSString *key) {
+    if (!root || !key) return nil;
+    for (UIView *v in root.subviews) {
+        if ([v isKindOfClass:[UISwitch class]]) {
+            UISwitch *sw = (UISwitch *)v;
+            if ([sw.accessibilityIdentifier isEqualToString:key]) return sw;
+        }
+        UISwitch *found = NEFindSwitchWithKey(v, key);
+        if (found) return found;
+    }
+    return nil;
 }
 // 限速 km/h：默认 60，读出来 clamp 到 30–120
 static NSInteger NEHUDSpeedLimit(void) {
@@ -3668,6 +3707,9 @@ static void RefreshWeatherIfNeeded(void) {
     [gDataLock lock];
     gLat = loc.coordinate.latitude;
     gLon = loc.coordinate.longitude;
+    gAltitudeM = loc.altitude;
+    gGpsAccuracyM = loc.horizontalAccuracy;
+    if (gTripStartTime == 0) gTripStartTime = CFAbsoluteTimeGetCurrent();
     gHaveCoords = YES;
     [gDataLock unlock];
     os_log(gLog, "[WX] 定位已拿到，开始拉天气");
@@ -3714,6 +3756,15 @@ static void RefreshWeatherIfNeeded(void) {
         }
     }
 }
+// 指南针（v0.7.34 高达机甲）：只在高达主题开着时跑（见 NEApplySpeedLocationMode）
+- (void)locationManager:(CLLocationManager *)manager didUpdateHeading:(CLHeading *)newHeading {
+    double h = newHeading.trueHeading;
+    if (h < 0) h = newHeading.magneticHeading;
+    if (h < 0) return;
+    [gDataLock lock];
+    gHeadingDeg = h;
+    [gDataLock unlock];
+}
 - (void)locationManager:(CLLocationManager *)manager
        didFailWithError:(NSError *)error {
     os_log(gLog, "[WX] 定位失败：%{public}s", error.localizedDescription.UTF8String);
@@ -3725,13 +3776,19 @@ static void RefreshWeatherIfNeeded(void) {
 // v0.7.33：百变仪表开着也要连续定位（GPS 车速 + 里程累计）。
 static void NEApplySpeedLocationMode(void) {
     if (!gLocMgr) return;
-    if (NEHUDSpeedAlert() || NEHUDShowSlot() || NEThemeHyperdriveEnabled()) {
+    if (NEHUDSpeedAlert() || NEHUDShowSlot() || NEThemeHyperdriveEnabled() || NEThemeGundamEnabled()) {
         gLocMgr.desiredAccuracy = kCLLocationAccuracyBest;
         [gLocMgr startUpdatingLocation];
     } else {
         [gLocMgr stopUpdatingLocation];
         gLocMgr.desiredAccuracy = kCLLocationAccuracyThreeKilometers;
         [gLocMgr requestLocation];
+    }
+    // v0.7.34 高达机甲：指南针只在高达主题开着时跑（超维引擎不用）
+    if (NEThemeGundamEnabled()) {
+        if ([CLLocationManager headingAvailable]) [gLocMgr startUpdatingHeading];
+    } else {
+        [gLocMgr stopUpdatingHeading];
     }
 }
 
@@ -3798,6 +3855,54 @@ static void NERefreshVolume(void) {
     [gDataLock lock];
     gVolume = vol;
     [gDataLock unlock];
+}
+
+// ---------------- 音乐（系统正在播放，1 秒一刷；高达机甲主题用）----------------
+// 读 MPNowPlayingInfoCenter（系统级，网易云/QQ音乐/Apple Music 都写它）。
+// 只读缓存进全局量，帧回调只读不阻塞。没在放歌时 title 为 nil，主题里不画音乐栏。
+static void NERefreshMusic(void) {
+    // 主线程调用（跟音量同一条 1 秒定时器）。
+    NSDictionary *info = [MPNowPlayingInfoCenter defaultCenter].nowPlayingInfo;
+    NSString *title = info[MPMediaItemPropertyTitle];
+    NSString *artist = info[MPMediaItemPropertyArtist];
+    double elapsed = [info[MPNowPlayingInfoPropertyElapsedPlaybackTime] doubleValue];
+    double duration = [info[MPNowPlayingInfoPropertyPlaybackDuration] doubleValue];
+    double rate = 1;
+    if (info[MPNowPlayingInfoPropertyPlaybackRate])
+        rate = [info[MPNowPlayingInfoPropertyPlaybackRate] doubleValue];
+    [gDataLock lock];
+    gMusicTitle = [title copy];
+    gMusicArtist = [artist copy];
+    gMusicElapsed = elapsed;
+    gMusicDuration = duration;
+    gMusicRate = rate;
+    gMusicReadAt = CFAbsoluteTimeGetCurrent();
+    [gDataLock unlock];
+}
+
+// ---------------- G 值（手机加速度计，CoreMotion；高达机甲主题用）----------------
+// 纵向 G = deviceMotion userAcceleration Y 轴（去重力后的纯加速度），
+// 低通平滑去抖，夹到 [-2, +2]。懒启动：第一次画高达主题时才建。
+static void NEStartMotionIfNeeded(void) {
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        CMMotionManager *m = [CMMotionManager new];
+        if (!m.isDeviceMotionAvailable) return;
+        gMotionMgr = m;
+        m.deviceMotionUpdateInterval = 1.0 / 30.0;
+        NSOperationQueue *q = [[NSOperationQueue alloc] init];
+        q.name = @"com.user.ninebotenhance.motion";
+        q.maxConcurrentOperationCount = 1;
+        [m startDeviceMotionUpdatesToQueue:q withHandler:^(CMDeviceMotion *motion, NSError *error) {
+            if (!motion || error) return;
+            double ay = motion.userAcceleration.y;
+            [gDataLock lock];
+            gGForce = gGForce * 0.8 + ay * 0.2;
+            if (gGForce > 2) gGForce = 2;
+            if (gGForce < -2) gGForce = -2;
+            [gDataLock unlock];
+        }];
+    });
 }
 
 // ---------------- 来电（CallKit，公开 API）----------------
@@ -4855,10 +4960,803 @@ static CGImageRef NEThemeHyperdrivePreviewFrame(void) {
 // 结果 HUD 被镜像到上方的仪表表盘遮挡区里看不见；v0.1.2 两边
 // 都不翻但 RenderOverlay 内部翻了，结果 HUD 字是倒的。
 // 本版：两边都不翻，RenderOverlay 内部也不翻，导航和 HUD 都正。
+// ---------------- 百变仪表：高达机甲主题（v0.7.34）----------------
+// 布局（848×480 设计空间）：顶部原车顶栏留空；顶部金属横条纯装饰
+// （银渐变+金边+分段指示灯，不写任何字和数字）；右上角灰卡区
+// （x 636–827, y 56–230）留空（车机画灰卡）；左侧高达头（内嵌 JPEG）；
+// 中间 G 值条+计时+海拔+极速+均速；底部音乐栏（实时正在播放）；
+// 右下指南针；手机电量。
+// 不画：当前车速/档位/功率/里程/车辆电量（灰卡里已有）；顶部不放任何数据
+// （原车顶栏已有时间/音乐/READY）。
+// 高达头内嵌 JPEG（base64，280×378，约 33KB；v0.7.34）
+static const char kNEGundamHeadJPEGBase64[] =
+"/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAQDAwMDAgQDAwMEBAQFBgoGBgUFBgwICQcKDgwPDg4MDQ0PERYTDxAVEQ0NExoTFRcY"
+"GRkZDxIbHRsYHRYYGRj/2wBDAQQEBAYFBgsGBgsYEA0QGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgY"
+"GBgYGBgYGBj/wAARCAF6ARgDASIAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUF"
+"BAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVW"
+"V1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi"
+"4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAEC"
+"AxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVm"
+"Z2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq"
+"8vP09fb3+Pn6/9oADAMBAAIRAxEAPwD461vVWlldVfO7Iduu72+lYBJ+tI8nmOXPA6AVZs7fzn8xxiNfXvXVuZNktpbqE8+bjuB/"
+"WnSOHYkKcds9qWVi7FSMD0pnQcVqlYzbuAwcZHFSBVPIyKYoOcnp6U8/pWiZIjKaToOetBb14qMn5yN2aTYCtzRtJpmCT2p4U+Xn"
+"P5UrgkBjAbPNOAGBnn3pPm2g5J9acueuelMAwvYcUm1R2oznoTQCSehoEIRgDGPxoAGMGlI7nJpBwPWgAA7DpTtvPQYpATg4BNJl"
+"sHgjNADxx24pQ30FRAnPOaf26GgB4+91pxwBUQY55zxSsxI6iqEBJOT2PpTWOMd6UHjFI2SaYDsZHTmmbMHHNOGKcFAGc0gGjIzT"
+"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"
+"JHvRVzu1FYOmi73P/9k=";
+
+
+// 高达头图片（内嵌 JPEG，解一次缓存起来）
+static CGImageRef NEGundamHeadImage(void) {
+    static CGImageRef cached = NULL;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        NSString *b64 = [NSString stringWithUTF8String:kNEGundamHeadJPEGBase64];
+        NSData *data = [[NSData alloc] initWithBase64EncodedString:b64 options:0];
+        if (!data) return;
+        CGImageSourceRef src = CGImageSourceCreateWithData((CFDataRef)data, NULL);
+        if (src) {
+            cached = CGImageSourceCreateImageAtIndex(src, 0, NULL);
+            CFRelease(src);
+        }
+    });
+    return cached;
+}
+
+// 装饰金属横条（v0.7.34）：银渐变 + 上下金边 + 中央分段指示灯，
+// 不写任何字和数字。y 36–104，全宽。
+static void NEThemeGundamTopBar(CGContextRef ctx) {
+    const CGFloat W = 848;
+    CGFloat y0 = 36, y1 = 104;
+    NSTimeInterval t = [[NSProcessInfo processInfo] systemUptime];
+    // 银渐变底（纵向：浅银 -> 深银）
+    CGContextSaveGState(ctx);
+    CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
+    CGFloat locs[2] = {0, 1};
+    CGFloat comps[8] = {0.93,0.94,0.96,1.0, 0.52,0.55,0.60,1.0};
+    CGGradientRef grad = CGGradientCreateWithColorComponents(cs, comps, locs, 2);
+    CGContextAddRect(ctx, CGRectMake(0, y0, W, y1 - y0));
+    CGContextClip(ctx);
+    CGContextDrawLinearGradient(ctx, grad, CGPointMake(0, y0), CGPointMake(0, y1), 0);
+    CGGradientRelease(grad);
+    CGColorSpaceRelease(cs);
+    CGContextRestoreGState(ctx);
+    // 上下金边
+    CGContextSaveGState(ctx);
+    CGContextSetStrokeColorWithColor(ctx, [UIColor colorWithRed:0.85 green:0.65 blue:0.2 alpha:1].CGColor);
+    CGContextSetLineWidth(ctx, 3);
+    CGContextMoveToPoint(ctx, 0, y0 + 1.5);
+    CGContextAddLineToPoint(ctx, W, y0 + 1.5);
+    CGContextMoveToPoint(ctx, 0, y1 - 1.5);
+    CGContextAddLineToPoint(ctx, W, y1 - 1.5);
+    CGContextStrokePath(ctx);
+    CGContextRestoreGState(ctx);
+    // 中央分段指示灯底板（黑底圆角）
+    CGFloat bw = 340, bh = 30, bx = (W - bw) / 2, by = y0 + (y1 - y0 - bh) / 2;
+    CGContextSaveGState(ctx);
+    CGContextSetFillColorWithColor(ctx, [UIColor colorWithWhite:0.05 alpha:1].CGColor);
+    CGPathRef plate = CGPathCreateWithRoundedRect(CGRectMake(bx, by, bw, bh), 8, 8, NULL);
+    CGContextAddPath(ctx, plate);
+    CGContextFillPath(ctx);
+    CGPathRelease(plate);
+    // 5 段灯（红/蓝/绿/暗/红），亮度随时间轻微呼吸（装饰，无数据含义）
+    UIColor *segColors[5];
+    segColors[0] = [UIColor colorWithRed:1.0 green:0.15 blue:0.2 alpha:1];
+    segColors[1] = [UIColor colorWithRed:0.2 green:0.5 blue:1.0 alpha:1];
+    segColors[2] = [UIColor colorWithRed:0.2 green:0.95 blue:0.3 alpha:1];
+    segColors[3] = [UIColor colorWithWhite:0.35 alpha:1];
+    segColors[4] = [UIColor colorWithRed:1.0 green:0.15 blue:0.2 alpha:1];
+    CGFloat segW = 56, gap = 8, sx = bx + 12;
+    for (int i = 0; i < 5; i++) {
+        CGFloat pulse = 0.75 + 0.25 * sin(t * 2.0 + i * 1.3);
+        UIColor *c = [segColors[i] colorWithAlphaComponent:pulse];
+        CGContextSetFillColorWithColor(ctx, c.CGColor);
+        CGPathRef r = CGPathCreateWithRoundedRect(CGRectMake(sx, by + 6, segW, bh - 12), 4, 4, NULL);
+        CGContextAddPath(ctx, r);
+        CGContextFillPath(ctx);
+        CGPathRelease(r);
+        sx += segW + gap;
+    }
+    CGContextRestoreGState(ctx);
+}
+
+// 航向转罗盘方位（N/NE/E/SE/S/SW/W/NW）
+static NSString *NEThemeCompassPoint(double deg) {
+    static NSString *pts[8] = {@"N", @"NE", @"E", @"SE", @"S", @"SW", @"W", @"NW"};
+    int idx = (int)lround(fmod(deg + 360.0, 360.0) / 45.0) % 8;
+    return pts[idx];
+}
+
+// 计时格式化 HH:MM:SS
+static NSString *NEThemeTimerString(double seconds) {
+    if (seconds < 0) seconds = 0;
+    int s = (int)lround(seconds);
+    return [NSString stringWithFormat:@"%02d:%02d:%02d", s / 3600, (s / 60) % 60, s % 60];
+}
+
+// 高达机甲主题绘图本体（v0.7.34）：数据由调用方传入，预览图复用同一套画法
+static CGImageRef NEThemeGundamFrameWithData(size_t w, size_t h,
+        double gForce, double tripElapsedSec, double altitudeM, double gpsAccuracyM,
+        double topSpeedKmh, double avgSpeedKmh, double headingDeg, int phoneBatteryPct,
+        NSString *musicTitle, NSString *musicArtist, double musicElapsed, double musicDuration) {
+    if (w == 0 || h == 0) return NULL;
+    if (gForce > 2) gForce = 2;
+    if (gForce < -2) gForce = -2;
+    const CGFloat W = 848, H = 480;
+    CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
+    CGContextRef ctx = CGBitmapContextCreate(NULL, w, h, 8, 0, cs,
+        kCGImageAlphaPremultipliedFirst | kCGBitmapByteOrder32Little);
+    CGColorSpaceRelease(cs);
+    if (!ctx) return NULL;
+    CGContextTranslateCTM(ctx, 0, (CGFloat)h);
+    CGContextScaleCTM(ctx, 1, -1);
+    CGContextSetTextMatrix(ctx, CGAffineTransformIdentity);
+    CGContextScaleCTM(ctx, (CGFloat)w / W, (CGFloat)h / H);
+    UIColor *cyan = [UIColor colorWithRed:0.13 green:0.83 blue:0.93 alpha:1];
+    UIColor *gold = [UIColor colorWithRed:0.85 green:0.65 blue:0.2 alpha:1];
+    UIColor *dim = [UIColor colorWithWhite:0.62 alpha:1];
+    UIColor *white = [UIColor whiteColor];
+    // 底：不透明深色，全屏盖掉官方原画面
+    CGContextSetFillColorWithColor(ctx, [UIColor colorWithRed:0.02 green:0.03 blue:0.06 alpha:1].CGColor);
+    CGContextFillRect(ctx, CGRectMake(0, 0, W, H));
+    // 顶部金属横条（装饰，不写字）
+    NEThemeGundamTopBar(ctx);
+    // （右上角灰卡区 x 636–827, y 56–230 故意留空，车机画灰卡）
+    // 高达头（左）：圆角金边框
+    CGImageRef head = NEGundamHeadImage();
+    if (head) {
+        CGRect headRect = CGRectMake(20, 116, 260, 351);
+        CGContextSaveGState(ctx);
+        CGPathRef clip = CGPathCreateWithRoundedRect(headRect, 16, 16, NULL);
+        CGContextAddPath(ctx, clip);
+        CGContextClip(ctx);
+        CGPathRelease(clip);
+        CGContextDrawImage(ctx, headRect, head);
+        CGContextRestoreGState(ctx);
+        CGContextSaveGState(ctx);
+        CGContextSetStrokeColorWithColor(ctx, [gold colorWithAlphaComponent:0.9].CGColor);
+        CGContextSetLineWidth(ctx, 2);
+        CGPathRef border = CGPathCreateWithRoundedRect(headRect, 16, 16, NULL);
+        CGContextAddPath(ctx, border);
+        CGContextStrokePath(ctx);
+        CGPathRelease(border);
+        CGContextRestoreGState(ctx);
+    }
+    // ---- 中间列 x 300–640 ----
+    // G 值条
+    NEThemeDrawText(ctx, @"G-FORCE", 300, 126,
+                    [UIFont monospacedDigitSystemFontOfSize:16 weight:UIFontWeightSemibold], cyan, nil);
+    NSString *gStr = [NSString stringWithFormat:@"%+.2f G", gForce];
+    UIFont *gFont = [UIFont monospacedDigitSystemFontOfSize:24 weight:UIFontWeightBold];
+    CGSize gSz = [gStr sizeWithAttributes:@{NSFontAttributeName: gFont}];
+    NEThemeDrawText(ctx, gStr, 640 - gSz.width, 122, gFont, white, nil);
+    CGFloat barX0 = 300, barX1 = 640, barY = 152, barH = 20, barCX = 470;
+    CGContextSaveGState(ctx);
+    CGContextSetFillColorWithColor(ctx, [UIColor colorWithWhite:0.15 alpha:1].CGColor);
+    CGPathRef track = CGPathCreateWithRoundedRect(CGRectMake(barX0, barY, barX1 - barX0, barH), 10, 10, NULL);
+    CGContextAddPath(ctx, track);
+    CGContextFillPath(ctx);
+    CGPathRelease(track);
+    CGFloat fillX = barCX + (CGFloat)(gForce / 2.0) * (barX1 - barCX);
+    CGFloat fx0 = MIN(barCX, fillX), fx1 = MAX(barCX, fillX);
+    if (fx1 - fx0 > 1) {
+        CGContextSetFillColorWithColor(ctx, (gForce >= 0 ? cyan : [UIColor colorWithRed:1.0 green:0.2 blue:0.25 alpha:1]).CGColor);
+        CGPathRef fill = CGPathCreateWithRoundedRect(CGRectMake(fx0, barY, fx1 - fx0, barH), 10, 10, NULL);
+        CGContextAddPath(ctx, fill);
+        CGContextFillPath(ctx);
+        CGPathRelease(fill);
+    }
+    CGContextSetStrokeColorWithColor(ctx, [UIColor colorWithWhite:0.9 alpha:1].CGColor);
+    CGContextSetLineWidth(ctx, 2);
+    CGContextMoveToPoint(ctx, barCX, barY - 3);
+    CGContextAddLineToPoint(ctx, barCX, barY + barH + 3);
+    CGContextStrokePath(ctx);
+    CGContextRestoreGState(ctx);
+    UIFont *tickFont = [UIFont monospacedDigitSystemFontOfSize:11 weight:UIFontWeightMedium];
+    for (int v = -2; v <= 2; v++) {
+        CGFloat tx = barCX + (CGFloat)(v / 2.0) * (barX1 - barCX);
+        NSString *ts = [NSString stringWithFormat:@"%d", v];
+        CGSize tsz = [ts sizeWithAttributes:@{NSFontAttributeName: tickFont}];
+        NEThemeDrawText(ctx, ts, tx - tsz.width / 2, 178, tickFont, dim, nil);
+    }
+    // 计时
+    NEThemeDrawText(ctx, @"计时", 300, 206,
+                    [UIFont systemFontOfSize:16 weight:UIFontWeightSemibold], dim, nil);
+    NEThemeDrawText(ctx, NEThemeTimerString(tripElapsedSec), 300, 224,
+                    [UIFont monospacedDigitSystemFontOfSize:34 weight:UIFontWeightBold], white, nil);
+    // 海拔
+    NEThemeDrawText(ctx, @"海拔", 300, 266,
+                    [UIFont systemFontOfSize:16 weight:UIFontWeightSemibold], dim, nil);
+    NSString *altStr = (altitudeM > -9000)
+        ? [NSString stringWithFormat:@"%.0f m", altitudeM] : @"--";
+    NEThemeDrawText(ctx, altStr, 360, 262,
+                    [UIFont monospacedDigitSystemFontOfSize:28 weight:UIFontWeightBold], white, nil);
+    if (gpsAccuracyM >= 0) {
+        NSString *accStr = [NSString stringWithFormat:@"GPS ±%.0fm", gpsAccuracyM];
+        NEThemeDrawText(ctx, accStr, 520, 270,
+                        [UIFont monospacedDigitSystemFontOfSize:14 weight:UIFontWeightMedium], dim, nil);
+    }
+    // 极速（GPS 最高速，不是当前车速）
+    NEThemeDrawText(ctx, @"极速", 300, 308,
+                    [UIFont systemFontOfSize:16 weight:UIFontWeightSemibold], dim, nil);
+    NSString *topStr = [NSString stringWithFormat:@"%.0f km/h", topSpeedKmh];
+    NEThemeDrawText(ctx, topStr, 360, 304,
+                    [UIFont monospacedDigitSystemFontOfSize:28 weight:UIFontWeightBold], cyan, nil);
+    // 均速
+    NEThemeDrawText(ctx, @"均速", 300, 350,
+                    [UIFont systemFontOfSize:16 weight:UIFontWeightSemibold], dim, nil);
+    NSString *avgStr = [NSString stringWithFormat:@"%.0f km/h", avgSpeedKmh];
+    NEThemeDrawText(ctx, avgStr, 360, 346,
+                    [UIFont monospacedDigitSystemFontOfSize:28 weight:UIFontWeightBold], white, nil);
+    // 音乐栏（有在放才画；没在放整块留空）
+    if (musicTitle.length > 0) {
+        CGFloat mx0 = 300, mx1 = 640, my0 = 396, my1 = 472;
+        CGContextSaveGState(ctx);
+        CGContextSetFillColorWithColor(ctx, [UIColor colorWithWhite:0.08 alpha:1].CGColor);
+        CGPathRef mbox = CGPathCreateWithRoundedRect(CGRectMake(mx0, my0, mx1 - mx0, my1 - my0), 12, 12, NULL);
+        CGContextAddPath(ctx, mbox);
+        CGContextFillPath(ctx);
+        CGPathRelease(mbox);
+        CGContextSetStrokeColorWithColor(ctx, [UIColor colorWithWhite:0.18 alpha:1].CGColor);
+        CGContextSetLineWidth(ctx, 1);
+        CGPathRef mbor = CGPathCreateWithRoundedRect(CGRectMake(mx0, my0, mx1 - mx0, my1 - my0), 12, 12, NULL);
+        CGContextAddPath(ctx, mbor);
+        CGContextStrokePath(ctx);
+        CGPathRelease(mbor);
+        CGContextRestoreGState(ctx);
+        NSString *title = musicTitle;
+        if (title.length > 18) title = [[title substringToIndex:18] stringByAppendingString:@"…"];
+        NEThemeDrawText(ctx, title, mx0 + 12, my0 + 8,
+                        [UIFont boldSystemFontOfSize:20], white, nil);
+        NSString *artist = musicArtist ?: @"";
+        if (artist.length > 14) artist = [[artist substringToIndex:14] stringByAppendingString:@"…"];
+        NEThemeDrawText(ctx, artist, mx0 + 12, my0 + 34,
+                        [UIFont systemFontOfSize:14], dim, nil);
+        if (musicDuration > 0) {
+            NSString *timeStr = [NSString stringWithFormat:@"%02d:%02d / %02d:%02d",
+                       (int)musicElapsed / 60, (int)musicElapsed % 60,
+                       (int)musicDuration / 60, (int)musicDuration % 60];
+            UIFont *timeFont = [UIFont monospacedDigitSystemFontOfSize:14 weight:UIFontWeightMedium];
+            CGSize tsz = [timeStr sizeWithAttributes:@{NSFontAttributeName: timeFont}];
+            NEThemeDrawText(ctx, timeStr, mx1 - 12 - tsz.width, my0 + 34, timeFont, cyan, nil);
+        }
+        CGFloat px0 = mx0 + 12, px1 = mx1 - 12, py = my1 - 14;
+        CGContextSaveGState(ctx);
+        CGContextSetFillColorWithColor(ctx, [UIColor colorWithWhite:0.2 alpha:1].CGColor);
+        CGPathRef ptrack = CGPathCreateWithRoundedRect(CGRectMake(px0, py, px1 - px0, 6), 3, 3, NULL);
+        CGContextAddPath(ctx, ptrack);
+        CGContextFillPath(ctx);
+        CGPathRelease(ptrack);
+        if (musicDuration > 0 && musicElapsed > 0) {
+            CGFloat frac = MIN(1.0, musicElapsed / musicDuration);
+            CGContextSetFillColorWithColor(ctx, cyan.CGColor);
+            CGPathRef pfill = CGPathCreateWithRoundedRect(CGRectMake(px0, py, (px1 - px0) * frac, 6), 3, 3, NULL);
+            CGContextAddPath(ctx, pfill);
+            CGContextFillPath(ctx);
+            CGPathRelease(pfill);
+        }
+        CGContextRestoreGState(ctx);
+    }
+    // ---- 右下指南针（灰卡区下方）----
+    CGFloat ccx = 746, ccy = 330, cr = 84;
+    CGContextSaveGState(ctx);
+    CGContextSetStrokeColorWithColor(ctx, [UIColor colorWithWhite:0.3 alpha:1].CGColor);
+    CGContextSetLineWidth(ctx, 2);
+    CGContextAddArc(ctx, ccx, ccy, cr, 0, 2 * M_PI, 0);
+    CGContextStrokePath(ctx);
+    for (int i = 0; i < 12; i++) {
+        CGFloat a = (CGFloat)i / 12 * 2 * M_PI;
+        CGFloat r1 = cr - 6, r2 = cr - 14;
+        CGContextSetStrokeColorWithColor(ctx, [UIColor colorWithWhite:0.5 alpha:1].CGColor);
+        CGContextSetLineWidth(ctx, (i % 3 == 0) ? 3 : 1.5);
+        CGContextMoveToPoint(ctx, ccx + cos(a) * r1, ccy + sin(a) * r1);
+        CGContextAddLineToPoint(ctx, ccx + cos(a) * r2, ccy + sin(a) * r2);
+        CGContextStrokePath(ctx);
+    }
+    // N 放在环内顶部（环外顶部是灰卡区，不能画）
+    NEThemeDrawCenteredText(ctx, @"N", ccx, ccy - cr + 10,
+                            [UIFont boldSystemFontOfSize:18], white, nil);
+    double hd = (headingDeg >= 0) ? headingDeg : 0;
+    CGFloat ha = (CGFloat)((hd - 90) * M_PI / 180.0);
+    CGFloat tipR = cr - 34, tailR = cr - 44;
+    CGFloat nx = ccx + cos(ha) * tipR, ny = ccy + sin(ha) * tipR;
+    CGFloat tx2 = ccx - cos(ha) * tailR, ty2 = ccy - sin(ha) * tailR;
+    CGContextSetStrokeColorWithColor(ctx, cyan.CGColor);
+    CGContextSetLineWidth(ctx, 4);
+    CGContextSetLineCap(ctx, kCGLineCapRound);
+    CGContextMoveToPoint(ctx, tx2, ty2);
+    CGContextAddLineToPoint(ctx, nx, ny);
+    CGContextStrokePath(ctx);
+    CGContextSetFillColorWithColor(ctx, gold.CGColor);
+    CGContextAddArc(ctx, ccx, ccy, 5, 0, 2 * M_PI, 0);
+    CGContextFillPath(ctx);
+    CGContextRestoreGState(ctx);
+    NSString *hdStr = (headingDeg >= 0)
+        ? [NSString stringWithFormat:@"%@ %.0f°", NEThemeCompassPoint(headingDeg), headingDeg]
+        : @"--";
+    NEThemeDrawCenteredText(ctx, hdStr, ccx, ccy + cr + 8,
+                            [UIFont monospacedDigitSystemFontOfSize:20 weight:UIFontWeightBold], cyan, nil);
+    NSString *pbStr = (phoneBatteryPct >= 0)
+        ? [NSString stringWithFormat:@"手机 %d%%", phoneBatteryPct] : @"手机 --";
+    UIColor *pbColor = (phoneBatteryPct >= 0 && phoneBatteryPct < 20)
+        ? [UIColor colorWithRed:1.0 green:0.2 blue:0.3 alpha:1]
+        : [UIColor colorWithRed:0.2 green:0.9 blue:0.45 alpha:1];
+    NEThemeDrawCenteredText(ctx, pbStr, ccx, ccy + cr + 34,
+                            [UIFont monospacedDigitSystemFontOfSize:18 weight:UIFontWeightBold], pbColor, nil);
+    CGImageRef out = CGBitmapContextCreateImage(ctx);
+    CGContextRelease(ctx);
+    return out;
+}
+
+// 投屏用：读实时数据快照再画高达机甲主题
+static CGImageRef NEThemeGundamFrame(size_t w, size_t h) {
+    if (w == 0 || h == 0) return NULL;
+    NEStartMotionIfNeeded();
+    [gDataLock lock];
+    double gForce = gGForce;
+    double altitudeM = gAltitudeM;
+    double gpsAccuracyM = gGpsAccuracyM;
+    double topSpeed = gTripMaxSpeedKmh;
+    double tripKm = gTripDistanceKm;
+    double heading = gHeadingDeg;
+    CFAbsoluteTime start = gTripStartTime;
+    NSString *mTitle = gMusicTitle;
+    NSString *mArtist = gMusicArtist;
+    double mElapsed = gMusicElapsed, mDuration = gMusicDuration, mRate = gMusicRate;
+    CFAbsoluteTime mReadAt = gMusicReadAt;
+    [gDataLock unlock];
+    float battLevel = [UIDevice currentDevice].batteryLevel;
+    int phoneBatt = (battLevel < 0) ? -1 : (int)lround(battLevel * 100);
+    double elapsed = (start > 0) ? (CFAbsoluteTimeGetCurrent() - start) : 0;
+    if (elapsed < 0) elapsed = 0;
+    double avg = (elapsed > 60 && tripKm > 0) ? (tripKm / (elapsed / 3600.0)) : 0;
+    double curElapsed = mElapsed;
+    if (mRate > 0 && mReadAt > 0) {
+        curElapsed = mElapsed + (CFAbsoluteTimeGetCurrent() - mReadAt);
+        if (mDuration > 0 && curElapsed > mDuration) curElapsed = mDuration;
+    }
+    if (curElapsed < 0) curElapsed = 0;
+    return NEThemeGundamFrameWithData(w, h, gForce, elapsed, altitudeM, gpsAccuracyM,
+        topSpeed, avg, heading, phoneBatt, mTitle, mArtist, curElapsed, mDuration);
+}
+
+// 预览图（v0.7.34）：固定示例数据——G +0.35、计时 01:14:32、海拔 106m、
+// GPS ±5m、极速 89、均速 42、航向 50°、手机 89%、音乐 Nana in the.../私人漫游
+static CGImageRef NEThemeGundamPreviewFrame(void) {
+    return NEThemeGundamFrameWithData(848, 480,
+        0.35, 1*3600+14*60+32, 106, 5, 89, 42, 50, 89,
+        @"Nana in the...", @"私人漫游", 83, 225);
+}
+
 static CGImageRef CompositeWithOverlay(CGImageRef original) {
     size_t w = CGImageGetWidth(original), h = CGImageGetHeight(original);
     if (w == 0 || h == 0) return NULL;
     // 百变仪表（v0.7.33）：开关开时只画超维引擎主题一整帧，不画原图、不画小胶囊/翻页时钟
+    if (NEThemeGundamEnabled()) return NEThemeGundamFrame(w, h);
     if (NEThemeHyperdriveEnabled()) return NEThemeHyperdriveFrame(w, h);
     CGImageRef overlay = OverlayForSize(w, h);
     if (!overlay) return NULL;
@@ -7770,8 +8668,9 @@ static void NECheckSettingsButton(void) {
     themeStack.axis = UILayoutConstraintAxisVertical;
     themeStack.spacing = 0;
     [themeStack addArrangedSubview:[self switchRow:@"超维引擎主题" key:@"NEThemeHyperdrive" on:NEThemeHyperdriveEnabled()]];
+    [themeStack addArrangedSubview:[self switchRow:@"高达机甲主题" key:@"NEThemeGundam" on:NEThemeGundamEnabled()]];
     UILabel *themeNote = [UILabel new];
-    themeNote.text = @"投屏时用超维引擎仪表替换官方仪表，电量续航为实车数据。";
+    themeNote.text = @"投屏时用选中的仪表主题替换官方仪表。超维引擎显示车速电量续航（实车数据）；高达机甲不画原车灰卡、不重复灰卡数据，顶部只留装饰横条，另显示 G 值/计时/海拔/极速/均速/指南针/手机电量/正在播放的音乐。";
     themeNote.font = [UIFont systemFontOfSize:13];
     themeNote.textColor = [UIColor secondaryLabelColor];
     themeNote.numberOfLines = 0;
@@ -7786,7 +8685,7 @@ static void NECheckSettingsButton(void) {
     themePreview.layer.cornerRadius = 12;
     [themePreview.heightAnchor constraintEqualToAnchor:themePreview.widthAnchor
                                             multiplier:(480.0 / 848.0)].active = YES;
-    themePreview.hidden = !NEThemeHyperdriveEnabled(); // v0.7.33：开关关着就不显示预览图
+    themePreview.hidden = !(NEThemeHyperdriveEnabled() || NEThemeGundamEnabled()); // v0.7.34：两个主题都关着就不显示预览图
     [themeStack addArrangedSubview:themePreview];
     [themeStack setCustomSpacing:8 afterView:themeNoteView];
     objc_setAssociatedObject(self, &NEThemePreviewKey, themePreview,
@@ -7811,7 +8710,7 @@ static void NECheckSettingsButton(void) {
     aboutName.text = @"Ninebot pro+";
     aboutName.font = [UIFont boldSystemFontOfSize:16];
     UILabel *aboutVer = [UILabel new];
-    aboutVer.text = @"0.7.33";
+    aboutVer.text = @"0.7.34";
     aboutVer.font = [UIFont systemFontOfSize:15];
     aboutVer.textColor = [UIColor secondaryLabelColor];
     [aboutTitleRow addArrangedSubview:aboutName];
@@ -8127,7 +9026,7 @@ static void NECheckSettingsButton(void) {
     // 之前的样子：点一下马上展开/收起，干净利落。
     container.hidden = !willShow;
     // v0.7.33 百变仪表：展开时现画预览图（只画一次；开关关着不画）
-    if (sender.tag == 3 && willShow && NEThemeHyperdriveEnabled()) [self ne_renderThemePreviewIfNeeded];
+    if (sender.tag == 3 && willShow && (NEThemeHyperdriveEnabled() || NEThemeGundamEnabled())) [self ne_renderThemePreviewIfNeeded];
 }
 
 // 百变仪表预览图（v0.7.33）：卡片展开时现画一帧（示例数据），只画一次；
@@ -8135,8 +9034,10 @@ static void NECheckSettingsButton(void) {
 - (void)ne_renderThemePreviewIfNeeded {
     UIImageView *iv = objc_getAssociatedObject(self, &NEThemePreviewKey);
     if (!iv || iv.image) return;
-    if (!NEThemeHyperdriveEnabled()) return; // v0.7.33：开关关着不画
-    CGImageRef frame = NEThemeHyperdrivePreviewFrame();
+    CGImageRef frame = NULL;
+    if (NEThemeGundamEnabled()) frame = NEThemeGundamPreviewFrame();
+    else if (NEThemeHyperdriveEnabled()) frame = NEThemeHyperdrivePreviewFrame();
+    else return; // v0.7.34：两个主题都关着不画
     if (!frame) return;
     iv.image = [UIImage imageWithCGImage:frame];
     CGImageRelease(frame);
@@ -8337,17 +9238,28 @@ static void NECheckSettingsButton(void) {
     // 超速提醒或翻页时钟开关变化时，立刻切换定位模式（连续定位开/关）
     if ([key isEqualToString:@"NEHUDSpeedAlert"] ||
         [key isEqualToString:@"NEHUDShowSlot"] ||
-        [key isEqualToString:@"NEThemeHyperdrive"]) NEApplySpeedLocationMode();
+        [key isEqualToString:@"NEThemeHyperdrive"] ||
+        [key isEqualToString:@"NEThemeGundam"]) NEApplySpeedLocationMode();
     // v0.7.33 百变仪表：开关开着就装 label 钩子（读设备页真电量/真续航）
     if ([key isEqualToString:@"NEThemeHyperdrive"] && sw.isOn) {
         NEInstallLabelHookIfNeeded();
     }
-    // v0.7.33 百变仪表：预览图跟着开关走——关就立即藏，开就显示（没画过现画）
-    if ([key isEqualToString:@"NEThemeHyperdrive"]) {
+    // v0.7.34 百变仪表：主题互斥——开一个就关另一个（只改 defaults + 对方开关 UI，
+    // 不触发对方回调）；预览图跟着走（清缓存重画新主题，都关就藏）
+    if ([key isEqualToString:@"NEThemeHyperdrive"] || [key isEqualToString:@"NEThemeGundam"]) {
+        if (sw.isOn) {
+            NSString *otherKey = [key isEqualToString:@"NEThemeGundam"] ? @"NEThemeHyperdrive" : @"NEThemeGundam";
+            [[NSUserDefaults standardUserDefaults] setBool:NO forKey:otherKey];
+            UISwitch *otherSw = NEFindSwitchWithKey(self.view, otherKey);
+            if (otherSw) otherSw.on = NO;
+        }
+        if ([key isEqualToString:@"NEThemeGundam"] && sw.isOn) NERefreshMusic();
         UIImageView *iv = objc_getAssociatedObject(self, &NEThemePreviewKey);
         if (iv) {
-            iv.hidden = !sw.isOn;
-            if (sw.isOn) [self ne_renderThemePreviewIfNeeded];
+            iv.image = nil;
+            BOOL anyOn = NEThemeHyperdriveEnabled() || NEThemeGundamEnabled();
+            iv.hidden = !anyOn;
+            if (anyOn) [self ne_renderThemePreviewIfNeeded];
         }
     }
     // v0.3.9：有效期 9999 开关——同步缓存并按需装钩子（关掉后钩子留着但直接走原实现）
@@ -9243,11 +10155,12 @@ static void NEProbeStart(void) {
 
         // 音量：每秒一刷（主线程）
         NERefreshVolume();
+        NERefreshMusic();
         gVolumeTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0,
                                               dispatch_get_main_queue());
         dispatch_source_set_timer(gVolumeTimer, dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC),
                                   NSEC_PER_SEC, NSEC_PER_SEC / 2);
-        dispatch_source_set_event_handler(gVolumeTimer, ^{ NERefreshVolume(); });
+        dispatch_source_set_event_handler(gVolumeTimer, ^{ NERefreshVolume(); NERefreshMusic(); });
         dispatch_resume(gVolumeTimer);
 
         // HUD 设置按钮：每 3 秒看一次最上层页面，只在“我的”页加按钮
