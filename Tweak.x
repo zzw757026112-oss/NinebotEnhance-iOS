@@ -717,6 +717,14 @@ static double         gSpeedKmh     = 0;
 static CFAbsoluteTime gSpeedAt      = 0;
 static BOOL           gWasOverspeed = NO;
 
+// 百变仪表行程统计（v0.7.30）：GPS 累计里程 + 最高速，从插件加载后开始记，不持久化、不重置
+static double gTripDistanceKm = 0;
+static double gTripMaxSpeedKmh = 0;
+static CLLocation *gTripLastLoc = nil;
+// 百变仪表真实车辆数据（v0.7.30）：设备页 label 钩子捕获的原文真值（自定义显示替换前的值）；-1 = 还没读到
+static int gRealBatteryPct = -1;
+static double gRealRangeKm = -1;
+
 // 超速语音朗读（0.3.8）：合成器 static 持有，边沿触发时读一次；
 //  局部变量说到一半会被释放、没声——所以必须长期持有。
 static AVSpeechSynthesizer *gSpeechSynth = nil;
@@ -755,6 +763,11 @@ static BOOL NEHUDShowSlot(void) {
 }
 static BOOL NEHUDSpeedAlert(void) {
     id v = [[NSUserDefaults standardUserDefaults] objectForKey:@"NEHUDSpeedAlert"];
+    return v ? [v boolValue] : NO;
+}
+// 百变仪表：超维引擎主题开关（v0.7.30，默认关；key: NEThemeHyperdrive）
+static BOOL NEThemeHyperdriveEnabled(void) {
+    id v = [[NSUserDefaults standardUserDefaults] objectForKey:@"NEThemeHyperdrive"];
     return v ? [v boolValue] : NO;
 }
 // 限速 km/h：默认 60，读出来 clamp 到 30–120
@@ -1520,8 +1533,54 @@ static NSString *NEValueForKnownLabel(UILabel *label) {
     return aval;
 }
 
+// 百变仪表：捕获设备页真实电量/续航（v0.7.30）。
+// label 钩子收到的原文就是 App 的真值——自定义显示替换前先记下来，
+// 这样主题里显示的永远是真电量/真续航，绝不会是用户自定义的 9999。
+// 只在主题开着时跑（关着时零开销）；读到的值存全局，主题渲染时直接取。
+static void NEThemeCaptureLabelValue(NSString *text, UILabel *label) {
+    if (!NEThemeHyperdriveEnabled()) return;
+    if (!text.length || !label) return;
+    NSString *t = [text stringByTrimmingCharactersInSet:
+                   [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (!t.length) return;
+    // 电量：裸整数 0-100 + 旁边有 %（BatteryView 那边；“旁边有 % 就是电量”是现有代码的认定）
+    {
+        NSScanner *sc = [NSScanner scannerWithString:t];
+        int v = 0;
+        if ([sc scanInt:&v] && [sc isAtEnd] && v >= 0 && v <= 100 &&
+            NEHasAdjacentPercentLabel(label)) {
+            [gDataLock lock];
+            gRealBatteryPct = v;
+            [gDataLock unlock];
+            return;
+        }
+    }
+    // 续航：裸数字（可带 km）+ MileageView 祖先/框内/“续航”兄弟（沿用现有续航认定）
+    {
+        NSScanner *sc = [NSScanner scannerWithString:t];
+        double v = 0;
+        if ([sc scanDouble:&v] && v >= 0 && v <= 1000) {
+            NSString *rest = [[t substringFromIndex:[sc scanLocation]]
+                              stringByTrimmingCharactersInSet:
+                              [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+            if (rest.length == 0 || [rest isEqualToString:@"km"] ||
+                [rest isEqualToString:@"公里"]) {
+                if (NEHasAncestorWithClassContaining(label, @"MileageView") ||
+                    NEIsLabelInsideMileageView(label) ||
+                    NEHasSiblingLabelContaining(label, @"续航")) {
+                    [gDataLock lock];
+                    gRealRangeKm = v;
+                    [gDataLock unlock];
+                    return;
+                }
+            }
+        }
+    }
+}
+
 static void NE_UILabel_setText(id self, SEL _cmd, NSString *text) {
     if (text.length > 0 && [self isKindOfClass:[UILabel class]]) {
+        NEThemeCaptureLabelValue(text, (UILabel *)self);
         NSString *known = NEValueForKnownLabel((UILabel *)self);
         if (known) { orig_UILabel_setText(self, _cmd, known); return; }
         NSString *field = nil; BOOL separate = NO;
@@ -1546,6 +1605,7 @@ static void NE_UILabel_setText(id self, SEL _cmd, NSString *text) {
 
 static void NE_UILabel_setAttributedText(id self, SEL _cmd, NSAttributedString *attr) {
     if (attr.length > 0 && [self isKindOfClass:[UILabel class]]) {
+        NEThemeCaptureLabelValue(attr.string, (UILabel *)self);
         NSString *known = NEValueForKnownLabel((UILabel *)self);
         if (known) {
             orig_UILabel_setAttributedText(self, _cmd,
@@ -1653,7 +1713,7 @@ static void NEInstallLabelHookIfNeeded(void) {
     if (gLabelHookInstalled) return;
     if (!gValidity9999 && !gNCoins && !gMileage && !gLevel && !gTitle && !gSignDays &&
         !gDeviceName && !gDeviceRange && !gPosts && !gFollowing && !gFollowers &&
-        !gHasVehicleImage) return;
+        !gHasVehicleImage && !NEThemeHyperdriveEnabled()) return;
     Class cls = objc_getClass("UILabel");
     if (!cls || !class_getInstanceMethod(cls, @selector(setText:))) {
         os_log(gLog, "[LBL] UILabel/setText: 不存在，不装钩子");
@@ -3622,6 +3682,13 @@ static void RefreshWeatherIfNeeded(void) {
         [gDataLock lock];
         gSpeedKmh = kmh;
         gSpeedAt = CFAbsoluteTimeGetCurrent();
+        // 百变仪表行程统计（v0.7.30）：累计位移 + 最高速（从插件加载后开始记）
+        if (gTripLastLoc) {
+            CLLocationDistance d = [loc distanceFromLocation:gTripLastLoc];
+            if (d >= 0 && d < 1000) gTripDistanceKm += d / 1000.0;
+        }
+        gTripLastLoc = loc;
+        if (kmh > gTripMaxSpeedKmh) gTripMaxSpeedKmh = kmh;
         [gDataLock unlock];
         if (NEHUDSpeedAlert()) {
             NSInteger limit = NEHUDSpeedLimit();
@@ -3655,9 +3722,10 @@ static void RefreshWeatherIfNeeded(void) {
 
 // 超速提醒或翻页时钟开 → 连续定位（best 精度）；都关 → 恢复单次定位
 // （3km 精度，只够天气用）。主线程调（gLocMgr 在主队列创建，回调也在主队列）。
+// v0.7.30：百变仪表开着也要连续定位（GPS 车速 + 里程累计）。
 static void NEApplySpeedLocationMode(void) {
     if (!gLocMgr) return;
-    if (NEHUDSpeedAlert() || NEHUDShowSlot()) {
+    if (NEHUDSpeedAlert() || NEHUDShowSlot() || NEThemeHyperdriveEnabled()) {
         gLocMgr.desiredAccuracy = kCLLocationAccuracyBest;
         [gLocMgr startUpdatingLocation];
     } else {
@@ -4574,6 +4642,189 @@ static CGImageRef OverlayForSize(size_t w, size_t h) {
     return out;
 }
 
+// ---------------- 百变仪表：超维引擎主题（v0.7.30）----------------
+// NinebotDashX HyperdriveTheme 的 Objective-C 翻写（CoreGraphics）。
+// 848×480 全屏画，第一笔就是不透明深蓝底（直接盖掉官方原画面）。
+// 右上角不画东西（车自带的右上角信息卡在那）；功率/电压没有数据源不画，
+// 中央速度下方的功率行改成「极速 XX km/h」（GPS 最高速，青色等宽字）。
+// 坐标系：先翻转成 y 朝下（与 NinebotDashX DashboardRenderer 同一套），
+// 再缩放到 848×480 设计空间，画法照抄 Swift 原版。
+static UIColor *NEThemePowerColor(double fraction) {
+    if (fraction < 0.35) return [UIColor colorWithRed:0.13 green:0.83 blue:0.93 alpha:1]; // cyan
+    if (fraction < 0.6)  return [UIColor colorWithRed:1.0 green:0.62 blue:0.04 alpha:1];  // amber
+    if (fraction < 0.8)  return [UIColor colorWithRed:1.0 green:0.35 blue:0.1 alpha:1];   // orange
+    if (fraction < 0.95) return [UIColor colorWithRed:1.0 green:0.15 blue:0.3 alpha:1];   // redline
+    return [UIColor colorWithRed:1.0 green:0.2 blue:0.65 alpha:1]; // pink
+}
+static UIColor *NEThemeBatteryColor(int pct) {
+    if (pct < 0) return [UIColor darkGrayColor];
+    if (pct > 50) return [UIColor colorWithRed:0.2 green:0.9 blue:0.45 alpha:1]; // green
+    if (pct > 20) return [UIColor colorWithRed:1.0 green:0.62 blue:0.04 alpha:1]; // amber
+    return [UIColor colorWithRed:1.0 green:0.15 blue:0.3 alpha:1]; // redline
+}
+// 圆弧（角度制，0 = 12 点方向，顺时针；照抄 DashCanvas.arc 的换算）
+static void NEThemeArc(CGContextRef ctx, CGFloat cx, CGFloat cy, CGFloat radius,
+                       CGFloat startDeg, CGFloat endDeg, UIColor *color, CGFloat width) {
+    CGFloat s = (startDeg - 90) * M_PI / 180.0;
+    CGFloat e = (endDeg - 90) * M_PI / 180.0;
+    CGContextSaveGState(ctx);
+    CGContextSetStrokeColorWithColor(ctx, color.CGColor);
+    CGContextSetLineWidth(ctx, width);
+    CGContextSetLineCap(ctx, kCGLineCapButt);
+    CGContextAddArc(ctx, cx, cy, radius, s, e, 0);
+    CGContextStrokePath(ctx);
+    CGContextRestoreGState(ctx);
+}
+static void NEThemeDrawText(CGContextRef ctx, NSString *str, CGFloat x, CGFloat y,
+                            UIFont *font, UIColor *color, UIColor *shadowColor) {
+    NSMutableParagraphStyle *para = [[NSMutableParagraphStyle alloc] init];
+    para.alignment = NSTextAlignmentLeft;
+    para.lineBreakMode = NSLineBreakByClipping;
+    NSMutableDictionary *attrs = [NSMutableDictionary dictionary];
+    attrs[NSFontAttributeName] = font;
+    attrs[NSForegroundColorAttributeName] = color;
+    attrs[NSParagraphStyleAttributeName] = para;
+    if (shadowColor) {
+        NSShadow *sh = [[NSShadow alloc] init];
+        sh.shadowColor = shadowColor;
+        sh.shadowBlurRadius = 6;
+        sh.shadowOffset = CGSizeZero;
+        attrs[NSShadowAttributeName] = sh;
+    }
+    [str drawWithRect:CGRectMake(x, y, 848 - x, font.lineHeight * 1.4)
+              options:NSStringDrawingUsesLineFragmentOrigin | NSStringDrawingTruncatesLastVisibleLine
+           attributes:attrs context:nil];
+}
+static void NEThemeDrawCenteredText(CGContextRef ctx, NSString *str, CGFloat centerX, CGFloat y,
+                                    UIFont *font, UIColor *color, UIColor *shadowColor) {
+    CGSize sz = [str sizeWithAttributes:@{NSFontAttributeName: font}];
+    NEThemeDrawText(ctx, str, centerX - sz.width / 2, y, font, color, shadowColor);
+}
+static CGImageRef NEThemeHyperdriveFrame(size_t w, size_t h) {
+    if (w == 0 || h == 0) return NULL;
+    // 快照：车速（3 秒内才新鲜，否则按 0）、电量、续航、里程、最高速
+    [gDataLock lock];
+    double speedKmh = gSpeedKmh;
+    CFAbsoluteTime speedAt = gSpeedAt;
+    int batteryPct = gRealBatteryPct;
+    double rangeKm = gRealRangeKm;
+    double tripKm = gTripDistanceKm;
+    double maxSpeed = gTripMaxSpeedKmh;
+    [gDataLock unlock];
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if ((now - speedAt) > 3.0) speedKmh = 0;
+    if (speedKmh < 0) speedKmh = 0;
+
+    const CGFloat W = 848, H = 480;
+    CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
+    CGContextRef ctx = CGBitmapContextCreate(NULL, w, h, 8, 0, cs,
+        kCGImageAlphaPremultipliedFirst | kCGBitmapByteOrder32Little);
+    CGColorSpaceRelease(cs);
+    if (!ctx) return NULL;
+
+    // 翻转成 y 朝下，再缩放到 848×480 设计空间
+    CGContextTranslateCTM(ctx, 0, (CGFloat)h);
+    CGContextScaleCTM(ctx, 1, -1);
+    CGContextSetTextMatrix(ctx, CGAffineTransformIdentity);
+    CGContextScaleCTM(ctx, (CGFloat)w / W, (CGFloat)h / H);
+
+    CGFloat fracSpeed = MIN(1.0, speedKmh / 120.0);
+    CGFloat cx = W / 2, cy = H / 2 + 10;
+    NSTimeInterval t = [[NSProcessInfo processInfo] systemUptime];
+    UIColor *cyan = [UIColor colorWithRed:0.13 green:0.83 blue:0.93 alpha:1];
+
+    // 底：不透明深蓝，全屏盖掉官方原画面
+    CGContextSetFillColorWithColor(ctx, [UIColor colorWithRed:0.02 green:0.02 blue:0.08 alpha:1].CGColor);
+    CGContextFillRect(ctx, CGRectMake(0, 0, W, H));
+
+    // 星流背景：36 条，随时间 + 车速动
+    for (int i = 0; i < 36; i++) {
+        double seed = i * 0.6180339887;
+        double angle = seed * M_PI * 2;
+        double speedFactor = 0.3 + fracSpeed * 2.2;
+        double phase = fmod(t * speedFactor + seed * 7, 1.0);
+        if (phase < 0) phase += 1.0;
+        double r1 = 60 + phase * (H * 0.9);
+        double len = 8 + phase * 40 * (0.4 + fracSpeed * 2);
+        CGFloat x1 = cx + cos(angle) * r1, y1 = cy + sin(angle) * r1 * 0.55;
+        CGFloat x2 = cx + cos(angle) * (r1 + len), y2 = cy + sin(angle) * (r1 + len) * 0.55;
+        CGContextSaveGState(ctx);
+        CGContextSetStrokeColorWithColor(ctx, [cyan colorWithAlphaComponent:(0.05 + phase * 0.25)].CGColor);
+        CGContextSetLineWidth(ctx, 1.5);
+        CGContextMoveToPoint(ctx, x1, y1);
+        CGContextAddLineToPoint(ctx, x2, y2);
+        CGContextStrokePath(ctx);
+        CGContextRestoreGState(ctx);
+    }
+
+    // 60 段霓虹速度环（随车速点亮，颜色按段号走 powerColor）
+    const int segments = 60;
+    int lit = (int)lround(fracSpeed * segments);
+    CGFloat radius = H * 0.4;
+    for (int i = 0; i < segments; i++) {
+        CGFloat a0 = (CGFloat)i / segments * 360 - 90;
+        CGFloat gap = 360.0 / segments;
+        UIColor *color = (i < lit)
+            ? NEThemePowerColor((double)i / segments)
+            : [UIColor colorWithWhite:0.15 alpha:1];
+        NEThemeArc(ctx, cx, cy, radius, a0 + 92, a0 + 92 + gap * 0.72, color, 10);
+    }
+
+    // 涡轮环：8 瓣，随里程旋转
+    double rotation = fmod(tripKm * 40, 360.0);
+    if (rotation < 0) rotation += 360.0;
+    for (int i = 0; i < 8; i++) {
+        CGFloat a = rotation + i * 45;
+        CGFloat rad = (a - 90) * M_PI / 180.0;
+        CGFloat p1x = cx + cos(rad) * (radius + 22), p1y = cy + sin(rad) * (radius + 22);
+        CGFloat p2x = cx + cos(rad) * (radius + 34), p2y = cy + sin(rad) * (radius + 34);
+        CGContextSaveGState(ctx);
+        CGContextSetStrokeColorWithColor(ctx, [cyan colorWithAlphaComponent:0.5].CGColor);
+        CGContextSetLineWidth(ctx, 3);
+        CGContextMoveToPoint(ctx, p1x, p1y);
+        CGContextAddLineToPoint(ctx, p2x, p2y);
+        CGContextStrokePath(ctx);
+        CGContextRestoreGState(ctx);
+    }
+
+    // 中央速度数字（等宽粗体 110，白字 + 青色阴影）
+    NSString *speedStr = [NSString stringWithFormat:@"%.0f", speedKmh];
+    UIFont *speedFont = [UIFont monospacedDigitSystemFontOfSize:110 weight:UIFontWeightBold];
+    NEThemeDrawCenteredText(ctx, speedStr, cx, cy - 66, speedFont, [UIColor whiteColor],
+                            [cyan colorWithAlphaComponent:0.8]);
+    NEThemeDrawCenteredText(ctx, @"km/h", cx, cy + 50,
+                            [UIFont monospacedDigitSystemFontOfSize:20 weight:UIFontWeightSemibold],
+                            [cyan colorWithAlphaComponent:0.8], nil);
+    // 极速（原功率行改成极速；功率无数据源，以后也不放功率）
+    NSString *maxStr = [NSString stringWithFormat:@"极速 %d km/h", (int)lround(maxSpeed)];
+    NEThemeDrawCenteredText(ctx, maxStr, cx, cy + 86,
+                            [UIFont monospacedDigitSystemFontOfSize:24 weight:UIFontWeightBold],
+                            cyan, nil);
+
+    // 电量左下（真值；没读到显示 --）
+    NSString *battMain = (batteryPct >= 0) ? [NSString stringWithFormat:@"%d%%", batteryPct] : @"--";
+    NEThemeDrawText(ctx, battMain, 24, H - 78,
+                    [UIFont monospacedDigitSystemFontOfSize:30 weight:UIFontWeightBold],
+                    NEThemeBatteryColor(batteryPct), nil);
+    if (rangeKm >= 0) {
+        NSString *battSub = [NSString stringWithFormat:@"续航 %.0fkm", rangeKm];
+        NEThemeDrawText(ctx, battSub, 24, H - 44,
+                        [UIFont monospacedDigitSystemFontOfSize:14 weight:UIFontWeightMedium],
+                        [UIColor colorWithWhite:0.6 alpha:1], nil);
+    }
+
+    // 里程右下
+    NSString *tripStr = [NSString stringWithFormat:@"%.1f km", tripKm];
+    UIFont *tripFont = [UIFont monospacedDigitSystemFontOfSize:24 weight:UIFontWeightBold];
+    CGSize tripSz = [tripStr sizeWithAttributes:@{NSFontAttributeName: tripFont}];
+    NEThemeDrawText(ctx, tripStr, W - tripSz.width - 24, H - 72, tripFont,
+                    [UIColor colorWithWhite:0.8 alpha:1], nil);
+
+    CGImageRef out = CGBitmapContextCreateImage(ctx);
+    CGContextRelease(ctx);
+    return out;
+}
+
 // 原画面 + 叠加层合成一张新图。全程不翻转：
 // 原图直接画（v0.1.1/0.1.2 已证明这样导航是正的），叠加层也是
 // 直接画——RenderOverlay 本版已不再翻转，出来的就是正向图。
@@ -4584,6 +4835,8 @@ static CGImageRef OverlayForSize(size_t w, size_t h) {
 static CGImageRef CompositeWithOverlay(CGImageRef original) {
     size_t w = CGImageGetWidth(original), h = CGImageGetHeight(original);
     if (w == 0 || h == 0) return NULL;
+    // 百变仪表（v0.7.30）：开关开时只画超维引擎主题一整帧，不画原图、不画小胶囊/翻页时钟
+    if (NEThemeHyperdriveEnabled()) return NEThemeHyperdriveFrame(w, h);
     CGImageRef overlay = OverlayForSize(w, h);
     if (!overlay) return NULL;
 
@@ -5740,7 +5993,7 @@ static void NEAutoSignInShowResultPopupOnMain(BOOL success) {
         (win.bounds.size.width - cardW) / 2, (win.bounds.size.height - cardH) / 2, cardW, cardH)];
     card.backgroundColor = [UIColor clearColor];
     card.layer.cornerRadius = 12;
-    // v0.7.29：亮边加粗加亮（2pt / alpha 0.9），比设置页卡片的 1pt / 0.65 更明显
+    // v0.7.30：亮边加粗加亮（2pt / alpha 0.9），比设置页卡片的 1pt / 0.65 更明显
     card.layer.borderColor = [[UIColor colorWithWhite:1 alpha:0.9] CGColor];
     card.layer.borderWidth = 2;
     card.layer.shadowColor = [UIColor blackColor].CGColor;
@@ -6505,6 +6758,7 @@ static const char NENavGroupKey = 0;    // 设置页：“导航增强”折叠�
 static const char NESignInRecordKey = 0; // 设置页：自动签到记录 label
 static const char NEShareRecordKey = 0; // 设置页：自动分享记录 label（v0.6.6）
 static const char NEELKGroupKey = 0;    // 设置页：“七彩日行灯”折叠容器（v0.7.0）
+static const char NEThemeGroupKey = 0;  // 设置页：“百变仪表”折叠容器（v0.7.30）
 static const char NEELKStatusKey = 0;   // 设置页：日行灯状态 label（v0.7.0）
 static const char NEELKControlsKey = 0; // 设置页：日行灯命令控件（未连接时禁用，v0.7.0）
 static const char NEELKBrightnessKey = 0; // 设置页：日行灯亮度值 label（v0.7.0）
@@ -7487,6 +7741,24 @@ static void NECheckSettingsButton(void) {
     [stack addArrangedSubview:[self groupHeader:@"七彩日行灯" tag:2]];
     [stack addArrangedSubview:elkCard];
 
+    // ---- 百变仪表组（默认折叠；v0.7.30）----
+    UIStackView *themeStack = [UIStackView new];
+    themeStack.axis = UILayoutConstraintAxisVertical;
+    themeStack.spacing = 0;
+    [themeStack addArrangedSubview:[self switchRow:@"超维引擎主题" key:@"NEThemeHyperdrive" on:NEThemeHyperdriveEnabled()]];
+    UILabel *themeNote = [UILabel new];
+    themeNote.text = @"投屏时用超维引擎仪表替换官方仪表，电量续航为实车数据。";
+    themeNote.font = [UIFont systemFontOfSize:13];
+    themeNote.textColor = [UIColor secondaryLabelColor];
+    themeNote.numberOfLines = 0;
+    [themeStack addArrangedSubview:[self ne_footnoteView:themeNote]];
+    [self ne_styleSeparatorsInStack:themeStack];
+    UIView *themeCard = [self ne_cardWrappingStack:themeStack];
+    themeCard.hidden = YES; // 默认折叠，折叠状态存在卡片上
+    objc_setAssociatedObject(self, &NEThemeGroupKey, themeCard,
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    [stack addArrangedSubview:[self groupHeader:@"百变仪表" tag:3]];
+    [stack addArrangedSubview:themeCard];
 
     // ---- 关于卡（填补底下空白）----
     UIStackView *aboutStack = [UIStackView new];
@@ -7500,7 +7772,7 @@ static void NECheckSettingsButton(void) {
     aboutName.text = @"Ninebot pro+";
     aboutName.font = [UIFont boldSystemFontOfSize:16];
     UILabel *aboutVer = [UILabel new];
-    aboutVer.text = @"0.7.29";
+    aboutVer.text = @"0.7.30";
     aboutVer.font = [UIFont systemFontOfSize:15];
     aboutVer.textColor = [UIColor secondaryLabelColor];
     [aboutTitleRow addArrangedSubview:aboutName];
@@ -7782,7 +8054,7 @@ static void NECheckSettingsButton(void) {
 }
 
 // v0.3.9 追加：折叠分组头（标题 + ▸/▾ 箭头），点一下展开/收起。
-// tag：0 美化娱乐，1 导航增强。折叠状态不持久化，每次进设置页默认都折叠。
+// tag：0 美化娱乐，1 导航增强，2 七彩日行灯，3 百变仪表。折叠状态不持久化，每次进设置页默认都折叠。
 - (UIButton *)groupHeader:(NSString *)title tag:(NSInteger)tag {
     // v0.7.13：系统按钮点按时会自动把标题色变淡一下（高亮态），看着就是
     // 闪一下。改自定义按钮（不自动变色），Normal/Highlighted 两状态的
@@ -7802,12 +8074,14 @@ static void NECheckSettingsButton(void) {
 
 - (void)groupHeaderTapped:(UIButton *)sender {
     const char *key = (sender.tag == 0) ? &NEBeautyGroupKey
-        : (sender.tag == 1) ? &NENavGroupKey : &NEELKGroupKey;
+        : (sender.tag == 1) ? &NENavGroupKey
+        : (sender.tag == 2) ? &NEELKGroupKey : &NEThemeGroupKey;
     UIView *container = objc_getAssociatedObject(self, key); // 卡片（折叠状态存在卡片上）
     if (!container) return;
     BOOL willShow = container.hidden;
     NSString *title = (sender.tag == 0) ? @"美化娱乐"
-        : (sender.tag == 1) ? @"导航增强" : @"七彩日行灯";
+        : (sender.tag == 1) ? @"导航增强"
+        : (sender.tag == 2) ? @"七彩日行灯" : @"百变仪表";
     [sender setTitle:[NSString stringWithFormat:@"%@ %@", willShow ? @"▾" : @"▸", title]
             forState:UIControlStateNormal];
     // v0.7.19：瞬间切换，不做动画。动画六轮都没修好，改回 0.7.12
@@ -8009,7 +8283,12 @@ static void NECheckSettingsButton(void) {
         [[NSUserDefaults standardUserDefaults] setBool:sw.isOn forKey:key];
     // 超速提醒或翻页时钟开关变化时，立刻切换定位模式（连续定位开/关）
     if ([key isEqualToString:@"NEHUDSpeedAlert"] ||
-        [key isEqualToString:@"NEHUDShowSlot"]) NEApplySpeedLocationMode();
+        [key isEqualToString:@"NEHUDShowSlot"] ||
+        [key isEqualToString:@"NEThemeHyperdrive"]) NEApplySpeedLocationMode();
+    // v0.7.30 百变仪表：开关开着就装 label 钩子（读设备页真电量/真续航）
+    if ([key isEqualToString:@"NEThemeHyperdrive"] && sw.isOn) {
+        NEInstallLabelHookIfNeeded();
+    }
     // v0.3.9：有效期 9999 开关——同步缓存并按需装钩子（关掉后钩子留着但直接走原实现）
     if ([key isEqualToString:@"NEValidity9999"]) {
         gValidity9999 = sw.isOn;
@@ -8834,7 +9113,8 @@ static void NEProbeStart(void) {
             gHasBgImage = YES;
     }
     // v0.7.21：最近行驶文案跟着车辆图走——有自定义车辆图也要装文字钩子。
-    if (gValidity9999 || gNCoins || gMileage || gLevel || gTitle || gSignDays || gHasVehicleImage)
+    // v0.7.30：百变仪表开着也要装（读设备页真电量/真续航）。
+    if (gValidity9999 || gNCoins || gMileage || gLevel || gTitle || gSignDays || gHasVehicleImage || NEThemeHyperdriveEnabled())
         NEInstallLabelHookIfNeeded();
     if (gValidity9999 || gNCoins || gMileage || gLevel || gTitle || gSignDays || gHasVehicleImage)
         NEInstallRNTextHookIfNeeded();
