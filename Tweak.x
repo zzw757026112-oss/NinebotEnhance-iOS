@@ -3866,7 +3866,7 @@ static void NERefreshMusic(void) {
     NSString *title = info[MPMediaItemPropertyTitle];
     NSString *artist = info[MPMediaItemPropertyArtist];
     double elapsed = [info[MPNowPlayingInfoPropertyElapsedPlaybackTime] doubleValue];
-    double duration = [info[MPNowPlayingInfoPropertyPlaybackDuration] doubleValue];
+    double duration = [info[MPMediaItemPropertyPlaybackDuration] doubleValue];
     double rate = 1;
     if (info[MPNowPlayingInfoPropertyPlaybackRate])
         rate = [info[MPNowPlayingInfoPropertyPlaybackRate] doubleValue];
